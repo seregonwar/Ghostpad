@@ -1,0 +1,3078 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * shellui_pad.c — Inject a pad-forwarding thread into a system process
+ *
+ * Injects a stub thread into the first attachable system process that has
+ * libScePad loaded and can create/bind a virtual controller through the
+ * SceShellCore/SceShellUI path. Once running, 60 Hz pad updates arrive via
+ * mdbg_copyin when a valid write handle exists.
+ *
+ * == Phase ordering (fixes PS5 freeze) ==
+ *   OLD (broken): write code cave → PT_ATTACH (fails) → INT3 left in live code
+ *   NEW (fixed):  PT_ATTACH first → only write if attach succeeds → PT_DETACH
+ *
+ * == Code cave (Phase 5) ==
+ *   Use the library init/fini section directly as the conservative injection
+ *   path. Target-side mmap experimentation proved less stable on retail.
+ *
+ * == Injection targets (Phase 4) ==
+ *   SceShellUI cannot be ptraced (EINVAL, authid protected).  Candidates are
+ *   tried in order; the first that accepts PT_ATTACH is used.
+ */
+
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <errno.h>
+
+#include <machine/reg.h>
+#include <sys/ptrace.h>
+#include <sys/syscall.h>
+#include <sys/sysctl.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+
+#include <ps5/kernel.h>
+#include <ps5/klog.h>
+#include <ps5/mdbg.h>
+#include <ps5/nid.h>
+
+#include "shellui_pad.h"
+
+#define GHOSTPAD_ASSIGNMENT_SCREEN_RET ((int32_t)0x803B0006u)
+#define GHOSTPAD_AUTO_DISMISS_ACTIVE   ((int32_t)0x44534D31u) /* "DSM1" */
+#define GHOSTPAD_AUTO_DISMISS_DONE     ((int32_t)0x44534D32u) /* "DSM2" */
+#define GHOSTPAD_ENABLE_PTRACE_UPDATE_FALLBACK 0
+
+/* ============================================================
+ * sys_ptrace — elevate credentials for ptrace, then restore
+ * (exact pattern from sdk/samples/test_privileges/main.c)
+ * ============================================================ */
+static int
+sys_ptrace(int request, pid_t pid, caddr_t addr, int data)
+{
+    uint8_t privcaps[16] = {
+        0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+        0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff
+    };
+    pid_t   mypid = getpid();
+    uint8_t caps[16];
+    uint64_t authid;
+    int ret;
+
+    if (!(authid = kernel_get_ucred_authid(mypid))) return -1;
+    if (kernel_get_ucred_caps(mypid, caps))          return -1;
+    if (kernel_set_ucred_authid(mypid, 0x4800000000010003l)) return -1;
+    if (kernel_set_ucred_caps(mypid, privcaps))      return -1;
+
+    ret = (int)__syscall(SYS_ptrace, request, pid, addr, data);
+
+    kernel_set_ucred_authid(mypid, authid);
+    kernel_set_ucred_caps(mypid, caps);
+    return ret;
+}
+
+/* ============================================================
+ * find_pid — locate a process by thread name via sysctl
+ * Offsets from test_privileges (ki_pid@72, ki_tdname@447).
+ * ============================================================ */
+static size_t
+find_pids(const char *name, pid_t *pids, size_t max_pids)
+{
+    int mib[4] = {1, 14, 8, 0};
+    pid_t mypid = getpid();
+    size_t buf_size;
+    uint8_t *buf;
+    size_t count = 0;
+
+    if (!pids || max_pids == 0) return 0;
+    if (sysctl(mib, 4, NULL, &buf_size, NULL, 0)) return 0;
+    if (!(buf = malloc(buf_size)))                 return 0;
+    if (sysctl(mib, 4, buf, &buf_size, NULL, 0)) { free(buf); return 0; }
+
+    for (uint8_t *ptr = buf; ptr < (buf + buf_size);) {
+        int   ki_structsize = *(int   *)ptr;
+        pid_t ki_pid        = *(pid_t *)&ptr[72];
+        char *ki_tdname     = (char   *)&ptr[447];
+        size_t pi;
+        int seen = 0;
+
+        ptr += ki_structsize;
+        if (strcmp(name, ki_tdname) || ki_pid == mypid) {
+            continue;
+        }
+        for (pi = 0; pi < count; pi++) {
+            if (pids[pi] == ki_pid) {
+                seen = 1;
+                break;
+            }
+        }
+        if (seen || count >= max_pids) {
+            continue;
+        }
+        pids[count++] = ki_pid;
+    }
+
+    for (size_t i = 1; i < count; i++) {
+        pid_t pid = pids[i];
+        size_t j = i;
+        while (j > 0 && pids[j - 1] > pid) {
+            pids[j] = pids[j - 1];
+            j--;
+        }
+        pids[j] = pid;
+    }
+
+    free(buf);
+    return count;
+}
+
+/* ============================================================
+ * resolve_sym — look up a symbol in a remote process library.
+ * ============================================================ */
+static intptr_t
+resolve_sym(pid_t pid, uint32_t lib_handle, const char *sym)
+{
+    intptr_t addr = kernel_dynlib_dlsym(pid, lib_handle, sym);
+    if (addr) return addr;
+
+    char nid[12];
+    nid_encode(sym, nid);
+    addr = kernel_dynlib_resolve(pid, lib_handle, nid);
+    return addr;
+}
+
+/* ============================================================
+ * get_lib — wrapper around kernel_dynlib_handle with logging
+ * ============================================================ */
+static int
+get_lib(pid_t pid, const char *name, uint32_t *handle)
+{
+    *handle = 0;
+    int ret = kernel_dynlib_handle(pid, name, handle);
+    if (ret != 0 || *handle == 0) {
+        char sprx[64];
+        snprintf(sprx, sizeof(sprx), "%s.sprx", name);
+        ret = kernel_dynlib_handle(pid, sprx, handle);
+    }
+    klog_printf("[Ghostpad] dynlib_handle(%s) -> ret=%d handle=0x%x\n",
+                name, ret, *handle);
+    return (*handle != 0) ? 0 : -1;
+}
+
+/* ============================================================
+ * pt_io_write / pt_io_read — read/write process memory via PT_IO
+ * (safe while the process is stopped after PT_ATTACH)
+ * ============================================================ */
+static int
+pt_io_write(pid_t pid, intptr_t dst, const void *src, size_t len)
+{
+    struct ptrace_io_desc iod;
+    iod.piod_op    = PIOD_WRITE_D;
+    iod.piod_offs  = (void *)dst;
+    iod.piod_addr  = (void *)src;
+    iod.piod_len   = len;
+    return sys_ptrace(PT_IO, pid, (caddr_t)&iod, 0);
+}
+
+typedef struct {
+    int      valid;
+    int      attached;
+    pid_t    pid;
+    intptr_t args_kaddr;
+    intptr_t trap_rip;
+    intptr_t fn_setpriv;
+    intptr_t fn_setloginuser;
+    intptr_t fn_setusernumber;
+    intptr_t fn_setfocus;
+    intptr_t fn_usleep;
+    intptr_t fn_gethandle;
+    intptr_t fn_gethandle_ext;
+    intptr_t fn_open;
+    intptr_t fn_open_ext;
+    intptr_t fn_open_ext2;
+    intptr_t fn_insert;
+    intptr_t fn_vdi;
+    int32_t  pad_handle;
+    int32_t  use_insert;
+} ShellUiDirectState;
+
+static ShellUiDirectState g_shellui_direct_state = {0};
+static int32_t g_shellui_direct_last_stage = 0;
+static int64_t g_shellui_direct_last_value = 0;
+
+static void
+shellui_pad_direct_set_last_status(int32_t stage, int64_t value)
+{
+    g_shellui_direct_last_stage = stage;
+    g_shellui_direct_last_value = value;
+}
+
+void
+shellui_pad_direct_get_last_status(int32_t *stage, int64_t *value)
+{
+    if (stage) {
+        *stage = g_shellui_direct_last_stage;
+    }
+    if (value) {
+        *value = g_shellui_direct_last_value;
+    }
+}
+
+static int
+shellui_pad_direct_context_usable(pid_t shellui_pid, intptr_t args_kaddr)
+{
+    return g_shellui_direct_state.valid &&
+           g_shellui_direct_state.pid == shellui_pid &&
+           g_shellui_direct_state.args_kaddr == args_kaddr;
+}
+
+#if GHOSTPAD_ENABLE_PTRACE_UPDATE_FALLBACK
+static int
+shellui_pad_ptrace_update(pid_t shellui_pid, intptr_t args_kaddr,
+                          const void *pad_data, uint32_t pad_data_len,
+                          uint32_t new_seq)
+{
+    intptr_t data_field = args_kaddr + (intptr_t)offsetof(ShellUiPadArgs, pad_data);
+    intptr_t seq_field = args_kaddr + (intptr_t)offsetof(ShellUiPadArgs, seq);
+    int attach_errno = 0;
+
+    for (int attempt = 0; attempt < 20; attempt++) {
+        if (sys_ptrace(PT_ATTACH, shellui_pid, 0, 0) == 0) {
+            waitpid(shellui_pid, NULL, 0);
+            if (pt_io_write(shellui_pid, data_field, pad_data, pad_data_len) ||
+                pt_io_write(shellui_pid, seq_field, &new_seq, sizeof(new_seq))) {
+                int write_errno = errno;
+                sys_ptrace(PT_DETACH, shellui_pid, (caddr_t)1, 0);
+                klog_printf("[Ghostpad] shellui_pad_update ptrace write failed errno=%d pid=%d args=0x%lx seq=%u\n",
+                            write_errno, shellui_pid, (unsigned long)args_kaddr,
+                            new_seq);
+                return -1;
+            }
+            sys_ptrace(PT_DETACH, shellui_pid, (caddr_t)1, 0);
+            klog_printf("[Ghostpad] shellui_pad_update ptrace fallback wrote seq=%u pid=%d args=0x%lx\n",
+                        new_seq, shellui_pid, (unsigned long)args_kaddr);
+            return 0;
+        }
+        attach_errno = errno;
+        usleep(50000);
+    }
+
+    klog_printf("[Ghostpad] shellui_pad_update ptrace fallback attach failed errno=%d pid=%d args=0x%lx\n",
+                attach_errno, shellui_pid, (unsigned long)args_kaddr);
+    return -1;
+}
+#endif
+
+/* ============================================================
+ * pt_call — call fn(a1..a6) inside a STOPPED process.
+ * trap_rip must be the address of an 0xCC byte in pid's space.
+ * Returns fn's RAX return value.
+ * ============================================================ */
+static int64_t
+pt_call(pid_t pid, intptr_t fn, intptr_t trap_rip,
+        uint64_t a1, uint64_t a2, uint64_t a3,
+        uint64_t a4, uint64_t a5, uint64_t a6)
+{
+    struct reg regs, saved;
+    int status;
+
+    if (sys_ptrace(PT_GETREGS, pid, (caddr_t)&regs, 0)) return -1;
+    memcpy(&saved, &regs, sizeof(regs));
+
+    /* Skip x86-64 red zone (128 bytes below RSP), align to 16 bytes. */
+    intptr_t new_rsp = (regs.r_rsp - 256) & ~(intptr_t)0xf;
+
+    if (pt_io_write(pid, new_rsp, &trap_rip, 8)) return -1;
+
+    regs.r_rsp = new_rsp;
+    regs.r_rip = fn;
+    regs.r_rdi = a1;
+    regs.r_rsi = a2;
+    regs.r_rdx = a3;
+    regs.r_rcx = a4;
+    regs.r_r8  = a5;
+    regs.r_r9  = a6;
+
+    if (sys_ptrace(PT_SETREGS, pid, (caddr_t)&regs, 0)) return -1;
+    if (sys_ptrace(PT_CONTINUE, pid, (caddr_t)1, 0))    return -1;
+
+    /* Wait for our SIGTRAP; forward other signals so the process stays healthy.
+     * Use WNOHANG + 1 ms sleep so we never block forever if the INT3 doesn't fire
+     * (e.g. if the write failed silently or the process runs past trap_rip).
+     * SIGCHLD (17) is suppressed rather than forwarded: forwarding it while the
+     * main thread is executing injected code (pthread_create, pad IPC calls) has
+     * been observed to cause a kernel panic when SceShellUI's SIGCHLD handler
+     * runs concurrently with thread-creation internals. */
+    int got_trap = 0;
+    for (int total_ms = 0; total_ms < 5000; ) {
+        int r = waitpid(pid, &status, WNOHANG);
+        if (r < 0) {
+            klog_printf("[Ghostpad] pt_call: waitpid error errno=%d\n", errno);
+            break;
+        }
+        if (r == 0) {
+            usleep(1000);   /* 1 ms — process hasn't stopped yet */
+            total_ms++;
+            continue;
+        }
+        /* Process stopped */
+        if (!WIFSTOPPED(status)) {
+            klog_printf("[Ghostpad] pt_call: process exited status=0x%x\n", status);
+            sys_ptrace(PT_SETREGS, pid, (caddr_t)&saved, 0);
+            return -1;
+        }
+        int sig = WSTOPSIG(status);
+        if (sig == SIGTRAP) { got_trap = 1; break; }
+        /* Suppress SIGCHLD — forwarding it during injected execution causes panics */
+        int fwd = (sig == 17) ? 0 : sig;
+        if (fwd != sig)
+            klog_printf("[Ghostpad] pt_call: suppressing SIGCHLD\n");
+        else
+            klog_printf("[Ghostpad] pt_call: forwarding sig=%d\n", sig);
+        sys_ptrace(PT_CONTINUE, pid, (caddr_t)1, fwd);
+    }
+    if (!got_trap) {
+        klog_printf("[Ghostpad] pt_call: timed out waiting for SIGTRAP fn=0x%lx\n", fn);
+        sys_ptrace(PT_SETREGS, pid, (caddr_t)&saved, 0);
+        return -1;
+    }
+
+    if (sys_ptrace(PT_GETREGS, pid, (caddr_t)&regs, 0)) return -1;
+    int64_t retval = (int64_t)regs.r_rax;
+    klog_printf("[Ghostpad] pt_call: fn=0x%lx rip=0x%lx rax=0x%lx\n",
+                fn, (uint64_t)regs.r_rip, (uint64_t)retval);
+
+    sys_ptrace(PT_SETREGS, pid, (caddr_t)&saved, 0);
+    return retval;
+}
+
+static int64_t
+pt_call_with_copy(pid_t pid, intptr_t fn, intptr_t trap_rip,
+                  uint64_t a1, const void *buf, size_t len)
+{
+    struct reg regs, saved;
+    int status;
+    int got_trap = 0;
+    uint64_t retval = (uint64_t)-1;
+    size_t copy_len = (len + 15) & ~(size_t)15;
+    intptr_t ret_rsp;
+    intptr_t buf_addr;
+
+    if (sys_ptrace(PT_GETREGS, pid, (caddr_t)&regs, 0)) return -1;
+    memcpy(&saved, &regs, sizeof(regs));
+
+    ret_rsp = (regs.r_rsp - 256) & ~(intptr_t)0xf;
+    buf_addr = ret_rsp - (intptr_t)copy_len;
+
+    if (pt_io_write(pid, buf_addr, buf, len)) return -1;
+    if (pt_io_write(pid, ret_rsp, &trap_rip, 8)) return -1;
+
+    regs.r_rsp = ret_rsp;
+    regs.r_rip = fn;
+    regs.r_rdi = a1;
+    regs.r_rsi = (uint64_t)buf_addr;
+    regs.r_rdx = 0;
+    regs.r_rcx = 0;
+    regs.r_r8  = 0;
+    regs.r_r9  = 0;
+
+    if (sys_ptrace(PT_SETREGS, pid, (caddr_t)&regs, 0)) return -1;
+    if (sys_ptrace(PT_CONTINUE, pid, (caddr_t)1, 0))    return -1;
+
+    for (int total_ms = 0; total_ms < 5000; ) {
+        int r = waitpid(pid, &status, WNOHANG);
+        if (r < 0) {
+            klog_printf("[Ghostpad] pt_call_with_copy: waitpid error errno=%d\n", errno);
+            break;
+        }
+        if (r == 0) {
+            usleep(1000);
+            total_ms++;
+            continue;
+        }
+        if (!WIFSTOPPED(status)) {
+            klog_printf("[Ghostpad] pt_call_with_copy: process exited status=0x%x\n", status);
+            sys_ptrace(PT_SETREGS, pid, (caddr_t)&saved, 0);
+            return -1;
+        }
+        {
+            int sig = WSTOPSIG(status);
+            if (sig == SIGTRAP) {
+                got_trap = 1;
+                break;
+            }
+            sys_ptrace(PT_CONTINUE, pid, (caddr_t)1, (sig == 17) ? 0 : sig);
+        }
+    }
+    if (!got_trap) {
+        klog_printf("[Ghostpad] pt_call_with_copy: timed out waiting for SIGTRAP fn=0x%lx\n", fn);
+        sys_ptrace(PT_SETREGS, pid, (caddr_t)&saved, 0);
+        return -1;
+    }
+    if (sys_ptrace(PT_GETREGS, pid, (caddr_t)&regs, 0)) {
+        sys_ptrace(PT_SETREGS, pid, (caddr_t)&saved, 0);
+        return -1;
+    }
+    retval = (uint64_t)regs.r_rax;
+    sys_ptrace(PT_SETREGS, pid, (caddr_t)&saved, 0);
+    return (int64_t)retval;
+}
+
+/* ============================================================
+ * THE STUB — runs as a thread inside the target process.
+ *
+ * DESIGN: VDA is called from THIS running thread, not from pt_call.
+ * Testing confirmed that VDA always returns 0x803b0001 when called via
+ * pt_call (stopped-process main-thread context), but succeeds when called
+ * from a running injected thread.  The injector (pt_call) only calls
+ * scePadSetProcessPrivilege(1) — a process-level flag safe to set from
+ * the stopped main thread.  Everything else runs here.
+ *
+ * Thread sequence:
+ *   1. Sleep 500ms  (TLS, signal masks, stack guard fully initialized)
+ *   2. deleteDevice(0..15)  — clean up any orphan from a previous run
+ *   3. fp_vda(&param, 3)  — create virtual DualSense; exit on failure
+ *   4. Auto-press Cross  — dismiss "who is using this controller?" dialog
+ *   5. Insert loop  — forward pad data from main process at 60 Hz
+ *   6. fp_del(handle)  — delete virtual device on exit so next run is clean
+ *
+ * Rules: position-independent, no direct library calls, no globals/statics.
+ * All calls go through fp_* pointers in ShellUiPadArgs.
+ * ============================================================ */
+extern void shellui_stub(void *arg);
+extern void shellui_stub_end(void);
+
+__attribute__((noinline, section(".text.stub")))
+void shellui_stub(void *arg)
+{
+    ShellUiPadArgs *a = (ShellUiPadArgs *)arg;
+    int32_t assignment_hint = 0;
+    int32_t handle_from_vda_token = 0;
+    int32_t initial_pad_handle = a->pad_handle;
+
+    /* Early marker so the injector can distinguish "thread never ran" from
+     * "thread started and died before reaching ready=1". */
+    a->rc_log[15] = (int32_t)0x53545542u; /* "STUB" */
+
+    /* pad_handle semantics set by injector (shellui_pad_inject Step 6.5):
+     *   >= 0  injector obtained a handle via pt_call (stopped process)
+     *   -1    SceShellCore (server-side) — thread libScePad calls are safe
+     *   -2    client process (SceShellUI etc.) — ANY libScePad IPC deadlocks  */
+    int32_t vda_handle = a->pad_handle;
+    int32_t use_insert = 0;
+
+    if (vda_handle >= 0) {
+        /* ── FAST PATH ────────────────────────────────────────────────────────
+         * The injector already resolved a handle via pt_call while SceShellUI's
+         * main thread was stopped.  Skip ALL libScePad IPC here: SceShellUI's
+         * main thread owns the IPC socket and concurrent access from this thread
+         * deadlocks → kernel panic.
+         *
+         * scePadVirtualDeviceInsertData writes to a shared-memory ring buffer
+         * and is not an IPC round-trip, so it is safe
+         * to call from a secondary thread while the main thread uses the socket.
+         * ───────────────────────────────────────────────────────────────────── */
+        a->rc_log[0] = vda_handle;
+        /* Injector encoded use_insert hint in seq (0=VDI first, 1=fp_insert first).
+         * Reset seq to 0 so the insert loop starts clean. */
+        use_insert = (int32_t)a->seq;
+        a->seq = 0;
+
+        /* In legacy client targets, establish an explicit pad context before the
+         * assignment-screen follow-up. The main payload-side context setters
+         * are not authoritative for the client process, so do the same setup
+         * inside the recovered process before probing for the post-ASGN path. */
+        if (a->fp_setloginuser) {
+            a->rc_log[4] = a->fp_setloginuser(1);
+        }
+        if (a->fp_setusernumber) {
+            a->rc_log[5] = a->fp_setusernumber(1);
+        }
+        if (a->fp_setfocus) {
+            a->rc_log[6] = a->fp_setfocus(1, 0, 0, 0, 0, 0);
+        }
+
+        /*
+         * Assignment-screen attempt from a running client-process thread.
+         * If this succeeds, switch over to the virtual handle and drive it via
+         * VDI so the PS5 can show the assignment UI and then accept our Cross
+         * dismiss pulse.
+         */
+        if (a->fp_vda) {
+            int32_t uid_try[3];
+            int32_t ui;
+            uid_try[0] = 1;
+            uid_try[1] = a->userId;
+            uid_try[2] = 0x10000000;
+            for (ui = 0; ui < 3; ui++) {
+                struct { int32_t f[8]; } vdp;
+                int32_t vi;
+                int32_t vda_ret;
+                for (vi = 0; vi < 8; vi++) vdp.f[vi] = 0;
+                vdp.f[0] = 32;
+                vdp.f[1] = uid_try[ui];
+                vda_ret = a->fp_vda(&vdp, 3);
+                a->rc_log[ui] = vda_ret;
+                if (ui == 0) {
+                    a->rc_log[8]  = vdp.f[0];
+                    a->rc_log[9]  = vdp.f[1];
+                    a->rc_log[10] = vdp.f[2];
+                    a->rc_log[11] = vdp.f[3];
+                    a->rc_log[12] = vdp.f[4];
+                    a->rc_log[13] = vdp.f[5];
+                    a->rc_log[14] = vdp.f[6];
+                    a->rc_log[15] = vdp.f[7];
+                }
+                if (vda_ret >= 0) {
+                    vda_handle = vda_ret;
+                    use_insert = 0;
+                    a->pad_handle = vda_handle;
+                    a->rc_log[6] = (int32_t)0x60000001;
+                    a->rc_log[7] = vda_handle;
+                    break;
+                }
+                for (vi = 2; vi < 8; vi++) {
+                    if (vdp.f[vi] != 0 &&
+                        vdp.f[vi] != -1) {
+                        vda_handle = vdp.f[vi];
+                        use_insert = 0;
+                        assignment_hint = 0;
+                        a->pad_handle = vda_handle;
+                        a->rc_log[6] = (int32_t)0x60000002;
+                        a->rc_log[7] = vda_handle;
+                        break;
+                    }
+                }
+                if (!use_insert) {
+                    break;
+                }
+                if ((uint32_t)vda_ret == (uint32_t)GHOSTPAD_ASSIGNMENT_SCREEN_RET) {
+                    assignment_hint = 1;
+                    a->rc_log[7] = 0x4153474Eu; /* "ASGN" marker: assignment screen branch observed */
+                    a->fp_usleep(300000);
+                }
+            }
+        }
+
+        if (assignment_hint && (a->fp_gethandle || a->fp_gethandle_ext)) {
+            int32_t uid_try[3];
+            int32_t attempt;
+            int32_t ui;
+
+            uid_try[0] = 1;
+            uid_try[1] = a->userId;
+            uid_try[2] = 0x10000000;
+            for (attempt = 0; attempt < 30 && use_insert; attempt++) {
+                for (ui = 0; ui < 3 && use_insert; ui++) {
+                    int32_t idx;
+                    for (idx = 0; idx < 8 && use_insert; idx++) {
+                        int32_t gh = a->fp_gethandle_ext
+                            ? a->fp_gethandle_ext(uid_try[ui], 3, idx, 0, 0, 0)
+                            : a->fp_gethandle(uid_try[ui], 3, idx);
+                        a->rc_log[3] = gh;
+                        a->rc_log[6] = (attempt << 8) | (idx & 0xff);
+                        if (gh >= 0) {
+                            vda_handle = gh;
+                            use_insert = 0;
+                            a->rc_log[7] = 0x56444930; /* "VDI0" marker: recovered virtual handle after ASGN */
+                        }
+                    }
+                }
+                if (use_insert) {
+                    a->fp_usleep(150000);
+                }
+            }
+        }
+
+    } else {
+        /* ── SLOW PATH (SceShellCore -1, or client fallback -2) ─────────────
+         * Only reach here from server-side processes or as a last resort.
+         * 500ms sleep: let thread fully initialize (TLS, signal masks, stack). */
+        a->fp_usleep(500000);
+
+        /* setPriv: safe only for SceShellCore (-1); client (-2) would deadlock */
+        if (vda_handle == -1 && a->fp_setpriv) {
+            a->rc_log[2] = a->fp_setpriv(1);
+        }
+
+        if (vda_handle == -1) {
+            if (a->fp_setloginuser) {
+                a->rc_log[4] = a->fp_setloginuser(1);
+            }
+            if (a->fp_setusernumber) {
+                a->rc_log[5] = a->fp_setusernumber(1);
+            }
+            if (a->fp_setfocus) {
+                a->rc_log[6] = a->fp_setfocus(1, 0, 0, 0, 0, 0);
+            }
+        }
+
+        if (vda_handle == -2) {
+            a->rc_log[7] = (int32_t)-2;   /* marker: -2 sentinel received */
+            vda_handle = -1;
+        } else if (a->fp_vda) {
+            /* SceShellCore: server-side, thread VDA causes no IPC loop */
+            int32_t uid_try[3];
+            int32_t ui;
+            uid_try[0] = 1;
+            uid_try[1] = a->userId;
+            uid_try[2] = 0x10000000;
+            for (ui = 0; ui < 3 && vda_handle < 0; ui++) {
+                struct { int32_t f[8]; } vdp;
+                int32_t vi;
+                for (vi = 0; vi < 8; vi++) vdp.f[vi] = 0;
+                vdp.f[0] = 32;
+                vdp.f[1] = uid_try[ui];
+                int32_t vda_ret = a->fp_vda(&vdp, 3);
+                a->rc_log[ui] = vda_ret;
+                if (ui == 0) {
+                    a->rc_log[8]  = vdp.f[0];
+                    a->rc_log[9]  = vdp.f[1];
+                    a->rc_log[10] = vdp.f[2];
+                    a->rc_log[11] = vdp.f[3];
+                    a->rc_log[12] = vdp.f[4];
+                    a->rc_log[13] = vdp.f[5];
+                    a->rc_log[14] = vdp.f[6];
+                    a->rc_log[15] = vdp.f[7];
+                }
+                if (vda_ret >= 0) {
+                    vda_handle = vda_ret;
+                    a->pad_handle = vda_handle;
+                    a->rc_log[6] = (int32_t)0x60000001;
+                } else {
+                    for (vi = 2; vi < 8 && vda_handle < 0; vi++) {
+                        if (vdp.f[vi] != 0 &&
+                            vdp.f[vi] != -1) {
+                            vda_handle = vdp.f[vi];
+                            handle_from_vda_token = 1;
+                            a->pad_handle = vda_handle;
+                            a->rc_log[6] = (int32_t)0x60000002;
+                            a->rc_log[7] = vda_handle;
+                        }
+                    }
+                }
+                if ((uint32_t)vda_ret == (uint32_t)GHOSTPAD_ASSIGNMENT_SCREEN_RET) {
+                    assignment_hint = 1;
+                    a->rc_log[7] = 0x4153474Eu;
+                    a->fp_usleep(300000);
+                }
+            }
+        }
+
+        if (handle_from_vda_token && (a->fp_gethandle || a->fp_gethandle_ext)) {
+            int32_t uid_try[3];
+            int32_t ui;
+
+            uid_try[0] = 1;
+            uid_try[1] = a->userId;
+            uid_try[2] = 0x10000000;
+            for (ui = 0; ui < 3 && handle_from_vda_token; ui++) {
+                int32_t idx;
+                for (idx = 0; idx < 8 && handle_from_vda_token; idx++) {
+                    int32_t gh = a->fp_gethandle_ext
+                        ? a->fp_gethandle_ext(uid_try[ui], 3, idx, 0, 0, 0)
+                        : a->fp_gethandle(uid_try[ui], 3, idx);
+                    a->rc_log[3] = gh;
+                    if (gh >= 0) {
+                        vda_handle = gh;
+                        a->pad_handle = gh;
+                        a->rc_log[5] = (int32_t)0x70000001;
+                        a->rc_log[7] = gh;
+                        handle_from_vda_token = 0;
+                    }
+                }
+            }
+        }
+
+        if (handle_from_vda_token && (a->fp_open || a->fp_open_ext || a->fp_open_ext2)) {
+            int32_t uid_try[3];
+            int32_t ui;
+
+            uid_try[0] = 1;
+            uid_try[1] = a->userId;
+            uid_try[2] = 0x10000000;
+            for (ui = 0; ui < 3 && handle_from_vda_token; ui++) {
+                int32_t oh = a->fp_open_ext2
+                    ? a->fp_open_ext2(uid_try[ui], 3, 0, (void *)0, 0, 0)
+                    : (a->fp_open_ext
+                        ? a->fp_open_ext(uid_try[ui], 3, 0, (void *)0, 0, 0)
+                        : (a->fp_open ? a->fp_open(uid_try[ui], 3, 0, (void *)0) : -1));
+                a->rc_log[4] = oh;
+                if (oh >= 0) {
+                    vda_handle = oh;
+                    a->pad_handle = oh;
+                    a->rc_log[5] = (int32_t)0x70000002;
+                    a->rc_log[7] = oh;
+                    handle_from_vda_token = 0;
+                }
+            }
+        }
+
+        if (handle_from_vda_token) {
+            vda_handle = -1;
+        }
+
+        /* Fallback: GetHandle(type=3) existing virtual DualSense */
+        if (vda_handle < 0 && (a->fp_gethandle || a->fp_gethandle_ext)) {
+            int32_t uid_try[3];
+            int32_t ui;
+            uid_try[0] = 1;
+            uid_try[1] = a->userId;
+            uid_try[2] = 0x10000000;
+            if (assignment_hint) {
+                int32_t attempt;
+                for (attempt = 0; attempt < 60 && vda_handle < 0; attempt++) {
+                    for (ui = 0; ui < 3 && vda_handle < 0; ui++) {
+                        int32_t idx;
+                        for (idx = 0; idx < 8 && vda_handle < 0; idx++) {
+                            int32_t gh = a->fp_gethandle_ext
+                                ? a->fp_gethandle_ext(uid_try[ui], 3, idx, 0, 0, 0)
+                                : a->fp_gethandle(uid_try[ui], 3, idx);
+                            a->rc_log[3] = gh;
+                            a->rc_log[6] = (attempt << 8) | (idx & 0xff);
+                            if (gh >= 0) vda_handle = gh;
+                        }
+                    }
+                    if (vda_handle < 0) {
+                        a->fp_usleep(150000);
+                    }
+                }
+            } else {
+                for (ui = 0; ui < 3 && vda_handle < 0; ui++) {
+                    int32_t idx;
+                    for (idx = 0; idx < 8 && vda_handle < 0; idx++) {
+                        int32_t gh = a->fp_gethandle_ext
+                            ? a->fp_gethandle_ext(uid_try[ui], 3, idx, 0, 0, 0)
+                            : a->fp_gethandle(uid_try[ui], 3, idx);
+                        a->rc_log[3] = gh;
+                        if (gh >= 0) vda_handle = gh;
+                    }
+                }
+            }
+        }
+
+        if (vda_handle < 0 && (a->fp_gethandle || a->fp_gethandle_ext) && initial_pad_handle == -1 && assignment_hint) {
+            int32_t uid_try[3];
+            int32_t ui;
+            int32_t attempt;
+            uid_try[0] = 1;
+            uid_try[1] = a->userId;
+            uid_try[2] = 0x10000000;
+            for (attempt = 0; attempt < 40 && vda_handle < 0; attempt++) {
+                for (ui = 0; ui < 3 && vda_handle < 0; ui++) {
+                    int32_t idx;
+                    for (idx = 0; idx < 8 && vda_handle < 0; idx++) {
+                        int32_t gh = a->fp_gethandle_ext
+                            ? a->fp_gethandle_ext(uid_try[ui], 0, idx, 0, 0, 0)
+                            : a->fp_gethandle(uid_try[ui], 0, idx);
+                        a->rc_log[5] = gh;
+                        a->rc_log[6] = 0x4000 | ((attempt & 0xff) << 4) | (idx & 0xf);
+                        if (gh >= 0) { vda_handle = gh; use_insert = 1; }
+                    }
+                }
+                if (vda_handle < 0) {
+                    a->fp_usleep(150000);
+                }
+            }
+        }
+
+        /* Fallback: GetHandle(type=0) physical DualSense */
+        if (vda_handle < 0 && (a->fp_gethandle || a->fp_gethandle_ext) && initial_pad_handle != -1) {
+            int32_t uid_try[3];
+            int32_t ui;
+            uid_try[0] = 1;
+            uid_try[1] = a->userId;
+            uid_try[2] = 0x10000000;
+            if (assignment_hint) {
+                int32_t attempt;
+                for (attempt = 0; attempt < 20 && vda_handle < 0; attempt++) {
+                    for (ui = 0; ui < 3 && vda_handle < 0; ui++) {
+                        int32_t idx;
+                        for (idx = 0; idx < 4 && vda_handle < 0; idx++) {
+                            int32_t gh = a->fp_gethandle_ext
+                                ? a->fp_gethandle_ext(uid_try[ui], 0, idx, 0, 0, 0)
+                                : a->fp_gethandle(uid_try[ui], 0, idx);
+                            a->rc_log[5] = gh;
+                            a->rc_log[6] = 0x3000 | ((attempt & 0xff) << 4) | (idx & 0xf);
+                            if (gh >= 0) { vda_handle = gh; use_insert = 1; }
+                        }
+                    }
+                    if (vda_handle < 0) {
+                        a->fp_usleep(150000);
+                    }
+                }
+            } else {
+                for (ui = 0; ui < 3 && vda_handle < 0; ui++) {
+                    int32_t idx;
+                    for (idx = 0; idx < 4 && vda_handle < 0; idx++) {
+                        int32_t gh = a->fp_gethandle_ext
+                            ? a->fp_gethandle_ext(uid_try[ui], 0, idx, 0, 0, 0)
+                            : a->fp_gethandle(uid_try[ui], 0, idx);
+                        a->rc_log[5] = gh;
+                        if (gh >= 0) { vda_handle = gh; use_insert = 1; }
+                    }
+                }
+            }
+        }
+
+        if (vda_handle < 0) {
+            a->ready = -1;
+            return;
+        }
+    }
+
+    a->pad_handle = vda_handle;
+    a->ready = 1;
+    a->rc_log[7] = use_insert ? 0x494e5331 : (a->rc_log[7] ? a->rc_log[7] : 0x56444930);
+
+    /* Auto-press Cross to dismiss the "who is using this controller?" dialog.
+     * Only needed for VDA virtual devices (type=3).
+     * ScePadData byte layout:
+     *   bytes [0..3] buttons LE — Cross = 0x00004000 → byte[1] = 0x40
+     *   byte  [4]    leftStick.x  center=128
+     *   byte  [5]    leftStick.y  center=128
+     *   byte  [6]    rightStick.x center=128
+     *   byte  [7]    rightStick.y center=128
+     *   bytes [24..27] quat.w = 1.0f = 0x3F800000 LE
+     *   byte  [76]   connected = 1
+     */
+    if (!use_insert) {
+        uint8_t ap[SHELLUI_PAD_DATA_SIZE];
+        int32_t ai;
+        for (ai = 0; ai < SHELLUI_PAD_DATA_SIZE; ai++) ap[ai] = 0;
+        ap[1]  = 0x40;
+        ap[4]  = 128;
+        ap[5]  = 128;
+        ap[6]  = 128;
+        ap[7]  = 128;
+        ap[24] = 0x00;
+        ap[25] = 0x00;
+        ap[26] = 0x80;
+        ap[27] = 0x3F;
+        ap[76] = 1;
+
+        a->fp_usleep(1000000);  /* 1000 ms: wait for PS5 UI dialog to render */
+
+        int32_t apr = a->fp_vdi(vda_handle, ap);
+        a->rc_log[5] = apr;     /* log first VDI result */
+
+        a->fp_usleep(200000);   /* 200 ms hold */
+
+        ap[1] = 0;              /* release Cross */
+        a->fp_vdi(vda_handle, ap);
+
+        a->fp_usleep(100000);
+    }
+
+    /* Insert loop: poll seq, inject pad data when main process increments seq.
+     *
+     * On the first injection attempt we log VDI's return code in rc_log[6].
+     * Legacy insert fallback is disabled in current builds. */
+    uint32_t last_seq = 0;
+    int32_t probed = 0;   /* 0=not yet, 1=done */
+    while (!a->stop) {
+        uint32_t cur = a->seq;
+        if (cur != last_seq) {
+            if (!probed) {
+                /* First data: try the preferred function and log the result. */
+                int32_t r_ins = -1, r_vdi = -1;
+                if (use_insert && a->fp_insert) {
+                    r_ins = a->fp_insert(vda_handle, (const void *)a->pad_data);
+                    a->rc_log[5] = r_ins;
+                    if (r_ins < 0 && a->fp_vdi) {
+                        /* Legacy insert rejected handle; try VDI. */
+                        r_vdi = a->fp_vdi(vda_handle, (const void *)a->pad_data);
+                        a->rc_log[6] = r_vdi;
+                        if (r_vdi >= 0) use_insert = 0;   /* switch to VDI */
+                    }
+                } else if (a->fp_vdi) {
+                    r_vdi = a->fp_vdi(vda_handle, (const void *)a->pad_data);
+                    a->rc_log[6] = r_vdi;
+                    if (r_vdi < 0 && a->fp_insert) {
+                        /* Legacy insert fallback is disabled. */
+                        r_ins = a->fp_insert(vda_handle, (const void *)a->pad_data);
+                        a->rc_log[5] = r_ins;
+                        if (r_ins >= 0) use_insert = 1;
+                    }
+                }
+                probed = 1;
+            } else {
+                /* Subsequent data: use whichever function worked (or keep trying). */
+                if (use_insert && a->fp_insert)
+                    a->fp_insert(vda_handle, (const void *)a->pad_data);
+                else if (a->fp_vdi)
+                    a->fp_vdi(vda_handle, (const void *)a->pad_data);
+            }
+            last_seq = cur;
+        }
+        a->fp_usleep(1000);
+    }
+
+    /* Delete virtual device on clean exit so next run doesn't get 0x803b0001.
+     * Legacy insert handles (use_insert) are not used in current builds. */
+    if (!use_insert && a->fp_del) a->fp_del(vda_handle);
+}
+
+__attribute__((noinline, section(".text.stub")))
+void shellui_stub_end(void) { }
+
+extern void shellui_stub_force_vda(void *arg);
+extern void shellui_stub_force_vda_end(void);
+
+__attribute__((noinline, section(".text.stubvda")))
+void shellui_stub_force_vda(void *arg)
+{
+    ShellUiPadArgs *a = (ShellUiPadArgs *)arg;
+    int32_t assignment_hint = 0;
+    int32_t fallback_handle = a->rc_log[0];
+    int32_t fallback_use_insert = a->rc_log[1];
+    int32_t pad_type = (a->virtual_device_type >= 0) ? a->virtual_device_type : 3;
+    int32_t vda_handle = -1;
+    int32_t handle_from_vda_token = 0;
+    int32_t use_insert = 0;
+    int32_t button_probe_done = 0;
+    int32_t uid_try[3];
+    int32_t ui;
+
+    if (fallback_handle < 0) fallback_handle = -1;
+    if (fallback_use_insert < 0) fallback_use_insert = 0;
+
+    a->rc_log[15] = (int32_t)0x53545542u; /* "STUB" */
+
+    if (!a->fp_usleep) {
+        a->ready = -1;
+        return;
+    }
+
+    a->fp_usleep(500000);
+
+    if (a->fp_setpriv) {
+        a->rc_log[4] = a->fp_setpriv(1);
+    }
+    if (a->fp_setloginuser) {
+        a->rc_log[5] = a->fp_setloginuser(1);
+    }
+    if (a->fp_setusernumber) {
+        a->rc_log[6] = a->fp_setusernumber(1);
+    }
+    if (a->fp_setfocus) {
+        a->rc_log[7] = a->fp_setfocus(1, 0, 0, 0, 0, 0);
+    }
+
+    /* Try real logged-in userId FIRST: if the pad daemon pre-assigns the device
+     * to a known user, GetHandle(userId, type=3) works immediately and we skip
+     * the assignment screen.  uid=1 is the fallback "anonymous" slot. */
+    uid_try[0] = a->userId;
+    uid_try[1] = 0x10000000;
+    uid_try[2] = 1;
+
+    if (a->fp_vda) {
+        for (ui = 0; ui < 3 && vda_handle < 0; ui++) {
+            struct { int32_t f[8]; } vdp;
+            int32_t vi;
+            int32_t vda_ret;
+
+            for (vi = 0; vi < 8; vi++) {
+                vdp.f[vi] = 0;
+            }
+            vdp.f[0] = 32;
+            vdp.f[1] = uid_try[ui];
+            vda_ret = a->fp_vda(&vdp, pad_type);
+            a->rc_log[ui] = vda_ret;
+
+            if (ui == 0) {
+                a->rc_log[8]  = vdp.f[0];
+                a->rc_log[9]  = vdp.f[1];
+                a->rc_log[10] = vdp.f[2];
+                a->rc_log[11] = vdp.f[3];
+                a->rc_log[12] = vdp.f[4];
+                a->rc_log[13] = vdp.f[5];
+                a->rc_log[14] = vdp.f[6];
+                a->rc_log[15] = vdp.f[7];
+            }
+
+            if (vda_ret == 0) {
+                a->rc_log[8]  = vdp.f[0];
+                a->rc_log[9]  = vdp.f[1];
+                a->rc_log[10] = vdp.f[2];
+                a->rc_log[11] = vdp.f[3];
+                a->rc_log[12] = vdp.f[4];
+                a->rc_log[13] = vdp.f[5];
+                a->rc_log[14] = vdp.f[6];
+                a->rc_log[15] = vdp.f[7];
+                for (vi = 2; vi < 8 && vda_handle < 0; vi++) {
+                    if (vdp.f[vi] != 0 && vdp.f[vi] != -1) {
+                        vda_handle = vdp.f[vi];
+                        handle_from_vda_token = 1;
+                        a->pad_handle = vda_handle;
+                        a->rc_log[6] = (int32_t)0x60000002;
+                        a->rc_log[7] = vda_handle;
+                    }
+                }
+                if (vda_handle >= 0) {
+                    break;
+                }
+                /* The surgical libScePad patch forces the IPC dispatch path to
+                 * return 0 after creating the device.  That is success for
+                 * creation, but it is not a usable VDI write handle. */
+                assignment_hint = 1;
+                a->rc_log[6] = (int32_t)0x60000000;
+                a->rc_log[7] = (int32_t)0x56444130u; /* "VDA0" */
+                break;
+            }
+
+            if (vda_ret > 0) {
+                vda_handle = vda_ret;
+                a->pad_handle = vda_handle;
+                a->rc_log[6] = (int32_t)0x60000001;
+                a->rc_log[7] = vda_handle;
+                break;
+            }
+
+            for (vi = 2; vi < 8 && vda_handle < 0; vi++) {
+                if (vdp.f[vi] != 0 && vdp.f[vi] != -1) {
+                    vda_handle = vdp.f[vi];
+                    handle_from_vda_token = 1;
+                    a->pad_handle = vda_handle;
+                    a->rc_log[6] = (int32_t)0x60000002;
+                    a->rc_log[7] = vda_handle;
+                }
+            }
+
+            if ((uint32_t)vda_ret == (uint32_t)GHOSTPAD_ASSIGNMENT_SCREEN_RET) {
+                assignment_hint = 1;
+                a->rc_log[7] = 0x4153474Eu; /* "ASGN" */
+                a->fp_usleep(300000);
+            }
+        }
+    }
+
+    if (handle_from_vda_token && (a->fp_gethandle_ext || a->fp_gethandle)) {
+        for (ui = 0; ui < 3 && handle_from_vda_token; ui++) {
+            int32_t idx;
+            for (idx = 0; idx < 8 && handle_from_vda_token; idx++) {
+                int32_t gh = a->fp_gethandle_ext
+                    ? a->fp_gethandle_ext(uid_try[ui], pad_type, idx, 0, 0, 0)
+                    : a->fp_gethandle(uid_try[ui], pad_type, idx);
+                a->rc_log[3] = gh;
+                if (gh >= 0) {
+                    vda_handle = gh;
+                    a->pad_handle = gh;
+                    a->rc_log[5] = (int32_t)0x70000001;
+                    a->rc_log[7] = gh;
+                    handle_from_vda_token = 0;
+                }
+            }
+        }
+    }
+
+    if (handle_from_vda_token && (a->fp_open_ext2 || a->fp_open_ext || a->fp_open)) {
+        for (ui = 0; ui < 3 && handle_from_vda_token; ui++) {
+            int32_t oh = a->fp_open_ext2
+                ? a->fp_open_ext2(uid_try[ui], pad_type, 0, (void *)0, 0, 0)
+                : (a->fp_open_ext
+                    ? a->fp_open_ext(uid_try[ui], pad_type, 0, (void *)0, 0, 0)
+                    : (a->fp_open ? a->fp_open(uid_try[ui], pad_type, 0, (void *)0) : -1));
+            a->rc_log[4] = oh;
+            if (oh >= 0) {
+                vda_handle = oh;
+                a->pad_handle = oh;
+                a->rc_log[5] = (int32_t)0x70000002;
+                a->rc_log[7] = oh;
+                handle_from_vda_token = 0;
+            }
+        }
+    }
+
+    if (vda_handle < 0 && (a->fp_gethandle_ext || a->fp_gethandle)) {
+        for (ui = 0; ui < 3 && vda_handle < 0; ui++) {
+            int32_t idx;
+            for (idx = 0; idx < 8 && vda_handle < 0; idx++) {
+                int32_t gh = a->fp_gethandle_ext
+                    ? a->fp_gethandle_ext(uid_try[ui], pad_type, idx, 0, 0, 0)
+                    : a->fp_gethandle(uid_try[ui], pad_type, idx);
+                a->rc_log[3] = gh;
+                if (gh >= 0) {
+                    vda_handle = gh;
+                    a->pad_handle = gh;
+                    a->rc_log[7] = gh;
+                }
+            }
+        }
+    }
+
+    /* NOTE: removed the insert-based fallback (use_insert=1 + fp_insert with
+     * fallback_handle).  The old insert function treated arg1 as an
+     * object pointer, not an integer handle ID.  Using a type=0 handle from
+     * scePadOpen here causes a page fault at the handle value — confirmed by
+     * two SIGSEGV crashes.  If VDA produced no handle, leave vda_handle=-1
+     * so the check below returns ready=-1 safely. */
+
+    if (vda_handle < 0 && assignment_hint && (a->fp_gethandle_ext || a->fp_gethandle)) {
+        /* FIRST: probe with userId=0xffffffff and userId=0 — the VDA-created
+         * device has userId=0xffffffff before assignment.  GetHandle with the
+         * assigned userIds (1, a->userId, 0x10000000) always fails until the
+         * user dismisses the assignment screen, but the unassigned userId may
+         * be directly queryable. */
+        int32_t special_uid[2] = {(int32_t)0xffffffff, 0};
+        int32_t sui, sidx;
+        for (sui = 0; sui < 2 && vda_handle < 0; sui++) {
+            for (sidx = 0; sidx < 8 && vda_handle < 0; sidx++) {
+                int32_t gh = a->fp_gethandle_ext
+                    ? a->fp_gethandle_ext(special_uid[sui], pad_type, sidx, 0, 0, 0)
+                    : a->fp_gethandle(special_uid[sui], pad_type, sidx);
+                a->rc_log[3] = gh;
+                a->rc_log[6] = (int32_t)(0x5000 | (sui << 4) | (sidx & 0xf));
+                if (gh >= 0) {
+                    vda_handle = gh;
+                    a->pad_handle = gh;
+                    a->rc_log[5] = (int32_t)0x70000007;
+                    a->rc_log[7] = (int32_t)0x56444931u; /* "VDI1" unassigned path */
+                }
+            }
+        }
+        /* THEN: also try Open(userId=0xffffffff, type=3) — in case GetHandle
+         * rejects 0xffffffff but Open resolves the unassigned slot. */
+        if (vda_handle < 0 && (a->fp_open_ext2 || a->fp_open_ext || a->fp_open)) {
+            for (sui = 0; sui < 2 && vda_handle < 0; sui++) {
+                int32_t oh = a->fp_open_ext2
+                    ? a->fp_open_ext2(special_uid[sui], pad_type, 0, (void *)0, 0, 0)
+                    : (a->fp_open_ext
+                        ? a->fp_open_ext(special_uid[sui], pad_type, 0, (void *)0, 0, 0)
+                        : a->fp_open(special_uid[sui], pad_type, 0, (void *)0));
+                a->rc_log[4] = oh;
+                a->rc_log[6] = (int32_t)(0x5100 | (sui & 0xf));
+                if (oh >= 0) {
+                    vda_handle = oh;
+                    a->pad_handle = oh;
+                    a->rc_log[5] = (int32_t)0x70000008;
+                    a->rc_log[7] = (int32_t)0x56444932u; /* "VDI2" open-unassigned path */
+                }
+            }
+        }
+        /* FINALLY: poll with canonical userIds waiting for post-assignment.
+         * 400 iterations × 150ms = 60 seconds — allows manual user dismiss. */
+        int32_t attempt;
+        for (attempt = 0; attempt < 400 && vda_handle < 0; attempt++) {
+            for (ui = 0; ui < 3 && vda_handle < 0; ui++) {
+                int32_t idx;
+                for (idx = 0; idx < 8 && vda_handle < 0; idx++) {
+                    int32_t gh = a->fp_gethandle_ext
+                        ? a->fp_gethandle_ext(uid_try[ui], pad_type, idx, 0, 0, 0)
+                        : a->fp_gethandle(uid_try[ui], pad_type, idx);
+                    a->rc_log[3] = gh;
+                    a->rc_log[6] = (int32_t)(0x4100 | ((attempt & 0xff) << 4) | (idx & 0xf));
+                    if (gh >= 0) {
+                        vda_handle = gh;
+                        a->pad_handle = gh;
+                        a->rc_log[5] = (int32_t)0x70000006;
+                        a->rc_log[7] = (int32_t)0x56444930u; /* "VDI0" */
+                    }
+                }
+            }
+            if (vda_handle < 0) {
+                a->fp_usleep(150000);
+            }
+        }
+    }
+
+    /* Do not issue a second VDA call after external Mbus assignment. Live klog
+     * showed this creates another unassigned virtual pad instead of a write
+     * handle, which pollutes the assignment state and obscures diagnostics. */
+
+    if (vda_handle < 0) {
+        a->ready = -1;
+        return;
+    }
+
+    {
+        uint8_t ap[SHELLUI_PAD_DATA_SIZE];
+        int32_t ai;
+        int32_t frame;
+        int32_t press_ret = 0;
+        int32_t release_ret = 0;
+
+        for (ai = 0; ai < SHELLUI_PAD_DATA_SIZE; ai++) {
+            ap[ai] = 0;
+        }
+        ap[4]  = 128;
+        ap[5]  = 128;
+        ap[6]  = 128;
+        ap[7]  = 128;
+        ap[24] = 0x00;
+        ap[25] = 0x00;
+        ap[26] = 0x80;
+        ap[27] = 0x3F;
+        ap[76] = 1;
+
+        a->rc_log[12] = GHOSTPAD_AUTO_DISMISS_ACTIVE;
+        a->rc_log[13] = use_insert ? (int32_t)0x494E5331u : (int32_t)0x56444930u;
+        a->rc_log[14] = 0;
+        a->rc_log[15] = 0;
+
+        a->fp_usleep(1000000);
+
+        for (frame = 0; frame < 12; frame++) {
+            if (use_insert && a->fp_insert) {
+                a->fp_insert(vda_handle, (const void *)ap);
+            } else if (a->fp_vdi) {
+                a->fp_vdi(vda_handle, (const void *)ap);
+            }
+            a->fp_usleep(16000);
+        }
+
+        ap[1] = 0x40;
+        for (frame = 0; frame < 30; frame++) {
+            if (use_insert && a->fp_insert) {
+                press_ret = a->fp_insert(vda_handle, (const void *)ap);
+            } else if (a->fp_vdi) {
+                press_ret = a->fp_vdi(vda_handle, (const void *)ap);
+            }
+            a->fp_usleep(16000);
+        }
+
+        ap[1] = 0x00;
+        for (frame = 0; frame < 18; frame++) {
+            if (use_insert && a->fp_insert) {
+                release_ret = a->fp_insert(vda_handle, (const void *)ap);
+            } else if (a->fp_vdi) {
+                release_ret = a->fp_vdi(vda_handle, (const void *)ap);
+            }
+            a->fp_usleep(16000);
+        }
+
+        a->rc_log[12] = GHOSTPAD_AUTO_DISMISS_DONE;
+        a->rc_log[14] = press_ret;
+        a->rc_log[15] = release_ret;
+        button_probe_done = 1;
+    }
+
+    a->pad_handle = vda_handle;
+    a->ready = 1;
+    if (a->rc_log[7] == 0 || a->rc_log[7] == (int32_t)0x4153474Eu) {
+        a->rc_log[7] = (int32_t)0x56444930u; /* "VDI0" */
+    }
+
+    {
+        uint32_t last_seq = 0;
+        while (!a->stop) {
+            uint32_t cur = a->seq;
+            if (cur != last_seq) {
+                uint32_t buttons = *(const uint32_t *)(const void *)a->pad_data;
+
+                {
+                    int32_t active_ret = (int32_t)0xDEADBEEFu;
+
+                    if (use_insert && a->fp_insert) {
+                        active_ret = a->fp_insert(vda_handle, (const void *)a->pad_data);
+                    } else if (a->fp_vdi) {
+                        active_ret = a->fp_vdi(vda_handle, (const void *)a->pad_data);
+                    } else if (a->fp_insert) {
+                        use_insert = 1;
+                        active_ret = a->fp_insert(vda_handle, (const void *)a->pad_data);
+                    }
+
+                    if (buttons != 0 && !button_probe_done) {
+                        a->rc_log[12] = (int32_t)buttons;
+                        a->rc_log[13] = use_insert
+                                      ? (int32_t)0xB7001001u
+                                      : (int32_t)0xB7001002u;
+                        a->rc_log[14] = active_ret;
+                        a->rc_log[15] = vda_handle;
+                        button_probe_done = 1;
+                    }
+                }
+                last_seq = cur;
+            }
+            a->fp_usleep(1000);
+        }
+    }
+
+    if (!use_insert && a->fp_del) {
+        a->fp_del(vda_handle);
+    }
+}
+
+__attribute__((noinline, section(".text.stubvda")))
+void shellui_stub_force_vda_end(void) { }
+
+/* ============================================================
+ * shellui_pad_inject — inject a pad stub into an attachable target process.
+ *
+ * Phase 1 (freeze fix): PT_ATTACH happens FIRST.  Nothing is written to the
+ *   target until attach succeeds; if it fails we return -1 immediately with
+ *   zero side-effects on the target.
+ *
+ * Phase 4 (target selection): tries SceShellCore/SceShellUI-side candidates.
+ *   The current path uses only SceShellCore/SceShellUI.
+ *
+ * Phase 5 (clean code cave): uses the library init/fini section directly as
+ *   the conservative path. That cave is already proven to boot the recovery
+ *   thread reliably on this target.
+ * ============================================================ */
+int
+shellui_pad_inject(int32_t userId,
+                   int      force_virtual_vda,
+                   int32_t  virtual_device_type,
+                   pid_t    *out_shellui_pid,
+                   intptr_t *out_args_kaddr)
+{
+    /* Phase 4: candidate processes in priority order. */
+    /* SceShellCore first: it has the confirmed VDA path that creates a virtual
+     * controller. SceShellUI is kept for client-side pad/mbus diagnostics. */
+    /* Priority order: prefer CLIENT-SIDE libScePad processes.
+     * SceShellCore's libScePad is server-side — all client IPC calls fail from
+     * its stub (GetHandle, Open, VDA all return "not found" / IPMI errors).
+     * SceShellUI IS a client: it reads pad state via libScePad IPC for navigation,
+     * so GetHandle/VDA from its stub reach the real pad daemon. */
+    /* force_virtual_vda=1: prefer SceShellCore — its VDA call runs as an
+     * internal (non-IPC) call and has been confirmed to create a device.
+     * Remote-control handles are intentionally not used. */
+    static const char *const candidates_vda[] = {
+        "SceShellCore",
+        "SceShellUI",
+        NULL
+    };
+    static const char *const candidates_normal[] = {
+        "SceShellCore",
+        "SceShellUI",
+        NULL
+    };
+    const char *const *candidates = force_virtual_vda ? candidates_vda : candidates_normal;
+
+    for (int i = 0; candidates[i] != NULL; i++) {
+        pid_t target_pids[16];
+        size_t target_pid_count = 0;
+        const char *target_name = candidates[i];
+
+        target_pid_count = find_pids(target_name, target_pids, sizeof(target_pids) / sizeof(target_pids[0]));
+        if (target_pid_count == 0) {
+            klog_printf("[Ghostpad] %s: not found\n", target_name);
+            continue;
+        }
+
+        for (size_t pid_index = 0; pid_index < target_pid_count; pid_index++) {
+        pid_t       target_pid  = target_pids[pid_index];
+        uint32_t libpad_h = 0, libkernel_h = 0, libpthread_h = 0, liblibc_h = 0;
+        intptr_t fn_gethandle = 0, fn_gethandle_ext = 0, fn_open = 0, fn_open_ext = 0, fn_open_ext2 = 0, fn_insert = 0, fn_vdi = 0;
+        intptr_t fn_vda = 0, fn_del = 0, fn_setpriv = 0, fn_setloginuser = 0;
+        intptr_t fn_setusernumber = 0, fn_setfocus = 0, fn_usleep = 0, fn_pthread_create = 0, fn_mmap = 0;
+        intptr_t fn_malloc = 0, fn_free = 0;
+        size_t stub_code_size = 0, args_offset = 0, alloc_size = 0;
+        size_t stub_alloc_size = 0, args_alloc_size = 0;
+        intptr_t stub_mem = 0, trap_mem = 0, args_mem = 0, args_kaddr = 0, thread_storage = 0, stub_fn = 0;
+        intptr_t init_mem = 0, fini_mem = 0;
+        const void *stub_src = NULL;
+        const void *stub_end = NULL;
+        int is_shellcore = 0;
+        int is_shellui = 0;
+        int32_t pt_pad_handle = -1;
+        int32_t pt_use_insert = 0;
+        uint8_t int3 = 0xCC;
+
+        klog_printf("[Ghostpad] PT_ATTACH(%s pid=%d)...\n", target_name, target_pid);
+        if (sys_ptrace(PT_ATTACH, target_pid, 0, 0) != 0) {
+            klog_printf("[Ghostpad] PT_ATTACH(%s): errno=%d\n", target_name, errno);
+            continue;
+        }
+        waitpid(target_pid, NULL, 0);
+        klog_printf("[Ghostpad] attached to %s (pid=%d)  authid=0x%016lx\n",
+                    target_name, target_pid, kernel_get_ucred_authid(target_pid));
+
+        if (get_lib(target_pid, "libScePad", &libpad_h) ||
+            get_lib(target_pid, "libkernel_sys", &libkernel_h)) {
+            klog_printf("[Ghostpad] library lookup failed in %s\n", target_name);
+            sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
+            continue;
+        }
+        get_lib(target_pid, "libpthread", &libpthread_h);
+        get_lib(target_pid, "libSceLibcInternal", &liblibc_h);
+
+        fn_gethandle      = resolve_sym(target_pid, libpad_h,    "scePadGetHandle");
+        fn_open           = resolve_sym(target_pid, libpad_h,    "scePadOpen");
+        fn_open_ext       = resolve_sym(target_pid, libpad_h,    "scePadOpenExt");
+        fn_open_ext2      = resolve_sym(target_pid, libpad_h,    "scePadOpenExt2");
+        fn_insert         = 0;
+        fn_vdi            = resolve_sym(target_pid, libpad_h,    "scePadVirtualDeviceInsertData");
+        fn_gethandle_ext  = fn_gethandle;
+        fn_vda            = resolve_sym(target_pid, libpad_h,    "scePadVirtualDeviceAddDevice");
+        fn_del            = resolve_sym(target_pid, libpad_h,    "scePadVirtualDeviceDeleteDevice");
+        fn_setpriv        = resolve_sym(target_pid, libpad_h,    "scePadSetProcessPrivilege");
+        fn_setloginuser   = resolve_sym(target_pid, libpad_h,    "scePadSetLoginUserNumber");
+        fn_setusernumber  = resolve_sym(target_pid, libpad_h,    "scePadSetUserNumber");
+        fn_setfocus       = resolve_sym(target_pid, libpad_h,    "scePadSetProcessFocus");
+        fn_usleep         = resolve_sym(target_pid, libkernel_h, "usleep");
+        fn_pthread_create = resolve_sym(target_pid, libkernel_h, "pthread_create");
+        fn_mmap           = resolve_sym(target_pid, libkernel_h, "mmap");
+        if (liblibc_h) {
+            fn_malloc = resolve_sym(target_pid, liblibc_h, "malloc");
+            fn_free   = resolve_sym(target_pid, liblibc_h, "free");
+        }
+
+        if (libpthread_h) {
+            if (!fn_pthread_create)
+                fn_pthread_create = resolve_sym(target_pid, libpthread_h, "pthread_create");
+            if (!fn_usleep)
+                fn_usleep = resolve_sym(target_pid, libpthread_h, "usleep");
+        }
+
+        klog_printf("[Ghostpad] scePadGetHandle                 @ 0x%lx\n", fn_gethandle);
+        klog_printf("[Ghostpad] scePadOpen                      @ 0x%lx\n", fn_open);
+        klog_printf("[Ghostpad] scePadOpenExt                   @ 0x%lx\n", fn_open_ext);
+        klog_printf("[Ghostpad] scePadOpenExt2                  @ 0x%lx\n", fn_open_ext2);
+        klog_printf("[Ghostpad] scePadVirtualDeviceInsertData   @ 0x%lx\n", fn_vdi);
+        klog_printf("[Ghostpad] scePadVirtualDeviceAddDevice    @ 0x%lx\n", fn_vda);
+        klog_printf("[Ghostpad] scePadVirtualDeviceDeleteDevice @ 0x%lx\n", fn_del);
+        klog_printf("[Ghostpad] scePadSetProcessPrivilege       @ 0x%lx\n", fn_setpriv);
+        klog_printf("[Ghostpad] scePadSetLoginUserNumber       @ 0x%lx\n", fn_setloginuser);
+        klog_printf("[Ghostpad] scePadSetUserNumber            @ 0x%lx\n", fn_setusernumber);
+        klog_printf("[Ghostpad] scePadSetProcessFocus          @ 0x%lx\n", fn_setfocus);
+        klog_printf("[Ghostpad] usleep                          @ 0x%lx\n", fn_usleep);
+        klog_printf("[Ghostpad] pthread_create                  @ 0x%lx\n", fn_pthread_create);
+        klog_printf("[Ghostpad] mmap                            @ 0x%lx\n", fn_mmap);
+        klog_printf("[Ghostpad] malloc                          @ 0x%lx\n", fn_malloc);
+        klog_printf("[Ghostpad] free                            @ 0x%lx\n", fn_free);
+
+        if (force_virtual_vda) {
+            if (!fn_vda || !fn_vdi || !fn_usleep || !fn_pthread_create) {
+                klog_printf("[Ghostpad] VDA symbol resolution failed in %s\n", target_name);
+                sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
+                continue;
+            }
+        } else if (!fn_gethandle || !fn_vdi || !fn_usleep || !fn_pthread_create) {
+            klog_printf("[Ghostpad] symbol resolution failed in %s\n", target_name);
+            sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
+            continue;
+        }
+
+        if (force_virtual_vda) {
+            stub_src = (const void *)shellui_stub_force_vda;
+            stub_end = (const void *)shellui_stub_force_vda_end;
+        } else {
+            stub_src = (const void *)shellui_stub;
+            stub_end = (const void *)shellui_stub_end;
+        }
+
+        stub_code_size = (size_t)((const char *)stub_end - (const char *)stub_src);
+        args_offset    = (16 + stub_code_size + 15) & ~(size_t)15;
+        alloc_size     = args_offset + sizeof(ShellUiPadArgs) + 16;
+
+        klog_printf("[Ghostpad] stub_code=%zu args_off=%zu alloc=%zu force_vda=%d\n",
+                    stub_code_size, args_offset, alloc_size, force_virtual_vda);
+
+        init_mem = kernel_dynlib_init_addr(target_pid, libpad_h);
+        fini_mem = kernel_dynlib_fini_addr(target_pid, libpad_h);
+        trap_mem = init_mem ? init_mem : fini_mem;
+        if (!trap_mem) {
+            klog_printf("[Ghostpad] no code cave available in %s\n", target_name);
+            sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
+            continue;
+        }
+
+        klog_printf("[Ghostpad] init cave @ 0x%lx  fini cave @ 0x%lx\n",
+                    init_mem, fini_mem);
+
+        stub_alloc_size = (16 + stub_code_size + 15) & ~(size_t)15;
+        args_alloc_size = sizeof(ShellUiPadArgs) + 16;
+
+        if (kernel_set_vmem_protection(target_pid, trap_mem, stub_alloc_size,
+                                       PROT_READ | PROT_WRITE | PROT_EXEC)) {
+            klog_printf("[Ghostpad] kernel_set_vmem_protection(RWX trap) failed in %s\n", target_name);
+            sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
+            continue;
+        }
+        klog_printf("[Ghostpad] trap cave @ 0x%lx RWX ok\n", trap_mem);
+
+        stub_mem = trap_mem;
+        args_mem = stub_mem;
+        pt_io_write(target_pid, stub_mem, &int3, 1);
+        if (fn_malloc) {
+            int64_t malloc_ret = pt_call(target_pid, fn_malloc, stub_mem,
+                                         (uint64_t)args_alloc_size, 0, 0, 0, 0, 0);
+            if (malloc_ret > 0) {
+                args_mem = (intptr_t)malloc_ret;
+                klog_printf("[Ghostpad] malloc args block @ 0x%lx (%zu bytes)\n",
+                            args_mem, args_alloc_size);
+            } else {
+                klog_printf("[Ghostpad] malloc args block failed -> %lld; falling back to code cave storage\n",
+                            (long long)malloc_ret);
+            }
+        }
+        if (args_mem == stub_mem && init_mem && fini_mem && init_mem != fini_mem) {
+            args_mem = (stub_mem == init_mem) ? fini_mem : init_mem;
+            if (kernel_set_vmem_protection(target_pid, args_mem, args_alloc_size,
+                                          PROT_READ | PROT_WRITE | PROT_EXEC)) {
+                klog_printf("[Ghostpad] separate args cave protection failed in %s; reusing stub cave\n",
+                            target_name);
+                args_mem = stub_mem;
+            }
+        }
+
+        if (args_mem != stub_mem && args_mem != init_mem && args_mem != fini_mem) {
+            klog_printf("[Ghostpad] conservative stub cave @ 0x%lx  heap args block @ 0x%lx\n",
+                        stub_mem, args_mem);
+            args_kaddr = args_mem;
+        } else if (args_mem == stub_mem) {
+            klog_printf("[Ghostpad] conservative code cave @ 0x%lx RWX ok (shared stub/args, mmap disabled)\n",
+                        stub_mem);
+            args_kaddr = stub_mem + (intptr_t)args_offset;
+        } else {
+            klog_printf("[Ghostpad] conservative stub cave @ 0x%lx  separate args cave @ 0x%lx\n",
+                        stub_mem, args_mem);
+            args_kaddr = args_mem + 16;
+        }
+
+        thread_storage = stub_mem + 8;
+        stub_fn        = stub_mem + 16;
+        klog_printf("[Ghostpad] stub_fn=0x%lx  args=0x%lx\n", stub_fn, args_kaddr);
+
+        if (fn_setpriv) {
+            int64_t spriv = pt_call(target_pid, fn_setpriv, stub_mem, 1, 0, 0, 0, 0, 0);
+            klog_printf("[Ghostpad] scePadSetProcessPrivilege(1) in %s -> %lld\n",
+                        target_name, (long long)spriv);
+        }
+
+        is_shellcore = (strcmp(target_name, "SceShellCore") == 0);
+        is_shellui = (strcmp(target_name, "SceShellUI") == 0);
+
+        if (!force_virtual_vda && !is_shellcore && fn_gethandle) {
+            int32_t try_users[2];
+            int tu, ti;
+            try_users[0] = userId;
+            try_users[1] = 0x10000000;
+            for (tu = 0; tu < 2 && pt_pad_handle < 0; tu++) {
+                for (ti = 0; ti < 4 && pt_pad_handle < 0; ti++) {
+                    int64_t gh = pt_call(target_pid, fn_gethandle, stub_mem,
+                                         (uint64_t)try_users[tu], 0, (uint64_t)ti,
+                                         0, 0, 0);
+                    klog_printf("[Ghostpad] pt_call GetHandle(0x%x,0,%d) -> 0x%llx\n",
+                                try_users[tu], ti, (unsigned long long)(uint64_t)gh);
+                    if ((int32_t)gh >= 0) { pt_pad_handle = (int32_t)gh; pt_use_insert = 0; }
+                }
+            }
+        }
+
+        if (!force_virtual_vda && !is_shellcore && pt_pad_handle < 0 && fn_open) {
+            int32_t try_users[2];
+            int tu2;
+            try_users[0] = userId;
+            try_users[1] = 0x10000000;
+            for (tu2 = 0; tu2 < 2 && pt_pad_handle < 0; tu2++) {
+                int64_t oh = pt_call(target_pid, fn_open, stub_mem,
+                                     (uint64_t)try_users[tu2], 0, 0, 0, 0, 0);
+                klog_printf("[Ghostpad] pt_call scePadOpen(0x%x,0) -> 0x%llx\n",
+                            try_users[tu2], (unsigned long long)(uint64_t)oh);
+                if ((int32_t)oh >= 0) { pt_pad_handle = (int32_t)oh; pt_use_insert = 1; }
+            }
+        }
+
+        if (force_virtual_vda && !is_shellcore && pt_pad_handle < 0 && fn_open) {
+            int32_t try_users[2];
+            int tu2;
+            try_users[0] = userId;
+            try_users[1] = 0x10000000;
+            for (tu2 = 0; tu2 < 2 && pt_pad_handle < 0; tu2++) {
+                int64_t oh = pt_call(target_pid, fn_open, stub_mem,
+                                     (uint64_t)try_users[tu2], 0, 0, 0, 0, 0);
+                klog_printf("[Ghostpad] pt_call fallback scePadOpen(0x%x,0) -> 0x%llx\n",
+                            try_users[tu2], (unsigned long long)(uint64_t)oh);
+                if ((int32_t)oh >= 0) { pt_pad_handle = (int32_t)oh; pt_use_insert = 1; }
+            }
+        }
+
+        if (force_virtual_vda && !is_shellcore && pt_pad_handle < 0 && (fn_gethandle_ext || fn_gethandle)) {
+            int32_t try_users[2];
+            int tu, ti;
+            try_users[0] = userId;
+            try_users[1] = 0x10000000;
+            for (tu = 0; tu < 2 && pt_pad_handle < 0; tu++) {
+                for (ti = 0; ti < 4 && pt_pad_handle < 0; ti++) {
+                    int64_t gh = fn_gethandle_ext
+                        ? pt_call(target_pid, fn_gethandle_ext, stub_mem,
+                                  (uint64_t)try_users[tu], 0, (uint64_t)ti,
+                                  0, 0, 0)
+                        : pt_call(target_pid, fn_gethandle, stub_mem,
+                                  (uint64_t)try_users[tu], 0, (uint64_t)ti,
+                                  0, 0, 0);
+                    klog_printf("[Ghostpad] pt_call fallback GetHandle(0x%x,0,%d) -> 0x%llx\n",
+                                try_users[tu], ti, (unsigned long long)(uint64_t)gh);
+                    if ((int32_t)gh >= 0) { pt_pad_handle = (int32_t)gh; pt_use_insert = 1; }
+                }
+            }
+        }
+
+        if (force_virtual_vda && !is_shellcore && pt_pad_handle < 0 &&
+            (fn_open_ext2 || fn_open_ext)) {
+            int32_t try_users[2];
+            int tu2;
+            try_users[0] = userId;
+            try_users[1] = 0x10000000;
+            for (tu2 = 0; tu2 < 2 && pt_pad_handle < 0; tu2++) {
+                int64_t oh = fn_open_ext2
+                    ? pt_call(target_pid, fn_open_ext2, stub_mem,
+                              (uint64_t)try_users[tu2], 0, 0, 0, 0, 0)
+                    : (fn_open_ext
+                        ? pt_call(target_pid, fn_open_ext, stub_mem,
+                                  (uint64_t)try_users[tu2], 0, 0, 0, 0, 0)
+                        : pt_call(target_pid, fn_open, stub_mem,
+                                  (uint64_t)try_users[tu2], 0, 0, 0, 0, 0));
+                klog_printf("[Ghostpad] pt_call fallback scePadOpen*(0x%x,0) -> 0x%llx\n",
+                            try_users[tu2], (unsigned long long)(uint64_t)oh);
+                if ((int32_t)oh >= 0) { pt_pad_handle = (int32_t)oh; pt_use_insert = 1; }
+            }
+        }
+
+        if (force_virtual_vda && pt_pad_handle >= 0)
+            klog_printf("[Ghostpad] force_virtual_vda=1: captured fallback handle=%d use_insert=%d; stub will try VDA first\n",
+                        pt_pad_handle, pt_use_insert);
+        else if (force_virtual_vda)
+            klog_printf("[Ghostpad] force_virtual_vda=1: no pt_call fallback handle; stub will try VDA in thread context\n");
+        else if (pt_pad_handle >= 0)
+            klog_printf("[Ghostpad] pt_call handle=%d use_insert=%d — stub skips IPC\n",
+                        pt_pad_handle, pt_use_insert);
+        else if (!is_shellcore)
+            klog_printf("[Ghostpad] pt_call GetHandle/Open all failed — stub pad_handle=-2\n");
+
+        if (is_shellui) {
+            klog_printf("[Ghostpad] skipping unsafe pthread_create in %s: thread launch remains crash-prone on this firmware\n",
+                        target_name);
+            sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
+            continue;
+        }
+
+        if (!force_virtual_vda && !is_shellcore && pt_pad_handle < 0) {
+            klog_printf("[Ghostpad] skipping unsafe pthread_create in %s: no usable pt_call pad handle\n",
+                        target_name);
+            sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
+            continue;
+        }
+
+        pt_io_write(target_pid, stub_fn, (void *)stub_src, stub_code_size);
+
+        {
+            ShellUiPadArgs args;
+            memset(&args, 0, sizeof(args));
+            args.fp_gethandle = (void *)fn_gethandle;
+            args.fp_gethandle_ext = (void *)fn_gethandle_ext;
+            args.fp_open      = (void *)fn_open;
+            args.fp_open_ext  = (void *)fn_open_ext;
+            args.fp_open_ext2 = (void *)fn_open_ext2;
+            args.fp_insert    = (void *)fn_insert;
+            args.fp_vdi       = (void *)fn_vdi;
+            args.fp_vda       = (void *)fn_vda;
+            args.fp_del       = (void *)fn_del;
+            args.fp_setpriv   = (void *)fn_setpriv;
+            args.fp_setloginuser = (void *)fn_setloginuser;
+            args.fp_setusernumber = (void *)fn_setusernumber;
+            args.fp_setfocus  = (void *)fn_setfocus;
+            args.fp_usleep    = (void *)fn_usleep;
+            args.userId       = userId;
+            args.virtual_device_type = virtual_device_type;
+            args.pad_handle   = (pt_pad_handle >= 0) ? pt_pad_handle : ((is_shellcore || force_virtual_vda) ? -1 : -2);
+            args.seq          = (uint32_t)pt_use_insert;
+            if (force_virtual_vda) {
+                args.pad_handle = -1;
+                args.rc_log[0] = pt_pad_handle;
+                args.rc_log[1] = pt_use_insert;
+            }
+            pt_io_write(target_pid, args_kaddr, &args, sizeof(args));
+        }
+
+        {
+            int64_t pret = pt_call(target_pid, fn_pthread_create, stub_mem,
+                                   (uint64_t)thread_storage, 0,
+                                   (uint64_t)stub_fn, (uint64_t)args_kaddr, 0, 0);
+            klog_printf("[Ghostpad] pthread_create(%s) -> %lld\n",
+                        target_name, (long long)pret);
+            if (pret == 0) {
+                if (pt_pad_handle >= 0 &&
+                    ((pt_use_insert && fn_insert) || (!pt_use_insert && fn_vdi))) {
+                    g_shellui_direct_state.valid = 1;
+                    g_shellui_direct_state.attached = 0;
+                    g_shellui_direct_state.pid = target_pid;
+                    g_shellui_direct_state.args_kaddr = args_kaddr;
+                    g_shellui_direct_state.trap_rip = stub_mem;
+                    g_shellui_direct_state.fn_setpriv = fn_setpriv;
+                    g_shellui_direct_state.fn_setloginuser = fn_setloginuser;
+                    g_shellui_direct_state.fn_setusernumber = fn_setusernumber;
+                    g_shellui_direct_state.fn_setfocus = fn_setfocus;
+                    g_shellui_direct_state.fn_usleep = fn_usleep;
+                    g_shellui_direct_state.fn_gethandle = fn_gethandle;
+                    g_shellui_direct_state.fn_gethandle_ext = fn_gethandle_ext;
+                    g_shellui_direct_state.fn_open = fn_open;
+                    g_shellui_direct_state.fn_open_ext = fn_open_ext;
+                    g_shellui_direct_state.fn_open_ext2 = fn_open_ext2;
+                    g_shellui_direct_state.fn_insert = fn_insert;
+                    g_shellui_direct_state.fn_vdi = fn_vdi;
+                    g_shellui_direct_state.pad_handle = pt_pad_handle;
+                    g_shellui_direct_state.use_insert = pt_use_insert ? 1 : 0;
+                    klog_printf("[Ghostpad] cached direct insert path handle=%d use_insert=%d trap=0x%lx\n",
+                                pt_pad_handle, pt_use_insert ? 1 : 0, stub_mem);
+                } else if (force_virtual_vda) {
+                    g_shellui_direct_state.valid = 1;
+                    g_shellui_direct_state.attached = 0;
+                    g_shellui_direct_state.pid = target_pid;
+                    g_shellui_direct_state.args_kaddr = args_kaddr;
+                    g_shellui_direct_state.trap_rip = stub_mem;
+                    g_shellui_direct_state.fn_setpriv = fn_setpriv;
+                    g_shellui_direct_state.fn_setloginuser = fn_setloginuser;
+                    g_shellui_direct_state.fn_setusernumber = fn_setusernumber;
+                    g_shellui_direct_state.fn_setfocus = fn_setfocus;
+                    g_shellui_direct_state.fn_usleep = fn_usleep;
+                    g_shellui_direct_state.fn_gethandle = fn_gethandle;
+                    g_shellui_direct_state.fn_gethandle_ext = fn_gethandle_ext;
+                    g_shellui_direct_state.fn_open = fn_open;
+                    g_shellui_direct_state.fn_open_ext = fn_open_ext;
+                    g_shellui_direct_state.fn_open_ext2 = fn_open_ext2;
+                    g_shellui_direct_state.fn_insert = fn_insert;
+                    g_shellui_direct_state.fn_vdi = fn_vdi;
+                    g_shellui_direct_state.pad_handle = -1;
+                    g_shellui_direct_state.use_insert = 0;
+                    klog_printf("[Ghostpad] cached direct recovery context trap=0x%lx (no initial handle)\n",
+                                stub_mem);
+                } else {
+                    memset(&g_shellui_direct_state, 0, sizeof(g_shellui_direct_state));
+                }
+                *out_shellui_pid = target_pid;
+                *out_args_kaddr  = args_kaddr;
+                sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
+                klog_printf("[Ghostpad] detached from %s  ret=0\n", target_name);
+                return 0;
+            }
+            klog_printf("[Ghostpad] pthread_create failed in %s\n", target_name);
+            if (fn_free && args_mem != 0 && args_mem != stub_mem &&
+                args_mem != init_mem && args_mem != fini_mem) {
+                int64_t free_ret = pt_call(target_pid, fn_free, stub_mem,
+                                           (uint64_t)args_mem, 0, 0, 0, 0, 0);
+                klog_printf("[Ghostpad] free(args_mem=0x%lx) -> %lld\n",
+                            args_mem, (long long)free_ret);
+            }
+        }
+
+        sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
+        klog_printf("[Ghostpad] detached from %s  ret=-1\n", target_name);
+        }
+    }
+
+    klog_printf("[Ghostpad] no attachable injection target found\n");
+    return -1;
+}
+
+/* ============================================================
+ * shellui_pad_update — write new pad data (called at 60 Hz).
+ * Uses mdbg_copyin — no ptrace attach needed.
+ * ============================================================ */
+int
+shellui_pad_update(pid_t shellui_pid, intptr_t args_kaddr,
+                   const void *pad_data, uint32_t pad_data_len)
+{
+    static pid_t cached_pid = -1;
+    static intptr_t cached_args = 0;
+    static uint32_t cached_seq = 0;
+    static int logged_context = 0;
+    static int logged_data_copy_failure = 0;
+    static int logged_seq_copy_failure = 0;
+
+    if (pad_data_len > SHELLUI_PAD_DATA_SIZE)
+        pad_data_len = SHELLUI_PAD_DATA_SIZE;
+
+    if (shellui_pid != cached_pid || args_kaddr != cached_args) {
+        uint32_t observed_seq = (uint32_t)mdbg_getint(
+            shellui_pid,
+            args_kaddr + (intptr_t)offsetof(ShellUiPadArgs, seq));
+        cached_pid = shellui_pid;
+        cached_args = args_kaddr;
+        /*
+         * Target-side seq readback can degrade to 0 after startup on the
+         * working assignment-screen recovery path. Seed from the observed
+         * value when available, otherwise jump to 1 so the first outbound
+         * write still advances the stub's last-seen sequence.
+         */
+        cached_seq = (observed_seq != 0) ? observed_seq : 1;
+        if (!logged_context) {
+            klog_printf("[Ghostpad] shellui_pad_update context pid=%d args=0x%lx observed_seq=%u cached_seq=%u ready=%d handle=%d\n",
+                        shellui_pid, (unsigned long)args_kaddr, observed_seq,
+                        cached_seq,
+                        (int32_t)mdbg_getint(shellui_pid,
+                            args_kaddr + (intptr_t)offsetof(ShellUiPadArgs, ready)),
+                        (int32_t)mdbg_getint(shellui_pid,
+                            args_kaddr + (intptr_t)offsetof(ShellUiPadArgs, pad_handle)));
+            logged_context = 1;
+        }
+    }
+
+    uint32_t new_seq = cached_seq + 1;
+    intptr_t data_field = args_kaddr + (intptr_t)offsetof(ShellUiPadArgs, pad_data);
+    int copy_ret = mdbg_copyin(shellui_pid, pad_data, data_field, pad_data_len);
+    if (copy_ret) {
+        if (!logged_data_copy_failure) {
+            klog_printf("[Ghostpad] shellui_pad_update data copy failed ret=%d errno=%d pid=%d args=0x%lx data=0x%lx len=%u\n",
+                        copy_ret, errno, shellui_pid, (unsigned long)args_kaddr,
+                        (unsigned long)data_field, pad_data_len);
+            logged_data_copy_failure = 1;
+        }
+#if GHOSTPAD_ENABLE_PTRACE_UPDATE_FALLBACK
+        if (shellui_pad_ptrace_update(shellui_pid, args_kaddr, pad_data,
+                                      pad_data_len, new_seq) == 0) {
+            cached_seq = new_seq;
+            return 0;
+        }
+#else
+        klog_printf("[Ghostpad] shellui_pad_update ptrace fallback disabled after errno=1 attach failures\n");
+#endif
+        return -1;
+    }
+
+    if (shellui_pid != cached_pid || args_kaddr != cached_args) {
+        uint32_t observed_seq = (uint32_t)mdbg_getint(
+            shellui_pid,
+            args_kaddr + (intptr_t)offsetof(ShellUiPadArgs, seq));
+        cached_pid = shellui_pid;
+        cached_args = args_kaddr;
+        /*
+         * Target-side seq readback can degrade to 0 after startup on the
+         * working assignment-screen recovery path. Seed from the observed
+         * value when available, otherwise jump to 1 so the first outbound
+         * write still advances the stub's last-seen sequence.
+         */
+        cached_seq = (observed_seq != 0) ? observed_seq : 1;
+        if (!logged_context) {
+            klog_printf("[Ghostpad] shellui_pad_update context pid=%d args=0x%lx observed_seq=%u cached_seq=%u ready=%d handle=%d\n",
+                        shellui_pid, (unsigned long)args_kaddr, observed_seq,
+                        cached_seq,
+                        (int32_t)mdbg_getint(shellui_pid,
+                            args_kaddr + (intptr_t)offsetof(ShellUiPadArgs, ready)),
+                        (int32_t)mdbg_getint(shellui_pid,
+                            args_kaddr + (intptr_t)offsetof(ShellUiPadArgs, pad_handle)));
+            logged_context = 1;
+        }
+    }
+
+    intptr_t seq_field = args_kaddr + (intptr_t)offsetof(ShellUiPadArgs, seq);
+    copy_ret = mdbg_copyin(shellui_pid, &new_seq, seq_field, 4);
+    if (copy_ret) {
+        if (!logged_seq_copy_failure) {
+            klog_printf("[Ghostpad] shellui_pad_update seq copy failed ret=%d errno=%d pid=%d args=0x%lx seq=0x%lx old=%u new=%u\n",
+                        copy_ret, errno, shellui_pid, (unsigned long)args_kaddr,
+                        (unsigned long)seq_field, cached_seq, new_seq);
+            logged_seq_copy_failure = 1;
+        }
+#if GHOSTPAD_ENABLE_PTRACE_UPDATE_FALLBACK
+        if (shellui_pad_ptrace_update(shellui_pid, args_kaddr, pad_data,
+                                      pad_data_len, new_seq) == 0) {
+            cached_seq = new_seq;
+            return 0;
+        }
+#else
+        klog_printf("[Ghostpad] shellui_pad_update ptrace fallback disabled after errno=1 attach failures\n");
+#endif
+        return -1;
+    }
+
+    cached_seq = new_seq;
+    return 0;
+}
+
+int
+shellui_pad_direct_usable(pid_t shellui_pid, intptr_t args_kaddr)
+{
+    return shellui_pad_direct_context_usable(shellui_pid, args_kaddr) &&
+           g_shellui_direct_state.pad_handle >= 0 &&
+           !g_shellui_direct_state.use_insert;
+}
+
+int
+shellui_pad_direct_mode(pid_t shellui_pid, intptr_t args_kaddr)
+{
+    if (!shellui_pad_direct_context_usable(shellui_pid, args_kaddr) ||
+        g_shellui_direct_state.pad_handle < 0) {
+        return -1;
+    }
+    return g_shellui_direct_state.use_insert ? 1 : 0;
+}
+
+int
+shellui_pad_direct_adopt_vdi_handle(pid_t shellui_pid, intptr_t args_kaddr,
+                                    int32_t vdi_handle)
+{
+    if (!shellui_pad_direct_context_usable(shellui_pid, args_kaddr) ||
+        !g_shellui_direct_state.fn_vdi ||
+        vdi_handle <= 0) {
+        return -1;
+    }
+    g_shellui_direct_state.pad_handle = vdi_handle;
+    g_shellui_direct_state.use_insert = 0;
+    shellui_pad_direct_set_last_status(0x7100, vdi_handle);
+    klog_printf("[Ghostpad] direct_adopt_vdi_handle handle=0x%x pid=%d trap=0x%lx\n",
+                (uint32_t)vdi_handle, shellui_pid,
+                (unsigned long)g_shellui_direct_state.trap_rip);
+    return 0;
+}
+
+int
+shellui_pad_direct_recover(pid_t shellui_pid, intptr_t args_kaddr, int32_t userId, int32_t altUserId)
+{
+    int32_t try_users[4];
+    int try_user_count = 0;
+    int32_t handle = -1;
+    int use_insert = 0;
+    int begin_ret = 0;
+    int64_t setup_ret = 0;
+
+    shellui_pad_direct_set_last_status(0x1000, 0);
+    if (!shellui_pad_direct_context_usable(shellui_pid, args_kaddr)) {
+        shellui_pad_direct_set_last_status(0x1001, -2);
+        klog_printf("[Ghostpad] direct_recover context mismatch: requested pid=%d args=0x%lx cached valid=%d pid=%d args=0x%lx handle=%d attached=%d\n",
+                    shellui_pid,
+                    (unsigned long)args_kaddr,
+                    g_shellui_direct_state.valid ? 1 : 0,
+                    g_shellui_direct_state.pid,
+                    (unsigned long)g_shellui_direct_state.args_kaddr,
+                    g_shellui_direct_state.pad_handle,
+                    g_shellui_direct_state.attached ? 1 : 0);
+        return -2;
+    }
+    if (g_shellui_direct_state.pad_handle >= 0) {
+        shellui_pad_direct_set_last_status(0x1002, g_shellui_direct_state.pad_handle);
+        klog_printf("[Ghostpad] direct_recover reusing cached handle=%d use_insert=%d\n",
+                    g_shellui_direct_state.pad_handle,
+                    g_shellui_direct_state.use_insert ? 1 : 0);
+        return 0;
+    }
+    begin_ret = shellui_pad_direct_begin(shellui_pid, args_kaddr);
+    if (begin_ret != 0) {
+        shellui_pad_direct_set_last_status(0x1003, begin_ret);
+        klog_printf("[Ghostpad] direct_recover begin failed ret=%d pid=%d args=0x%lx\n",
+                    begin_ret, shellui_pid, (unsigned long)args_kaddr);
+        return begin_ret;
+    }
+
+    if (g_shellui_direct_state.fn_setpriv) {
+        setup_ret = pt_call(shellui_pid, g_shellui_direct_state.fn_setpriv, g_shellui_direct_state.trap_rip,
+                            1, 0, 0, 0, 0, 0);
+        shellui_pad_direct_set_last_status(0x1101, setup_ret);
+        klog_printf("[Ghostpad] direct_recover setpriv(1) -> 0x%llx\n",
+                    (unsigned long long)(uint64_t)setup_ret);
+    }
+    if (g_shellui_direct_state.fn_setloginuser) {
+        setup_ret = pt_call(shellui_pid, g_shellui_direct_state.fn_setloginuser, g_shellui_direct_state.trap_rip,
+                            1, 0, 0, 0, 0, 0);
+        shellui_pad_direct_set_last_status(0x1102, setup_ret);
+        klog_printf("[Ghostpad] direct_recover setloginuser(1) -> 0x%llx\n",
+                    (unsigned long long)(uint64_t)setup_ret);
+    }
+    if (g_shellui_direct_state.fn_setusernumber) {
+        setup_ret = pt_call(shellui_pid, g_shellui_direct_state.fn_setusernumber, g_shellui_direct_state.trap_rip,
+                            1, 0, 0, 0, 0, 0);
+        shellui_pad_direct_set_last_status(0x1103, setup_ret);
+        klog_printf("[Ghostpad] direct_recover setusernumber(1) -> 0x%llx\n",
+                    (unsigned long long)(uint64_t)setup_ret);
+    }
+    if (g_shellui_direct_state.fn_setfocus) {
+        setup_ret = pt_call(shellui_pid, g_shellui_direct_state.fn_setfocus, g_shellui_direct_state.trap_rip,
+                            1, 0, 0, 0, 0, 0);
+        shellui_pad_direct_set_last_status(0x1104, setup_ret);
+        klog_printf("[Ghostpad] direct_recover setfocus(1) -> 0x%llx\n",
+                    (unsigned long long)(uint64_t)setup_ret);
+    }
+    if (g_shellui_direct_state.fn_usleep) {
+        setup_ret = pt_call(shellui_pid, g_shellui_direct_state.fn_usleep, g_shellui_direct_state.trap_rip,
+                            150000, 0, 0, 0, 0, 0);
+        shellui_pad_direct_set_last_status(0x1105, setup_ret);
+        klog_printf("[Ghostpad] direct_recover usleep(150000) -> 0x%llx\n",
+                    (unsigned long long)(uint64_t)setup_ret);
+    }
+
+    try_users[try_user_count++] = 1;
+    if (userId >= 0 && userId != try_users[0]) {
+        try_users[try_user_count++] = userId;
+    }
+    if (0x10000000 != try_users[0] &&
+        (try_user_count < 2 || 0x10000000 != try_users[1])) {
+        try_users[try_user_count++] = 0x10000000;
+    }
+    if (altUserId >= 0) {
+        int seen = 0;
+        for (int ui = 0; ui < try_user_count; ui++) {
+            if (try_users[ui] == altUserId) {
+                seen = 1;
+                break;
+            }
+        }
+        if (!seen && try_user_count < (int)(sizeof(try_users) / sizeof(try_users[0]))) {
+            try_users[try_user_count++] = altUserId;
+        }
+    }
+
+    if (g_shellui_direct_state.fn_gethandle_ext || g_shellui_direct_state.fn_gethandle) {
+        for (int ui = 0; ui < try_user_count && handle < 0; ui++) {
+            for (int idx = 0; idx < 8 && handle < 0; idx++) {
+                int64_t gh = g_shellui_direct_state.fn_gethandle_ext
+                    ? pt_call(shellui_pid, g_shellui_direct_state.fn_gethandle_ext, g_shellui_direct_state.trap_rip,
+                              (uint64_t)try_users[ui], 3, (uint64_t)idx, 0, 0, 0)
+                    : pt_call(shellui_pid, g_shellui_direct_state.fn_gethandle, g_shellui_direct_state.trap_rip,
+                              (uint64_t)try_users[ui], 3, (uint64_t)idx, 0, 0, 0);
+                shellui_pad_direct_set_last_status(0x2000 | (idx & 0xff), gh);
+                klog_printf("[Ghostpad] direct_recover GetHandle(0x%x,3,%d) -> 0x%llx\n",
+                            try_users[ui], idx, (unsigned long long)(uint64_t)gh);
+                if ((int32_t)gh >= 0) {
+                    handle = (int32_t)gh;
+                    use_insert = 0;
+                }
+            }
+        }
+    }
+
+    if (handle < 0 &&
+        g_shellui_direct_state.fn_usleep &&
+        (g_shellui_direct_state.fn_gethandle_ext || g_shellui_direct_state.fn_gethandle)) {
+        for (int attempt = 0; attempt < 60 && handle < 0; attempt++) {
+            for (int ui = 0; ui < try_user_count && handle < 0; ui++) {
+                for (int idx = 0; idx < 8 && handle < 0; idx++) {
+                    int64_t gh = g_shellui_direct_state.fn_gethandle_ext
+                        ? pt_call(shellui_pid, g_shellui_direct_state.fn_gethandle_ext, g_shellui_direct_state.trap_rip,
+                                  (uint64_t)try_users[ui], 3, (uint64_t)idx, 0, 0, 0)
+                        : pt_call(shellui_pid, g_shellui_direct_state.fn_gethandle, g_shellui_direct_state.trap_rip,
+                                  (uint64_t)try_users[ui], 3, (uint64_t)idx, 0, 0, 0);
+                    shellui_pad_direct_set_last_status(0x2100 | ((attempt & 0xff) << 4) | (idx & 0xf), gh);
+                    klog_printf("[Ghostpad] direct_recover retry GetHandle(0x%x,3,%d) attempt=%d -> 0x%llx\n",
+                                try_users[ui], idx, attempt, (unsigned long long)(uint64_t)gh);
+                    if ((int32_t)gh >= 0) {
+                        handle = (int32_t)gh;
+                        use_insert = 0;
+                    }
+                }
+            }
+            if (handle < 0) {
+                int64_t sleep_ret = pt_call(shellui_pid, g_shellui_direct_state.fn_usleep, g_shellui_direct_state.trap_rip,
+                                            150000, 0, 0, 0, 0, 0);
+                shellui_pad_direct_set_last_status(0x2200 | (attempt & 0xff), sleep_ret);
+            }
+        }
+    }
+
+    if (handle < 0 &&
+        (g_shellui_direct_state.fn_gethandle_ext || g_shellui_direct_state.fn_gethandle)) {
+        for (int ui = 0; ui < try_user_count && handle < 0; ui++) {
+            for (int idx = 0; idx < 4 && handle < 0; idx++) {
+                int64_t gh = g_shellui_direct_state.fn_gethandle_ext
+                    ? pt_call(shellui_pid, g_shellui_direct_state.fn_gethandle_ext, g_shellui_direct_state.trap_rip,
+                              (uint64_t)try_users[ui], 0, (uint64_t)idx, 0, 0, 0)
+                    : pt_call(shellui_pid, g_shellui_direct_state.fn_gethandle, g_shellui_direct_state.trap_rip,
+                              (uint64_t)try_users[ui], 0, (uint64_t)idx, 0, 0, 0);
+                shellui_pad_direct_set_last_status(0x3000 | (idx & 0xff), gh);
+                klog_printf("[Ghostpad] direct_recover GetHandle(0x%x,0,%d) -> 0x%llx\n",
+                            try_users[ui], idx, (unsigned long long)(uint64_t)gh);
+                if ((int32_t)gh >= 0) {
+                    handle = (int32_t)gh;
+                    use_insert = 1;
+                }
+            }
+        }
+    }
+
+    if (handle < 0 && g_shellui_direct_state.fn_open) {
+        for (int ui = 0; ui < try_user_count && handle < 0; ui++) {
+            int64_t oh = pt_call(shellui_pid, g_shellui_direct_state.fn_open, g_shellui_direct_state.trap_rip,
+                                 (uint64_t)try_users[ui], 3, 0, 0, 0, 0);
+            shellui_pad_direct_set_last_status(0x5002, oh);
+            klog_printf("[Ghostpad] direct_recover scePadOpen(0x%x,3) -> 0x%llx\n",
+                        try_users[ui], (unsigned long long)(uint64_t)oh);
+            if ((int32_t)oh >= 0) {
+                handle = (int32_t)oh;
+                use_insert = 0;
+            }
+        }
+    }
+
+    if (handle < 0 && g_shellui_direct_state.fn_open) {
+        for (int ui = 0; ui < try_user_count && handle < 0; ui++) {
+            int64_t oh = pt_call(shellui_pid, g_shellui_direct_state.fn_open, g_shellui_direct_state.trap_rip,
+                                 (uint64_t)try_users[ui], 0, 0, 0, 0, 0);
+            shellui_pad_direct_set_last_status(0x5000, oh);
+            klog_printf("[Ghostpad] direct_recover scePadOpen(0x%x,0) -> 0x%llx\n",
+                        try_users[ui], (unsigned long long)(uint64_t)oh);
+            if ((int32_t)oh >= 0) {
+                handle = (int32_t)oh;
+                use_insert = 1;
+            }
+        }
+    }
+
+    if (handle < 0 &&
+        (g_shellui_direct_state.fn_open_ext2 || g_shellui_direct_state.fn_open_ext)) {
+        for (int ui = 0; ui < try_user_count && handle < 0; ui++) {
+            int64_t oh = g_shellui_direct_state.fn_open_ext2
+                ? pt_call(shellui_pid, g_shellui_direct_state.fn_open_ext2, g_shellui_direct_state.trap_rip,
+                          (uint64_t)try_users[ui], 3, 0, 0, 0, 0)
+                : pt_call(shellui_pid, g_shellui_direct_state.fn_open_ext, g_shellui_direct_state.trap_rip,
+                          (uint64_t)try_users[ui], 3, 0, 0, 0, 0);
+            shellui_pad_direct_set_last_status(0x6002, oh);
+            klog_printf("[Ghostpad] direct_recover scePadOpen*(0x%x,3) -> 0x%llx\n",
+                        try_users[ui], (unsigned long long)(uint64_t)oh);
+            if ((int32_t)oh >= 0) {
+                handle = (int32_t)oh;
+                use_insert = 0;
+            }
+        }
+    }
+
+    if (handle < 0 &&
+        (g_shellui_direct_state.fn_open_ext2 || g_shellui_direct_state.fn_open_ext)) {
+        for (int ui = 0; ui < try_user_count && handle < 0; ui++) {
+            int64_t oh = g_shellui_direct_state.fn_open_ext2
+                ? pt_call(shellui_pid, g_shellui_direct_state.fn_open_ext2, g_shellui_direct_state.trap_rip,
+                          (uint64_t)try_users[ui], 0, 0, 0, 0, 0)
+                : pt_call(shellui_pid, g_shellui_direct_state.fn_open_ext, g_shellui_direct_state.trap_rip,
+                          (uint64_t)try_users[ui], 0, 0, 0, 0, 0);
+            shellui_pad_direct_set_last_status(0x6000, oh);
+            klog_printf("[Ghostpad] direct_recover scePadOpen*(0x%x,0) -> 0x%llx\n",
+                        try_users[ui], (unsigned long long)(uint64_t)oh);
+            if ((int32_t)oh >= 0) {
+                handle = (int32_t)oh;
+                use_insert = 1;
+            }
+        }
+    }
+
+    if (handle >= 0) {
+        g_shellui_direct_state.pad_handle = handle;
+        g_shellui_direct_state.use_insert = use_insert ? 1 : 0;
+        shellui_pad_direct_set_last_status(0x7000 | (use_insert ? 1 : 0), handle);
+        klog_printf("[Ghostpad] direct_recover cached handle=%d use_insert=%d\n",
+                    handle, use_insert ? 1 : 0);
+        return 0;
+    }
+
+    {
+        int32_t last_stage = 0;
+        int64_t last_value = 0;
+
+        shellui_pad_direct_get_last_status(&last_stage, &last_value);
+        klog_printf("[Ghostpad] direct_recover found no usable handle for pid=%d args=0x%lx user=0x%x last_stage=0x%08x last_value=0x%llx\n",
+                    shellui_pid,
+                    (unsigned long)args_kaddr,
+                    (uint32_t)userId,
+                    (uint32_t)last_stage,
+                    (unsigned long long)(uint64_t)last_value);
+    }
+    shellui_pad_direct_end(shellui_pid, args_kaddr);
+    return -3;
+}
+
+int
+shellui_pad_direct_begin(pid_t shellui_pid, intptr_t args_kaddr)
+{
+    int attach_errno = 0;
+
+    if (!shellui_pad_direct_context_usable(shellui_pid, args_kaddr)) {
+        return -1;
+    }
+    if (g_shellui_direct_state.attached) {
+        return 0;
+    }
+    for (int attempt = 0; attempt < 20; attempt++) {
+        if (sys_ptrace(PT_ATTACH, shellui_pid, 0, 0) == 0) {
+            waitpid(shellui_pid, NULL, 0);
+            g_shellui_direct_state.attached = 1;
+            if (attempt > 0) {
+                klog_printf("[Ghostpad] direct_begin PT_ATTACH(pid=%d) succeeded after %d retries\n",
+                            shellui_pid, attempt);
+            }
+            return 0;
+        }
+        attach_errno = errno;
+        usleep(50000);
+    }
+    klog_printf("[Ghostpad] direct_begin PT_ATTACH(pid=%d) failed errno=%d\n",
+                shellui_pid, attach_errno);
+    return -attach_errno;
+}
+
+int
+shellui_pad_direct_send(pid_t shellui_pid, intptr_t args_kaddr,
+                        const void *pad_data, uint32_t pad_data_len)
+{
+    uint8_t temp[SHELLUI_PAD_DATA_SIZE];
+    intptr_t fn;
+    int attached_here = 0;
+    int ret;
+
+    if (!shellui_pad_direct_context_usable(shellui_pid, args_kaddr) ||
+        g_shellui_direct_state.pad_handle < 0) {
+        return -1;
+    }
+    if (g_shellui_direct_state.use_insert) {
+        klog_printf("[Ghostpad] direct_send refused unsafe remote insert handle=%d\n",
+                    g_shellui_direct_state.pad_handle);
+        return -2;
+    }
+
+    memset(temp, 0, sizeof(temp));
+    if (pad_data_len > SHELLUI_PAD_DATA_SIZE) {
+        pad_data_len = SHELLUI_PAD_DATA_SIZE;
+    }
+    memcpy(temp, pad_data, pad_data_len);
+
+    fn = g_shellui_direct_state.use_insert
+       ? g_shellui_direct_state.fn_insert
+       : g_shellui_direct_state.fn_vdi;
+    if (!fn) {
+        return -1;
+    }
+
+    if (!g_shellui_direct_state.attached) {
+        ret = shellui_pad_direct_begin(shellui_pid, args_kaddr);
+        if (ret != 0) {
+            return ret;
+        }
+        attached_here = 1;
+    }
+
+    ret = (int)pt_call_with_copy(shellui_pid, fn, g_shellui_direct_state.trap_rip,
+                                 (uint64_t)g_shellui_direct_state.pad_handle,
+                                 temp, sizeof(temp));
+    if (attached_here) {
+        shellui_pad_direct_end(shellui_pid, args_kaddr);
+    }
+    return ret;
+}
+
+void
+shellui_pad_direct_end(pid_t shellui_pid, intptr_t args_kaddr)
+{
+    if (!g_shellui_direct_state.attached ||
+        !shellui_pad_direct_context_usable(shellui_pid, args_kaddr)) {
+        return;
+    }
+    sys_ptrace(PT_DETACH, shellui_pid, (caddr_t)1, 0);
+    g_shellui_direct_state.attached = 0;
+}
+
+/* ============================================================
+ * shellui_pad_dismiss_assignment_screen
+ *
+ * Called after SceShellCore VDA injection creates the virtual device.
+ * SceShellUI has already opened the device (visible in klog as
+ * "Open Pad [deviceId, 0, 0]: ret=HANDLE").  We PT_ATTACH SceShellUI,
+ * call scePadGetHandle(userId, type=3, idx) via pt_call (the process
+ * executes normally during the call so the pad IPC can respond), then
+ * send Cross × 30 frames + release × 18 frames via pt_call_with_copy
+ * against scePadVirtualDeviceInsertData.  VDI writes to shared memory
+ * so it is safe from the stopped-thread injection context.
+ * ============================================================ */
+int
+shellui_pad_dismiss_assignment_screen(int32_t userId, uint64_t virtualDeviceId)
+{
+    pid_t pids[16];
+    size_t count = find_pids("SceShellUI", pids, 16);
+    if (count == 0) {
+        klog_printf("[Ghostpad] dismiss: SceShellUI not found\n");
+        return -1;
+    }
+    pid_t target_pid = pids[0];
+
+    klog_printf("[Ghostpad] dismiss: PT_ATTACH(SceShellUI pid=%d)...\n", target_pid);
+    if (sys_ptrace(PT_ATTACH, target_pid, 0, 0) != 0) {
+        klog_printf("[Ghostpad] dismiss: PT_ATTACH failed errno=%d\n", errno);
+        return -1;
+    }
+    waitpid(target_pid, NULL, 0);
+    klog_printf("[Ghostpad] dismiss: attached\n");
+
+    uint32_t libpad_h = 0, libkernel_h = 0;
+    if (get_lib(target_pid, "libScePad", &libpad_h)) {
+        klog_printf("[Ghostpad] dismiss: libScePad not found in SceShellUI\n");
+        sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
+        return -1;
+    }
+    get_lib(target_pid, "libkernel_sys", &libkernel_h);
+
+    intptr_t fn_gethandle = resolve_sym(target_pid, libpad_h, "scePadGetHandle");
+    intptr_t fn_open      = resolve_sym(target_pid, libpad_h, "scePadOpen");
+    intptr_t fn_open_ext  = resolve_sym(target_pid, libpad_h, "scePadOpenExt");
+    intptr_t fn_open_ext2 = resolve_sym(target_pid, libpad_h, "scePadOpenExt2");
+    intptr_t fn_usleep    = libkernel_h ? resolve_sym(target_pid, libkernel_h, "usleep") : 0;
+    intptr_t fn_vdi       = resolve_sym(target_pid, libpad_h, "scePadVirtualDeviceInsertData");
+    if (!fn_vdi) {
+        klog_printf("[Ghostpad] dismiss: VDI symbol missing\n");
+        sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
+        return -1;
+    }
+    klog_printf("[Ghostpad] dismiss: GH=0x%lx Open=0x%lx VDI=0x%lx usleep=0x%lx\n",
+                fn_gethandle, fn_open, fn_vdi, fn_usleep);
+
+    intptr_t trap_mem = kernel_dynlib_init_addr(target_pid, libpad_h);
+    if (!trap_mem) trap_mem = kernel_dynlib_fini_addr(target_pid, libpad_h);
+    if (!trap_mem) {
+        klog_printf("[Ghostpad] dismiss: no code cave in SceShellUI libScePad\n");
+        sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
+        return -1;
+    }
+    if (kernel_set_vmem_protection(target_pid, trap_mem, 16,
+                                   PROT_READ | PROT_WRITE | PROT_EXEC)) {
+        klog_printf("[Ghostpad] dismiss: RWX failed\n");
+        sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
+        return -1;
+    }
+    uint8_t int3 = 0xCC;
+    pt_io_write(target_pid, trap_mem, &int3, 1);
+    klog_printf("[Ghostpad] dismiss: trap=0x%lx\n", trap_mem);
+
+    /* -- Phase 1: find the virtual device handle in SceShellUI ----------------
+     * The device was created by VDA (userId=0xffffffff).  SceShellUI already
+     * opened it ("Open Pad [deviceId,0,0]: ret=HANDLE" in klog).  Try all
+     * plausible lookups.  Log every result so we know which call works. */
+    int32_t try_uids[4] = {(int32_t)0xffffffff, 0, 1, userId};
+    int32_t vd_handle = -1;
+
+    /* A1: GetHandle(userId, type=0, idx=0..7) — after force_bind, the virtual device
+     * appears in CIM slot N alongside the physical device.  The physical is at idx=0,
+     * the virtual may be at idx=1 (or higher).  Try type=0 first since both show as
+     * DualSense in the CIM (sub=22).  Log EVERY result to determine which idx succeeds. */
+    if (fn_gethandle) {
+        for (int i = 0; i < 4 && vd_handle < 0; i++) {
+            for (int idx = 0; idx < 8; idx++) {
+                int64_t gh = pt_call(target_pid, fn_gethandle, trap_mem,
+                                     (uint64_t)(uint32_t)try_uids[i], 0, (uint64_t)idx,
+                                     0, 0, 0);
+                klog_printf("[Ghostpad] dismiss: GH(uid=0x%x,type=0,idx=%d)->0x%llx\n",
+                            (uint32_t)try_uids[i], idx, (unsigned long long)(uint64_t)gh);
+                if ((int32_t)gh >= 0 && vd_handle < 0) vd_handle = (int32_t)gh;
+            }
+        }
+    }
+
+    /* A2: GetHandle with type=3 as fallback */
+    if (fn_gethandle && vd_handle < 0) {
+        for (int i = 0; i < 4 && vd_handle < 0; i++) {
+            for (int idx = 0; idx < 4 && vd_handle < 0; idx++) {
+                int64_t gh = pt_call(target_pid, fn_gethandle, trap_mem,
+                                     (uint64_t)(uint32_t)try_uids[i], 3, (uint64_t)idx,
+                                     0, 0, 0);
+                klog_printf("[Ghostpad] dismiss: GH(uid=0x%x,type=3,idx=%d)->0x%llx\n",
+                            (uint32_t)try_uids[i], idx, (unsigned long long)(uint64_t)gh);
+                if ((int32_t)gh >= 0) vd_handle = (int32_t)gh;
+            }
+        }
+    }
+
+    /* A3: GetHandle(deviceId_low32, type, idx) — direct device ID based lookup */
+    if (fn_gethandle && vd_handle < 0 && virtualDeviceId != 0) {
+        uint32_t dev32 = (uint32_t)(virtualDeviceId & 0xFFFFFFFF);
+        int types[2] = {0, 3};
+        for (int t = 0; t < 2 && vd_handle < 0; t++) {
+            for (int idx = 0; idx < 4 && vd_handle < 0; idx++) {
+                int64_t gh = pt_call(target_pid, fn_gethandle, trap_mem,
+                                     (uint64_t)dev32, (uint64_t)types[t], (uint64_t)idx,
+                                     0, 0, 0);
+                klog_printf("[Ghostpad] dismiss: GH(devId=0x%x,type=%d,idx=%d)->0x%llx\n",
+                            dev32, types[t], idx, (unsigned long long)(uint64_t)gh);
+                if ((int32_t)gh >= 0) vd_handle = (int32_t)gh;
+            }
+        }
+    }
+
+    /* B: scePadOpen* variants (SceShellUI "Open Pad" may use Open not GetHandle) */
+    if (vd_handle < 0) {
+        for (int i = 0; i < 4 && vd_handle < 0; i++) {
+            intptr_t fn = fn_open_ext2 ? fn_open_ext2
+                        : fn_open_ext  ? fn_open_ext
+                        : fn_open;
+            if (!fn) break;
+            int64_t oh = fn_open_ext2
+                ? pt_call(target_pid, fn, trap_mem,
+                          (uint64_t)(uint32_t)try_uids[i], 3, 0, 0, 0, 0)
+                : fn_open_ext
+                ? pt_call(target_pid, fn, trap_mem,
+                          (uint64_t)(uint32_t)try_uids[i], 3, 0, 0, 0, 0)
+                : pt_call(target_pid, fn, trap_mem,
+                          (uint64_t)(uint32_t)try_uids[i], 3, 0, 0, 0, 0);
+            klog_printf("[Ghostpad] dismiss: Open(0x%x,3)->0x%llx\n",
+                        (uint32_t)try_uids[i], (unsigned long long)(uint64_t)oh);
+            if ((int32_t)oh >= 0) vd_handle = (int32_t)oh;
+        }
+    }
+
+    if (vd_handle < 0) {
+        klog_printf("[Ghostpad] dismiss: no handle found — cannot send Cross\n");
+        sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
+        return -1;
+    }
+    klog_printf("[Ghostpad] dismiss: handle=0x%x; sending Cross\n", (uint32_t)vd_handle);
+
+    /* -- Phase 2: send Cross via VDI ----------------------------------------
+     * ScePadData layout (byte view, LE):
+     *   [0..3] buttons  — Cross = 0x00004000 → byte[1]=0x40
+     *   [4]    LS.x=128, [5] LS.y=128, [6] RS.x=128, [7] RS.y=128
+     *   [26]   quat.w low byte 0x80, [27] 0x3F  (1.0f LE)
+     *   [76]   connected=1 */
+    uint8_t press[SHELLUI_PAD_DATA_SIZE];
+    uint8_t release_d[SHELLUI_PAD_DATA_SIZE];
+    memset(press, 0, SHELLUI_PAD_DATA_SIZE);
+    memset(release_d, 0, SHELLUI_PAD_DATA_SIZE);
+    press[1] = 0x40;
+    press[4] = 128; press[5] = 128; press[6] = 128; press[7] = 128;
+    press[26] = 0x80; press[27] = 0x3F;
+    press[76] = 1;
+    release_d[4] = 128; release_d[5] = 128; release_d[6] = 128; release_d[7] = 128;
+    release_d[26] = 0x80; release_d[27] = 0x3F;
+    release_d[76] = 1;
+
+    /* Press Cross × 30 frames (~500ms at 60Hz) */
+    for (int frame = 0; frame < 30; frame++) {
+        int64_t vret = pt_call_with_copy(target_pid, fn_vdi, trap_mem,
+                                          (uint64_t)vd_handle, press, SHELLUI_PAD_DATA_SIZE);
+        if (frame == 0)
+            klog_printf("[Ghostpad] dismiss: VDI press frame0 -> %lld\n", (long long)vret);
+        /* pace at ~16ms between frames if usleep available */
+        if (fn_usleep)
+            pt_call(target_pid, fn_usleep, trap_mem, 16000, 0, 0, 0, 0, 0);
+    }
+    /* Release × 12 frames */
+    for (int frame = 0; frame < 12; frame++) {
+        pt_call_with_copy(target_pid, fn_vdi, trap_mem,
+                          (uint64_t)vd_handle, release_d, SHELLUI_PAD_DATA_SIZE);
+        if (fn_usleep)
+            pt_call(target_pid, fn_usleep, trap_mem, 16000, 0, 0, 0, 0, 0);
+    }
+
+    /* -- Phase 3: probe GetHandle post-dismiss --------------------------------
+     * If assignment succeeded, the device now has userId=0x18c60ea1 and
+     * GetHandle(userId, type=3, idx) should return the system padHandle. */
+    if (fn_usleep)
+        pt_call(target_pid, fn_usleep, trap_mem, 500000, 0, 0, 0, 0, 0);  /* 500ms */
+
+    int32_t post_handle = -1;
+    if (fn_gethandle) {
+        int ptypes[2] = {0, 3};
+        for (int t = 0; t < 2 && post_handle < 0; t++) {
+            for (int idx = 0; idx < 8 && post_handle < 0; idx++) {
+                int64_t ph = pt_call(target_pid, fn_gethandle, trap_mem,
+                                     (uint64_t)(uint32_t)userId, (uint64_t)ptypes[t], (uint64_t)idx,
+                                     0, 0, 0);
+                klog_printf("[Ghostpad] dismiss: post GH(uid=0x%x,type=%d,%d)->0x%llx\n",
+                            (uint32_t)userId, ptypes[t], idx, (unsigned long long)(uint64_t)ph);
+                if ((int32_t)ph >= 0) post_handle = (int32_t)ph;
+            }
+        }
+    }
+    if (post_handle >= 0)
+        klog_printf("[Ghostpad] dismiss: post-assign handle=0x%x — assignment SUCCESS\n",
+                    (uint32_t)post_handle);
+    else
+        klog_printf("[Ghostpad] dismiss: post-dismiss GH still failed — may need more time\n");
+
+    sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
+    klog_printf("[Ghostpad] dismiss: done PT_DETACH\n");
+    return (post_handle >= 0) ? 0 : 1;  /* 0=confirmed, 1=VDI sent but assignment unconfirmed */
+}
+
+/* ============================================================
+ * shellui_pad_force_bind — bypass the assignment screen entirely.
+ *
+ * Calls sceMbusBindDeviceWithUserId(virtualDeviceId, userId) via pt_call
+ * inside SceShellUI.  This is the same call LoginMgr makes after the user
+ * presses Cross; calling it directly skips the VDI/UI step entirely.
+ *
+ * virtualDeviceId: the 64-bit MBUS device ID from the DEVICE_ADDED klog line
+ *   (e.g., 0x25030d).  The Python automation extracts this from klog and
+ *   sends it via the GBND packet on the control port.
+ * ============================================================ */
+/* ============================================================
+ * shellui_pad_test_vdi_cross — send a Cross press to a KNOWN padHandle.
+ *
+ * padHandle comes from the CIM log (extracted by Python from klog), not from
+ * scePadGetHandle (which returns 0x80920008 for virtual devices).
+ * The VDI call is safe from a stopped-context (shared memory write, no IPC).
+ * Returns 0 if VDI returned 0 on the first frame (indicating success).
+ * ============================================================ */
+static int
+pad_test_vdi_cross_in_process(const char *process_name, const char *tag, int32_t pad_handle)
+{
+    pid_t pids[4];
+    size_t n = find_pids(process_name, pids, 4);
+    if (n == 0) {
+        klog_printf("[Ghostpad] %s: %s not found\n", tag, process_name);
+        return -1;
+    }
+    pid_t target_pid = pids[0];
+
+    klog_printf("[Ghostpad] %s: pid=%d handle=0x%x\n", tag, target_pid, (uint32_t)pad_handle);
+    if (pad_handle <= 0) {
+        klog_printf("[Ghostpad] %s: invalid handle\n", tag);
+        return -1;
+    }
+
+    if (sys_ptrace(PT_ATTACH, target_pid, 0, 0) != 0) {
+        klog_printf("[Ghostpad] %s: PT_ATTACH failed errno=%d\n", tag, errno);
+        return -1;
+    }
+    waitpid(target_pid, NULL, 0);
+
+    uint32_t libpad_h = 0;
+    get_lib(target_pid, "libScePad", &libpad_h);
+    intptr_t fn_vdi = libpad_h ? resolve_sym(target_pid, libpad_h,
+                                              "scePadVirtualDeviceInsertData") : 0;
+    intptr_t trap_mem = libpad_h ? kernel_dynlib_init_addr(target_pid, libpad_h) : 0;
+    if (!trap_mem && libpad_h) trap_mem = kernel_dynlib_fini_addr(target_pid, libpad_h);
+
+    if (!fn_vdi || !trap_mem) {
+        klog_printf("[Ghostpad] %s: symbol/cave fail vdi=0x%lx trap=0x%lx\n",
+                    tag, fn_vdi, trap_mem);
+        sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
+        return -1;
+    }
+    kernel_set_vmem_protection(target_pid, trap_mem, 16, PROT_READ | PROT_WRITE | PROT_EXEC);
+    uint8_t int3 = 0xCC;
+    pt_io_write(target_pid, trap_mem, &int3, 1);
+
+    uint8_t press[SHELLUI_PAD_DATA_SIZE];
+    uint8_t release_d[SHELLUI_PAD_DATA_SIZE];
+    memset(press, 0, SHELLUI_PAD_DATA_SIZE);
+    memset(release_d, 0, SHELLUI_PAD_DATA_SIZE);
+    press[1] = 0x40;  /* Cross */
+    press[4] = 128; press[5] = 128; press[6] = 128; press[7] = 128;
+    press[26] = 0x80; press[27] = 0x3F;
+    press[76] = 1;
+    release_d[4] = 128; release_d[5] = 128; release_d[6] = 128; release_d[7] = 128;
+    release_d[26] = 0x80; release_d[27] = 0x3F;
+    release_d[76] = 1;
+
+    int result = 0;
+    for (int frame = 0; frame < 15; frame++) {
+        int64_t r = pt_call_with_copy(target_pid, fn_vdi, trap_mem,
+                                       (uint64_t)pad_handle, press, SHELLUI_PAD_DATA_SIZE);
+        if (frame == 0) {
+            klog_printf("[Ghostpad] %s: VDI press frame0 -> %lld\n", tag, (long long)r);
+            result = (int)r;
+        }
+    }
+    for (int frame = 0; frame < 8; frame++) {
+        pt_call_with_copy(target_pid, fn_vdi, trap_mem,
+                          (uint64_t)pad_handle, release_d, SHELLUI_PAD_DATA_SIZE);
+    }
+
+    sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
+    klog_printf("[Ghostpad] %s: done, first VDI ret=%d\n", tag, result);
+    return result;
+}
+
+int
+shellui_pad_test_vdi_cross(int32_t pad_handle)
+{
+    return pad_test_vdi_cross_in_process("SceShellUI", "vdi_cross_ui", pad_handle);
+}
+
+int
+shellcore_pad_test_vdi_cross(int32_t pad_handle)
+{
+    return pad_test_vdi_cross_in_process("SceShellCore", "vdi_cross_core", pad_handle);
+}
+
+/* ============================================================
+ * legacy disabled probe - retained only to avoid old object references.
+ *
+ * Old experiments used a game-type pad session (previously confirmed that
+ * pt_call scePadOpen(userId,0,0) returns a positive handle there).
+ * After sceMbusBindDeviceWithUserId assigns the virtual device to userId,
+ * the virtual device should appear at slot 1 in the game-type session.
+ * Returns the first positive handle found, or -1 if none.
+ * ============================================================ */
+/* ============================================================
+ * shellui_pad_patch_vda — disassemble + patch scePadVirtualDeviceAddDevice
+ * in SceShellCore's libScePad to bypass the 0x803b0006 assignment-screen
+ * return.  Strategy: scan the function bytes for `B8 06 00 3B 80`
+ * (mov eax, 0x803b0006) and overwrite with `B8 00 00 00 00` (mov eax, 0)
+ * so VDA falls into the success path or returns 0 instead of the assignment
+ * sentinel.  Reads dump_only bytes when dump_only=1 (no write).
+ *
+ * Returns: number of patches applied (0 if none found, -1 on error).
+ * ============================================================ */
+int
+shellui_pad_patch_vda(int dump_only)
+{
+    pid_t pids[8];
+    if (find_pids("SceShellCore", pids, 8) == 0) {
+        klog_printf("[Ghostpad] patch_vda: SceShellCore not found\n");
+        return -1;
+    }
+    pid_t target = pids[0];
+
+    klog_printf("[Ghostpad] patch_vda: PT_ATTACH(SceShellCore pid=%d) dump_only=%d\n",
+                target, dump_only);
+    if (sys_ptrace(PT_ATTACH, target, 0, 0) != 0) {
+        klog_printf("[Ghostpad] patch_vda: PT_ATTACH failed errno=%d\n", errno);
+        return -1;
+    }
+    waitpid(target, NULL, 0);
+
+    uint32_t libpad_h = 0;
+    if (get_lib(target, "libScePad", &libpad_h)) {
+        sys_ptrace(PT_DETACH, target, (caddr_t)1, 0);
+        return -1;
+    }
+    intptr_t fn_vda = resolve_sym(target, libpad_h, "scePadVirtualDeviceAddDevice");
+    if (!fn_vda) {
+        klog_printf("[Ghostpad] patch_vda: scePadVirtualDeviceAddDevice not found\n");
+        sys_ptrace(PT_DETACH, target, (caddr_t)1, 0);
+        return -1;
+    }
+    klog_printf("[Ghostpad] patch_vda: fn_vda @ 0x%lx\n", fn_vda);
+
+    /* libScePad text is usually X-only on PS5.  Set RWX on a wide range so we
+     * can scan VDA itself (start) AND the IPC dispatch sub-function it calls
+     * (at fn_vda + ~0xb460).  Cover 24 pages = 96KB. */
+    intptr_t page0 = fn_vda & ~(intptr_t)0xFFF;
+    for (int pg = 0; pg < 24; pg++) {
+        intptr_t pa = page0 + (intptr_t)(pg * 0x1000);
+        kernel_set_vmem_protection(target, pa, 0x1000,
+                                   PROT_READ | PROT_WRITE | PROT_EXEC);
+    }
+    klog_printf("[Ghostpad] patch_vda: set RWX on 24 pages from 0x%lx\n", page0);
+
+    /* Read 96KB so the IPC sub-function (at +0xb460 from fn_vda) is included. */
+    const size_t SCAN_LEN = 96 * 1024;
+    static uint8_t buf[96 * 1024];
+    {
+        struct ptrace_io_desc iod;
+        iod.piod_op   = PIOD_READ_D;
+        iod.piod_offs = (void *)fn_vda;
+        iod.piod_addr = buf;
+        iod.piod_len  = SCAN_LEN;
+        if (sys_ptrace(PT_IO, target, (caddr_t)&iod, 0)) {
+            klog_printf("[Ghostpad] patch_vda: PT_IO READ failed errno=%d len=%zu\n",
+                        errno, SCAN_LEN);
+            sys_ptrace(PT_DETACH, target, (caddr_t)1, 0);
+            return -1;
+        }
+    }
+
+    /* Hex dump first 512 bytes for analysis */
+    for (size_t off = 0; off < 512 && off < SCAN_LEN; off += 16) {
+        klog_printf("[Ghostpad] patch_vda: +%03zx: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+            off,
+            buf[off+0],buf[off+1],buf[off+2],buf[off+3],
+            buf[off+4],buf[off+5],buf[off+6],buf[off+7],
+            buf[off+8],buf[off+9],buf[off+10],buf[off+11],
+            buf[off+12],buf[off+13],buf[off+14],buf[off+15]);
+    }
+
+    int patches = 0;
+
+    /* SURGICAL PATCH STRATEGY (2026-05-23):
+     * Aggressive patch at +0xfb also zeroed eax for the EARLY error returns
+     * (0x80920005 NOT_INIT, 0x80920001 INVALID_ARG).  Stub's first VDA call
+     * (uid=0x18c60ea1) returns INVALID_ARG normally; with that path zeroed,
+     * stub short-circuits as "success" and never calls VDA(uid=1) which
+     * actually creates the device.
+     *
+     * Surgical fix: redirect the IPC dispatch call to a code cave that calls
+     * the original dispatcher then forces eax=0 — only the IPC-return path
+     * gets the override, not the early validation errors.
+     *
+     * Layout: code cave in `cc` padding at +0x115..+0x11d (11 bytes available)
+     *   +0x115: e8 ?? ?? ?? ??  ; call original dispatcher (sub at +0xb460)
+     *   +0x11a: 31 c0           ; xor eax, eax
+     *   +0x11c: eb dd           ; jmp short -35 → back to +0xfb canary check
+     *
+     * Then replace the original call at +0xf6 with: `e8 1a 00 00 00`
+     * (call rel32 to cave at +0x115).
+     *
+     * Net effect: IPC call still happens (device gets created), but eax is
+     * zeroed before the canary check & ret.  Early validation paths still
+     * return their original error codes. */
+
+    /* Find the IPC call pattern: e8 ?? ?? ?? ?? 48 8B 0B 48 3B 4D F0 75 ??
+     * (call followed immediately by canary epilogue). */
+    size_t call_off = 0;
+    int found_call = 0;
+    for (size_t i = 0; i + 14 <= 512 && i + 14 <= SCAN_LEN; i++) {
+        if (buf[i+0] == 0xE8 &&
+            buf[i+5] == 0x48 && buf[i+6] == 0x8B && buf[i+7] == 0x0B &&
+            buf[i+8] == 0x48 && buf[i+9] == 0x3B && buf[i+10] == 0x4D &&
+            buf[i+11] == 0xF0 && buf[i+12] == 0x75) {
+            call_off = i;
+            found_call = 1;
+            klog_printf("[Ghostpad] patch_vda: IPC dispatch call at +0x%zx (canary at +0x%zx)\n",
+                        i, i + 5);
+            break;
+        }
+    }
+
+    if (!found_call) {
+        klog_printf("[Ghostpad] patch_vda: dispatch-call pattern not found\n");
+    } else {
+        /* Original call rel32 at call_off+1..call_off+4 */
+        int32_t orig_rel32 = (int32_t)(buf[call_off+1] |
+                                       (buf[call_off+2] << 8) |
+                                       (buf[call_off+3] << 16) |
+                                       (buf[call_off+4] << 24));
+        size_t after_call_off = call_off + 5;
+        intptr_t sub_target_off = (intptr_t)after_call_off + (intptr_t)orig_rel32;
+
+        /* Code cave: find a stretch of >= 10 bytes of `cc` padding starting
+         * somewhere after the function's `ud2 (0f 0b)`.  Conservatively look
+         * after call_off + ~25 bytes. */
+        size_t cave_off = 0;
+        for (size_t i = call_off + 18; i + 10 <= SCAN_LEN; i++) {
+            int all_cc = 1;
+            for (int k = 0; k < 10; k++) {
+                if (buf[i+k] != 0xCC) { all_cc = 0; break; }
+            }
+            if (all_cc) { cave_off = i; break; }
+        }
+        if (cave_off == 0) {
+            klog_printf("[Ghostpad] patch_vda: no 10-byte cc padding cave near function\n");
+        } else {
+            klog_printf("[Ghostpad] patch_vda: using code cave at +0x%zx\n", cave_off);
+            /* Cave layout (10 bytes — IMPORTANT: pop rax to discard the extra
+             * return address that the outer `call cave` pushed, since the
+             * sub's own ret already popped its own retaddr to here):
+             *   cave_off+0..4: e8 <rel32 to sub>  -- call original dispatcher
+             *   cave_off+5:    58                  -- pop rax (discard +0xfb retaddr)
+             *   cave_off+6..7: 31 c0               -- xor eax, eax (force success)
+             *   cave_off+8..9: eb <rel8 to +0xfb>  -- jmp short to canary
+             */
+            int32_t cave_call_rel32 = (int32_t)(sub_target_off - (intptr_t)(cave_off + 5));
+            int32_t jmp_target = (int32_t)after_call_off;  /* canary epilogue */
+            int32_t jmp_rel8 = jmp_target - (int32_t)(cave_off + 10);
+            klog_printf("[Ghostpad] patch_vda: cave call rel32=0x%x, jmp rel8=0x%x\n",
+                        (uint32_t)cave_call_rel32, (uint32_t)jmp_rel8 & 0xff);
+
+            if (jmp_rel8 < -128 || jmp_rel8 > 127) {
+                klog_printf("[Ghostpad] patch_vda: jmp rel8 out of range, abort\n");
+            } else if (!dump_only) {
+                /* Write cave first */
+                uint8_t cave[10];
+                cave[0] = 0xE8;
+                cave[1] = (uint8_t)(cave_call_rel32 & 0xff);
+                cave[2] = (uint8_t)((cave_call_rel32 >> 8) & 0xff);
+                cave[3] = (uint8_t)((cave_call_rel32 >> 16) & 0xff);
+                cave[4] = (uint8_t)((cave_call_rel32 >> 24) & 0xff);
+                cave[5] = 0x58;  /* pop rax */
+                cave[6] = 0x31; cave[7] = 0xC0;  /* xor eax, eax */
+                cave[8] = 0xEB; cave[9] = (uint8_t)(jmp_rel8 & 0xff);
+                if (pt_io_write(target, fn_vda + cave_off, cave, 10) != 0) {
+                    klog_printf("[Ghostpad] patch_vda: cave write failed errno=%d\n", errno);
+                } else {
+                    /* Now patch original call site */
+                    int32_t new_call_rel32 = (int32_t)cave_off - (int32_t)after_call_off;
+                    uint8_t new_call[5];
+                    new_call[0] = 0xE8;
+                    new_call[1] = (uint8_t)(new_call_rel32 & 0xff);
+                    new_call[2] = (uint8_t)((new_call_rel32 >> 8) & 0xff);
+                    new_call[3] = (uint8_t)((new_call_rel32 >> 16) & 0xff);
+                    new_call[4] = (uint8_t)((new_call_rel32 >> 24) & 0xff);
+                    if (pt_io_write(target, fn_vda + call_off, new_call, 5) != 0) {
+                        klog_printf("[Ghostpad] patch_vda: call-site write failed errno=%d\n", errno);
+                    } else {
+                        klog_printf("[Ghostpad] patch_vda: PATCHED — call site +0x%zx -> cave +0x%zx, cave returns to +0x%zx\n",
+                                    call_off, cave_off, after_call_off);
+                        patches++;
+                    }
+                }
+            } else {
+                patches++;
+            }
+        }
+    }
+
+    /* Scan for any `Bx 06 00 3B 80` (mov reg32, 0x803b0006) for x in 0..f */
+    for (size_t i = 0; i + 5 <= SCAN_LEN; i++) {
+        if ((buf[i] & 0xF0) == 0xB0 && (buf[i] & 0x08) &&
+            buf[i+1] == 0x06 && buf[i+2] == 0x00 &&
+            buf[i+3] == 0x3B && buf[i+4] == 0x80) {
+            klog_printf("[Ghostpad] patch_vda: MATCH Bx at +0x%zx (op=0x%02x) — mov reg, 0x803b0006\n",
+                        i, buf[i]);
+            if (!dump_only) {
+                /* Set RWX on the page */
+                intptr_t page = (fn_vda + i) & ~(intptr_t)0xFFF;
+                kernel_set_vmem_protection(target, page, 0x1000,
+                                           PROT_READ | PROT_WRITE | PROT_EXEC);
+                /* Replace `Bx 06 00 3B 80` with `Bx 00 00 00 00` (mov reg, 0) */
+                uint8_t replacement[4] = {0x00, 0x00, 0x00, 0x00};
+                if (pt_io_write(target, fn_vda + i + 1, replacement, 4) == 0) {
+                    klog_printf("[Ghostpad] patch_vda: PATCHED +0x%zx imm32 to 0\n", i);
+                    patches++;
+                }
+            } else {
+                patches++;
+            }
+        }
+    }
+
+    /* Scan for any 4-byte sequence 06 00 3B 80 (raw constant — could be in
+     * data pool or mov mem,imm32 encoding) */
+    for (size_t i = 0; i + 4 <= SCAN_LEN; i++) {
+        if (buf[i] == 0x06 && buf[i+1] == 0x00 && buf[i+2] == 0x3B && buf[i+3] == 0x80) {
+            uint8_t prev1 = i>=1?buf[i-1]:0;
+            uint8_t prev2 = i>=2?buf[i-2]:0;
+            uint8_t prev3 = i>=3?buf[i-3]:0;
+            uint8_t prev4 = i>=4?buf[i-4]:0;
+            /* skip if already counted as Bx 06 00 3B 80 */
+            if ((prev1 & 0xF0) == 0xB0 && (prev1 & 0x08)) continue;
+            klog_printf("[Ghostpad] patch_vda: raw 0x803b0006 at +0x%zx (prev4: %02x %02x %02x %02x)\n",
+                        i, prev4, prev3, prev2, prev1);
+        }
+    }
+
+    klog_printf("[Ghostpad] patch_vda: done, patches=%d\n", patches);
+    sys_ptrace(PT_DETACH, target, (caddr_t)1, 0);
+    return patches;
+}
+
+int32_t
+shellui_pad_retry_vda_shellcore(int32_t userId)
+{
+    pid_t pids[8];
+    if (find_pids("SceShellCore", pids, 8) == 0) {
+        klog_printf("[Ghostpad] retry_vda: SceShellCore not found\n");
+        return -1;
+    }
+    pid_t target = pids[0];
+
+    klog_printf("[Ghostpad] retry_vda: PT_ATTACH(SceShellCore pid=%d)\n", target);
+    if (sys_ptrace(PT_ATTACH, target, 0, 0) != 0) {
+        klog_printf("[Ghostpad] retry_vda: PT_ATTACH failed errno=%d\n", errno);
+        return (int32_t)-errno;
+    }
+    waitpid(target, NULL, 0);
+
+    uint32_t libpad_h = 0, libkernel_h = 0;
+    get_lib(target, "libScePad",     &libpad_h);
+    get_lib(target, "libkernel_sys", &libkernel_h);
+    intptr_t fn_vda    = libpad_h ? resolve_sym(target, libpad_h, "scePadVirtualDeviceAddDevice") : 0;
+    intptr_t trap_mem  = libpad_h ? kernel_dynlib_init_addr(target, libpad_h) : 0;
+    if (!trap_mem && libpad_h) trap_mem = kernel_dynlib_fini_addr(target, libpad_h);
+
+    if (!fn_vda || !trap_mem) {
+        sys_ptrace(PT_DETACH, target, (caddr_t)1, 0);
+        return -1;
+    }
+    kernel_set_vmem_protection(target, trap_mem, 16, PROT_READ | PROT_WRITE | PROT_EXEC);
+    uint8_t int3 = 0xCC;
+    pt_io_write(target, trap_mem, &int3, 1);
+
+    struct { int32_t f[8]; } vdp = {0};
+    vdp.f[0] = 32;
+    vdp.f[1] = userId;
+    /* Write vdp struct onto the stack of the stopped process via PT_IO */
+    struct reg regs;
+    sys_ptrace(PT_GETREGS, target, (caddr_t)&regs, 0);
+    intptr_t vdp_addr = (regs.r_rsp - 128 - (intptr_t)sizeof(vdp)) & ~(intptr_t)0xf;
+    pt_io_write(target, vdp_addr, &vdp, sizeof(vdp));
+
+    /* pt_call VDA(vdp_addr, 3) via fn_vda */
+    int64_t vda_ret = pt_call(target, fn_vda, trap_mem,
+                               (uint64_t)vdp_addr, 3, 0, 0, 0, 0);
+    klog_printf("[Ghostpad] retry_vda: VDA(uid=0x%x, type=3) -> 0x%llx\n",
+                (uint32_t)userId, (unsigned long long)(uint64_t)vda_ret);
+
+    /* Read back vdp struct to see if VDA wrote a handle into f[2..7] */
+    struct { int32_t f[8]; } vdp_out = {0};
+    {
+        struct ptrace_io_desc iod;
+        iod.piod_op   = PIOD_READ_D;
+        iod.piod_offs = (void *)vdp_addr;
+        iod.piod_addr = &vdp_out;
+        iod.piod_len  = sizeof(vdp_out);
+        sys_ptrace(PT_IO, target, (caddr_t)&iod, 0);
+    }
+    klog_printf("[Ghostpad] retry_vda: vdp_out f[0..3]=0x%x 0x%x 0x%x 0x%x\n",
+                (uint32_t)vdp_out.f[0], (uint32_t)vdp_out.f[1],
+                (uint32_t)vdp_out.f[2], (uint32_t)vdp_out.f[3]);
+
+    sys_ptrace(PT_DETACH, target, (caddr_t)1, 0);
+    return (int32_t)vda_ret;
+}
+
+int32_t
+shellui_pad_probe_legacy_disabled(int32_t userId)
+{
+    pid_t pids[8];
+    (void)userId;
+    klog_printf("[Ghostpad] legacy probe disabled; using SceShellCore/SceShellUI path\n");
+    return -1;
+    size_t n = find_pids("LegacyDisabled", pids, 8);
+    if (n == 0) { klog_printf("[Ghostpad] probe_legacy: target not found\n"); return -1; }
+    pid_t target = pids[0];
+
+    klog_printf("[Ghostpad] probe_legacy: PT_ATTACH(pid=%d)\n", target);
+    if (sys_ptrace(PT_ATTACH, target, 0, 0) != 0) {
+        klog_printf("[Ghostpad] probe_rp: PT_ATTACH failed errno=%d\n", errno);
+        return -1;
+    }
+    waitpid(target, NULL, 0);
+
+    uint32_t libpad_h = 0, libkernel_h = 0;
+    get_lib(target, "libScePad",     &libpad_h);
+    get_lib(target, "libkernel_sys", &libkernel_h);
+    intptr_t fn_gethandle = libpad_h ? resolve_sym(target, libpad_h, "scePadGetHandle") : 0;
+    intptr_t fn_open      = libpad_h ? resolve_sym(target, libpad_h, "scePadOpen")      : 0;
+    intptr_t fn_open_ext  = libpad_h ? resolve_sym(target, libpad_h, "scePadOpenExt")   : 0;
+    intptr_t trap_mem     = libpad_h ? kernel_dynlib_init_addr(target, libpad_h)        : 0;
+    if (!trap_mem && libpad_h) trap_mem = kernel_dynlib_fini_addr(target, libpad_h);
+
+    if (!trap_mem) {
+        sys_ptrace(PT_DETACH, target, (caddr_t)1, 0);
+        return -1;
+    }
+    kernel_set_vmem_protection(target, trap_mem, 16, PROT_READ | PROT_WRITE | PROT_EXEC);
+    uint8_t int3 = 0xCC;
+    pt_io_write(target, trap_mem, &int3, 1);
+
+    int32_t found = -1;
+    int32_t uids[4] = {userId, 0x10000000, 1, (int32_t)0xffffffff};
+    int types[3] = {0, 3, 16};
+
+    /* GetHandle sweeps across all userId × type × idx */
+    if (fn_gethandle) {
+        for (int u = 0; u < 4 && found < 0; u++) {
+            for (int t = 0; t < 3 && found < 0; t++) {
+                for (int idx = 0; idx < 8 && found < 0; idx++) {
+                    int64_t r = pt_call(target, fn_gethandle, trap_mem,
+                                        (uint64_t)(uint32_t)uids[u],
+                                        (uint64_t)types[t], (uint64_t)idx, 0, 0, 0);
+                    klog_printf("[Ghostpad] probe_rp: GH(0x%x,t=%d,i=%d)->0x%llx\n",
+                                (uint32_t)uids[u], types[t], idx,
+                                (unsigned long long)(uint64_t)r);
+                    if ((int32_t)r >= 0) found = (int32_t)r;
+                }
+            }
+        }
+    }
+
+    /* scePadOpen sweeps if GetHandle didn't find it */
+    if (found < 0 && (fn_open || fn_open_ext)) {
+        for (int u = 0; u < 4 && found < 0; u++) {
+            for (int t = 0; t < 2 && found < 0; t++) {
+                for (int idx = 0; idx < 4 && found < 0; idx++) {
+                    intptr_t fn = fn_open_ext ? fn_open_ext : fn_open;
+                    int64_t r = fn_open_ext
+                        ? pt_call(target, fn, trap_mem,
+                                  (uint64_t)(uint32_t)uids[u], (uint64_t)types[t],
+                                  (uint64_t)idx, 0, 0, 0)
+                        : pt_call(target, fn, trap_mem,
+                                  (uint64_t)(uint32_t)uids[u], (uint64_t)types[t],
+                                  (uint64_t)idx, 0, 0, 0);
+                    klog_printf("[Ghostpad] probe_rp: Open(0x%x,t=%d,i=%d)->0x%llx\n",
+                                (uint32_t)uids[u], types[t], idx,
+                                (unsigned long long)(uint64_t)r);
+                    if ((int32_t)r >= 0) found = (int32_t)r;
+                }
+            }
+        }
+    }
+
+    sys_ptrace(PT_DETACH, target, (caddr_t)1, 0);
+    klog_printf("[Ghostpad] probe_rp: result=%d\n", found);
+    return found;
+}
+
+int
+shellui_pad_disconnect_device(uint64_t physicalDeviceId)
+{
+    pid_t pids[4];
+    if (find_pids("SceShellUI", pids, 4) == 0) {
+        klog_printf("[Ghostpad] disconnect: SceShellUI not found\n");
+        return -1;
+    }
+    pid_t target = pids[0];
+    klog_printf("[Ghostpad] disconnect: PT_ATTACH(SceShellUI pid=%d) dev=0x%llx\n",
+                target, (unsigned long long)physicalDeviceId);
+    if (sys_ptrace(PT_ATTACH, target, 0, 0) != 0) {
+        klog_printf("[Ghostpad] disconnect: PT_ATTACH failed errno=%d\n", errno);
+        return -1;
+    }
+    waitpid(target, NULL, 0);
+
+    uint32_t mbus_h = 0;
+    get_lib(target, "libSceMbus", &mbus_h);
+    intptr_t fn_disc = mbus_h ? resolve_sym(target, mbus_h, "sceMbusDisconnectDevice") : 0;
+    klog_printf("[Ghostpad] disconnect: sceMbusDisconnectDevice @ 0x%lx\n", fn_disc);
+
+    uint32_t libpad_h = 0;
+    get_lib(target, "libScePad", &libpad_h);
+    intptr_t trap_mem = libpad_h ? kernel_dynlib_init_addr(target, libpad_h) : 0;
+    if (!trap_mem && libpad_h) trap_mem = kernel_dynlib_fini_addr(target, libpad_h);
+
+    if (!fn_disc || !trap_mem) {
+        klog_printf("[Ghostpad] disconnect: symbol/cave fail\n");
+        sys_ptrace(PT_DETACH, target, (caddr_t)1, 0);
+        return -1;
+    }
+    kernel_set_vmem_protection(target, trap_mem, 16, PROT_READ | PROT_WRITE | PROT_EXEC);
+    uint8_t int3 = 0xCC;
+    pt_io_write(target, trap_mem, &int3, 1);
+
+    int64_t ret = pt_call(target, fn_disc, trap_mem,
+                          (uint64_t)physicalDeviceId, 0, 0, 0, 0, 0);
+    klog_printf("[Ghostpad] disconnect: sceMbusDisconnectDevice(0x%llx) -> %lld\n",
+                (unsigned long long)physicalDeviceId, (long long)ret);
+    sys_ptrace(PT_DETACH, target, (caddr_t)1, 0);
+    return (ret == 0) ? 0 : (int)ret;
+}
+
+int
+shellui_pad_force_bind(uint64_t virtualDeviceId, int32_t userId)
+{
+    pid_t pids[16];
+    size_t count = find_pids("SceShellUI", pids, 16);
+    if (count == 0) {
+        klog_printf("[Ghostpad] force_bind: SceShellUI not found\n");
+        return -1;
+    }
+    pid_t target_pid = pids[0];
+
+    klog_printf("[Ghostpad] force_bind: PT_ATTACH(SceShellUI pid=%d) dev=0x%llx user=0x%x\n",
+                target_pid, (unsigned long long)virtualDeviceId, (uint32_t)userId);
+    if (sys_ptrace(PT_ATTACH, target_pid, 0, 0) != 0) {
+        klog_printf("[Ghostpad] force_bind: PT_ATTACH failed errno=%d\n", errno);
+        return -1;
+    }
+    waitpid(target_pid, NULL, 0);
+
+    uint32_t libmbus_h = 0;
+    get_lib(target_pid, "libSceMbus", &libmbus_h);
+    if (!libmbus_h) {
+        klog_printf("[Ghostpad] force_bind: libSceMbus not found in SceShellUI\n");
+        sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
+        return -1;
+    }
+
+    intptr_t fn_bind = resolve_sym(target_pid, libmbus_h, "sceMbusBindDeviceWithUserId");
+    klog_printf("[Ghostpad] force_bind: sceMbusBindDeviceWithUserId @ 0x%lx\n", fn_bind);
+    if (!fn_bind) {
+        klog_printf("[Ghostpad] force_bind: symbol not found\n");
+        sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
+        return -1;
+    }
+
+    /* Need a code cave for the INT3 trap.  Use libScePad init/fini if available. */
+    uint32_t libpad_h = 0;
+    get_lib(target_pid, "libScePad", &libpad_h);
+    intptr_t trap_mem = libpad_h ? kernel_dynlib_init_addr(target_pid, libpad_h) : 0;
+    if (!trap_mem && libpad_h) trap_mem = kernel_dynlib_fini_addr(target_pid, libpad_h);
+    if (!trap_mem) {
+        klog_printf("[Ghostpad] force_bind: no code cave\n");
+        sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
+        return -1;
+    }
+    kernel_set_vmem_protection(target_pid, trap_mem, 16, PROT_READ | PROT_WRITE | PROT_EXEC);
+    uint8_t int3 = 0xCC;
+    pt_io_write(target_pid, trap_mem, &int3, 1);
+
+    /* sceMbusBindDeviceWithUserId(uint64_t deviceId, uint32_t userId) */
+    int64_t ret = pt_call(target_pid, fn_bind, trap_mem,
+                          (uint64_t)virtualDeviceId, (uint64_t)(uint32_t)userId,
+                          0, 0, 0, 0);
+    klog_printf("[Ghostpad] force_bind: sceMbusBindDeviceWithUserId(0x%llx, 0x%x) -> %lld\n",
+                (unsigned long long)virtualDeviceId, (uint32_t)userId, (long long)ret);
+
+    sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
+    return (ret == 0) ? 0 : (int)ret;
+}
