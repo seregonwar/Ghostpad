@@ -1,5 +1,11 @@
 # Ghostpad — PS5 Virtual DualSense over TCP
 
+
+
+https://github.com/user-attachments/assets/30c7f384-4fa8-411c-aa07-84c59eda6037
+
+
+
 > Remote-control a jailbroken PS5 from any PC, using keyboard, mouse, or a real controller — without needing PSN, Remote Play, or any official Sony software.
 
 Ghostpad is a payload + PC GUI that creates a **virtual DualSense** on a jailbroken PS5 and forwards keyboard, on screen, or scripted input to it over LAN. The shell and games see it as a real controller
