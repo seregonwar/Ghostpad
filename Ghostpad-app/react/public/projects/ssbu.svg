@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e"/>
+      <stop offset="100%" style="stop-color:#e94560"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="360" fill="url(#bg)"/>
+  <text x="320" y="170" fill="#fff" font-family="Arial,sans-serif" font-size="28" text-anchor="middle" font-weight="bold">Super Smash Bros.</text>
+  <text x="320" y="210" fill="#fff" font-family="Arial,sans-serif" font-size="22" text-anchor="middle">Ultimate</text>
+</svg>
