@@ -1,3 +1,6 @@
+<img width="580" height="601" alt="icon" src="https://github.com/user-attachments/assets/cfdbc55a-60f9-498d-b166-8613a19ab3a0" />
+
+
 # Ghostpad — PS5 Virtual DualSense over TCP
 
 
