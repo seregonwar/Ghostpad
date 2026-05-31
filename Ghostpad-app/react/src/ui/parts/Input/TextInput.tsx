@@ -1,0 +1,83 @@
+import React from "react";
+import styled from "styled-components";
+import { Colors } from "../../../styles/Colors";
+import * as Layout from "../../../styles/Layout";
+
+export interface TextInputProps {
+  state: "default" | "error";
+  icon: "none" | "left" | "right" | "both";
+  required?: boolean;
+  inputType: "text" | "number";
+  leftIcon?: string;
+  value: string | number;
+  onClickOutside?: (e: React.ChangeEvent<HTMLInputElement>) => void;
+}
+
+export const TextInput = (props: TextInputProps) => {
+  const [text, setText] = React.useState(props.value);
+  const inputRef = React.useRef<HTMLInputElement | null>(null);
+
+  React.useEffect(() => {
+    inputRef.current?.select();
+  }, [inputRef]);
+
+  const changeText = React.useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      setText(e.target.value);
+    },
+    []
+  );
+
+  const onPressEnter = React.useCallback(
+    (e: any) => {
+      if (e.key === "Enter" && props.onClickOutside) {
+        props.onClickOutside(e);
+      }
+    },
+    [props]
+  );
+
+  return React.useMemo(
+    () => (
+      <StyledInput className="input-text">
+        <input
+          type={props.inputType}
+          required={props.required}
+          placeholder="Type Here..."
+          value={text}
+          onChange={changeText}
+          onBlur={props.onClickOutside}
+          onKeyPress={(e) => onPressEnter(e)}
+          ref={inputRef}
+        />
+      </StyledInput>
+    ),
+    [
+      changeText,
+      onPressEnter,
+      props.inputType,
+      props.onClickOutside,
+      props.required,
+      text,
+    ]
+  );
+};
+
+export default TextInput;
+
+const StyledInput = styled.span`
+  ${Layout.alignElements("flex", "flex-start", "center")};
+  ${Layout.roundX(1 / 2)};
+  padding: ${Layout.spacingVH(0, 1 / 2)};
+  height: 32px;
+  width: 100%;
+  position: relative;
+  background-color: ${Colors.bgColorLv2};
+  border: 1px solid ${Colors.borderColorLv1};
+  input {
+    width: 100%;
+    height: 100%;
+    color: ${Colors.elementColorDefault};
+    font-size: 12px;
+  }
+`;

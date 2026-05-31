@@ -1,0 +1,39 @@
+{
+  "name": "ghostpad",
+  "version": "1.0.0",
+  "description": "PS5 remote control over LAN — virtual DualSense input, macros, beeper/LED control",
+  "main": "electron/main.js",
+  "author": "StonedModder",
+  "license": "GPL-3.0",
+  "scripts": {
+    "postinstall": "cd react && npm install",
+    "build:react": "cd react && npm run build",
+    "start": "cross-env NODE_OPTIONS= electron .",
+    "compile": "npm run build:react && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win portable"
+  },
+  "build": {
+    "appId": "com.stonedmodder.ghostpad",
+    "productName": "Ghostpad",
+    "asar": false,
+    "win": {
+      "target": [{ "target": "portable" }],
+      "icon": "electron/icon.ico"
+    },
+    "files": [
+      "electron/**/*",
+      "Ghostpad/payload/ghostpad.elf",
+      "react/build/**/*"
+    ],
+    "directories": {
+      "output": "dist"
+    }
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "cross-env": "^10.1.0",
+    "electron": "^28.3.3",
+    "electron-builder": "^25.1.8"
+  }
+}
