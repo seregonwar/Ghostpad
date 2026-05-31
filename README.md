@@ -26,6 +26,9 @@ Ghostpad is a payload + PC GUI that creates a **virtual DualSense** on a jailbro
                                             (no assignment screen)
 ```
 
+<img width="1865" height="1463" alt="image" src="https://github.com/user-attachments/assets/a86de49b-49dc-4b8a-aae5-f8e6fe0759a4" />
+
+
 ## First time Setup
 
 1. Start the ELF loader on your PS5.
