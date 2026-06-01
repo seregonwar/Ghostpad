@@ -123,3 +123,4 @@ int32_t shellui_pad_retry_vda_shellcore(int32_t userId);
  * jumping back to the original canary epilogue.  Early validation errors are
  * left intact.  Returns number of patches applied. */
 int shellui_pad_patch_vda(int dump_only);
+int shellui_pad_hook_setpriv(void);

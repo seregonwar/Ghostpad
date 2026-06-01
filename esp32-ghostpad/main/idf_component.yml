@@ -1,0 +1,9 @@
+dependencies:
+  idf:
+    version: '>=4.1.0'
+  espressif/cjson: '*'
+  espressif/esp_hosted:
+    version: '>=0.0.9'
+    rules:
+      - if: "target in [esp32p4]"
+  espressif/esp_tinyusb: "*"

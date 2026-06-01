@@ -1,1 +1,6 @@
 /Ghostpad-Electron
+/reference
+.DS_Store
+/external
+*.elf
+*.elf

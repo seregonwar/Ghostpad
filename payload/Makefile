@@ -1,25 +1,43 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Ghostpad PS5 Payload Makefile
 #
-# Usage:
-#   make                          - Build ghostpad.elf
-#   make clean                    - Remove build artifacts
-#   make test PS5_HOST=<ip>       - Deploy to PS5 (ELF loader on port 9021)
+#  ____  _               _                     _   ____   ____  _  __
+# / ___|| |__   ___  ___| |_ _ __   __ _  __| | |  _ \ / ___|| |/ /
+# | |  _ | '_ \ / _ \/ __| __| '_ \ / _` |/ _` | | |_) |\___ \| ' / 
+# | |_| || | | | (_) \__ \ |_| |_) | (_| | (_| | |  __/  ___) | . \ 
+#  \____||_| |_|\___/|___/\__| .__/ \__,_|\__,_| |_|    |____/|_|\_\
+#                            |_|                                    
 #
-# Requirements:
-#   PS5_PAYLOAD_SDK environment variable pointing to installed SDK
-#   e.g. export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
 
+PS4_HOST    ?= ps4
 PS5_HOST    ?= ps5
-PS5_PORT    ?= 9021
+PORT        ?= 9021
 
-include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
+# ── TARGET CONFIGURATION ──────────────────────────────────────────────────
+
+ifdef PS4_PAYLOAD_SDK
+    include $(PS4_PAYLOAD_SDK)/toolchain/orbis.mk
+    CFLAGS  += -D__ORBIS__
+    TARGET  := ghostpad.elf
+    DEPLOY  := $(PS4_DEPLOY)
+    HOST    := $(PS4_HOST)
+else ifdef PS5_PAYLOAD_SDK
+    include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
+    CFLAGS  += -D__PROSPERO__
+    TARGET  := ghostpad.elf
+    DEPLOY  := $(PS5_PAYLOAD_SDK)/bin/prospero-deploy
+    HOST    := $(PS5_HOST)
+else
+    $(error Neither PS4_PAYLOAD_SDK nor PS5_PAYLOAD_SDK is defined)
+endif
+
+# ── COMPILATION FLAGS ─────────────────────────────────────────────────────
 
 CFLAGS  += -Wall -Wextra -g -O2 -fPIC -fno-stack-protector
-LDFLAGS += -lScePad -lSceUserService -lpthread
+LDFLAGS += -lScePad -lSceUserService -lpthread -ldl
 
-TARGET  := ghostpad.elf
 SRC     := main.c shellui_pad.c
+
+# ── RULES ─────────────────────────────────────────────────────────────────
 
 .PHONY: all clean test
 
@@ -32,4 +50,4 @@ clean:
 	rm -f $(TARGET)
 
 test: $(TARGET)
-	$(PS5_PAYLOAD_SDK)/bin/prospero-deploy -h $(PS5_HOST) -p $(PS5_PORT) $<
+	$(DEPLOY) -h $(HOST) -p $(PORT) $<

@@ -34,12 +34,25 @@
 #include <sys/mman.h>
 #include <sys/wait.h>
 
+#ifdef __PROSPERO__
 #include <ps5/kernel.h>
 #include <ps5/klog.h>
 #include <ps5/mdbg.h>
 #include <ps5/nid.h>
+#endif
+
+#ifdef __ORBIS__
+#include <ps4/kernel.h>
+#include <ps4/klog.h>
+#include <ps4/mdbg.h>
+#include <dlfcn.h>
+#endif
 
 #include "shellui_pad.h"
+
+#ifdef __ORBIS__
+extern int kernel_set_vmem_protection(pid_t pid, intptr_t addr, size_t size, int prot);
+#endif
 
 #define GHOSTPAD_ASSIGNMENT_SCREEN_RET ((int32_t)0x803B0006u)
 #define GHOSTPAD_AUTO_DISMISS_ACTIVE   ((int32_t)0x44534D31u) /* "DSM1" */
@@ -130,10 +143,14 @@ resolve_sym(pid_t pid, uint32_t lib_handle, const char *sym)
     intptr_t addr = kernel_dynlib_dlsym(pid, lib_handle, sym);
     if (addr) return addr;
 
+#ifdef __PROSPERO__
     char nid[12];
     nid_encode(sym, nid);
     addr = kernel_dynlib_resolve(pid, lib_handle, nid);
     return addr;
+#else
+    return 0;
+#endif
 }
 
 /* get_lib — wrapper around kernel_dynlib_handle with logging */
@@ -2578,6 +2595,12 @@ shellcore_pad_test_vdi_neutral(int32_t pad_handle)
  *
  * Returns: number of patches applied (0 if none found, -1 on error).
  * ============================================================ */
+/*
+ * =====================================================================================
+ *            DISASSEMBLE AND PATCH scePadVirtualDeviceAddDevice IN SceShellCore
+ * =====================================================================================
+ */
+
 int
 shellui_pad_patch_vda(int dump_only)
 {
@@ -2588,30 +2611,34 @@ shellui_pad_patch_vda(int dump_only)
     }
     pid_t target = pids[0];
 
-    klog_printf("[Ghostpad] patch_vda: PT_ATTACH(SceShellCore pid=%d) dump_only=%d\n",
-                target, dump_only);
-    if (sys_ptrace(PT_ATTACH, target, 0, 0) != 0) {
-        klog_printf("[Ghostpad] patch_vda: PT_ATTACH failed errno=%d\n", errno);
-        return -1;
+    /* Elevate credentials to debugger authid for memory patch operations */
+    pid_t mypid = getpid();
+    uint64_t saved_authid = kernel_get_ucred_authid(mypid);
+    if (saved_authid) {
+        kernel_set_ucred_authid(mypid, 0x4800000000010003l);
     }
-    waitpid(target, NULL, 0);
+
+    klog_printf("[Ghostpad] patch_vda: SceShellCore pid=%d dump_only=%d (using direct mdbg memory access)\n",
+                target, dump_only);
 
     uint32_t libpad_h = 0;
     if (get_lib(target, "libScePad", &libpad_h)) {
-        sys_ptrace(PT_DETACH, target, (caddr_t)1, 0);
+        if (saved_authid) {
+            kernel_set_ucred_authid(mypid, saved_authid);
+        }
         return -1;
     }
     intptr_t fn_vda = resolve_sym(target, libpad_h, "scePadVirtualDeviceAddDevice");
     if (!fn_vda) {
         klog_printf("[Ghostpad] patch_vda: scePadVirtualDeviceAddDevice not found\n");
-        sys_ptrace(PT_DETACH, target, (caddr_t)1, 0);
+        if (saved_authid) {
+            kernel_set_ucred_authid(mypid, saved_authid);
+        }
         return -1;
     }
     klog_printf("[Ghostpad] patch_vda: fn_vda @ 0x%lx\n", fn_vda);
 
-    /* libScePad text is usually X-only on PS5.  Set RWX on a wide range so we
-     * can scan VDA itself (start) AND the IPC dispatch sub-function it calls
-     * (at fn_vda + ~0xb460).  Cover 24 pages = 96KB. */
+    /* Text pages are usually execute-only. Change protection to RWX to read and patch. */
     intptr_t page0 = fn_vda & ~(intptr_t)0xFFF;
     for (int pg = 0; pg < 24; pg++) {
         intptr_t pa = page0 + (intptr_t)(pg * 0x1000);
@@ -2620,24 +2647,19 @@ shellui_pad_patch_vda(int dump_only)
     }
     klog_printf("[Ghostpad] patch_vda: set RWX on 24 pages from 0x%lx\n", page0);
 
-    /* Read 96KB so the IPC sub-function (at +0xb460 from fn_vda) is included. */
+    /* Read fn_vda + 96KB to cover target functions and search for patterns. */
     const size_t SCAN_LEN = 96 * 1024;
     static uint8_t buf[96 * 1024];
-    {
-        struct ptrace_io_desc iod;
-        iod.piod_op   = PIOD_READ_D;
-        iod.piod_offs = (void *)fn_vda;
-        iod.piod_addr = buf;
-        iod.piod_len  = SCAN_LEN;
-        if (sys_ptrace(PT_IO, target, (caddr_t)&iod, 0)) {
-            klog_printf("[Ghostpad] patch_vda: PT_IO READ failed errno=%d len=%zu\n",
-                        errno, SCAN_LEN);
-            sys_ptrace(PT_DETACH, target, (caddr_t)1, 0);
-            return -1;
+    
+    if (mdbg_copyout(target, fn_vda, buf, SCAN_LEN) != 0) {
+        klog_printf("[Ghostpad] patch_vda: mdbg_copyout failed len=%zu\n", SCAN_LEN);
+        if (saved_authid) {
+            kernel_set_ucred_authid(mypid, saved_authid);
         }
+        return -1;
     }
 
-    /* Hex dump first 512 bytes for analysis */
+    /* Print out diagnostic hex dump */
     for (size_t off = 0; off < 512 && off < SCAN_LEN; off += 16) {
         klog_printf("[Ghostpad] patch_vda: +%03zx: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
             off,
@@ -2649,31 +2671,32 @@ shellui_pad_patch_vda(int dump_only)
 
     int patches = 0;
 
-    /* Surgical patch: redirect IPC dispatch call into a code cave that calls the
-     * original dispatcher then forces eax=0, bypassing only the IPC-return path.
-     * Early validation errors (INVALID_ARG, NOT_INIT) keep their original codes. */
-
-    /* Find the IPC call pattern: e8 ?? ?? ?? ?? 48 8B 0B 48 3B 4D F0 75 ??
-     * (call followed immediately by canary epilogue). */
+    /* Search for target IPC call pattern: e8 ?? ?? ?? ?? 48 8B 0B 48 3B <canary_op> 75 ?? */
     size_t call_off = 0;
+    size_t jne_off = 0;
     int found_call = 0;
-    for (size_t i = 0; i + 14 <= 512 && i + 14 <= SCAN_LEN; i++) {
+    for (size_t i = 0; i + 14 <= SCAN_LEN && i < 1024; i++) {
         if (buf[i+0] == 0xE8 &&
             buf[i+5] == 0x48 && buf[i+6] == 0x8B && buf[i+7] == 0x0B &&
-            buf[i+8] == 0x48 && buf[i+9] == 0x3B && buf[i+10] == 0x4D &&
-            buf[i+11] == 0xF0 && buf[i+12] == 0x75) {
-            call_off = i;
-            found_call = 1;
-            klog_printf("[Ghostpad] patch_vda: IPC dispatch call at +0x%zx (canary at +0x%zx)\n",
-                        i, i + 5);
-            break;
+            buf[i+8] == 0x48 && buf[i+9] == 0x3B) {
+            /* Find the jne (0x75) instruction within the next 10 bytes */
+            for (size_t j = i + 10; j < i + 20 && j < SCAN_LEN; j++) {
+                if (buf[j] == 0x75) {
+                    call_off = i;
+                    jne_off = j;
+                    found_call = 1;
+                    klog_printf("[Ghostpad] patch_vda: IPC dispatch call at +0x%zx (canary jne at +0x%zx)\n",
+                                i, j);
+                    break;
+                }
+            }
+            if (found_call) break;
         }
     }
 
     if (!found_call) {
         klog_printf("[Ghostpad] patch_vda: dispatch-call pattern not found\n");
     } else {
-        /* Original call rel32 at call_off+1..call_off+4 */
         int32_t orig_rel32 = (int32_t)(buf[call_off+1] |
                                        (buf[call_off+2] << 8) |
                                        (buf[call_off+3] << 16) |
@@ -2681,9 +2704,7 @@ shellui_pad_patch_vda(int dump_only)
         size_t after_call_off = call_off + 5;
         intptr_t sub_target_off = (intptr_t)after_call_off + (intptr_t)orig_rel32;
 
-        /* Code cave: find a stretch of >= 10 bytes of `cc` padding starting
-         * somewhere after the function's `ud2 (0f 0b)`.  Conservatively look
-         * after call_off + ~25 bytes. */
+        /* Find 10-byte code cave of CCs for our detour hook */
         size_t cave_off = 0;
         for (size_t i = call_off + 18; i + 10 <= SCAN_LEN; i++) {
             int all_cc = 1;
@@ -2692,20 +2713,55 @@ shellui_pad_patch_vda(int dump_only)
             }
             if (all_cc) { cave_off = i; break; }
         }
+
         if (cave_off == 0) {
-            klog_printf("[Ghostpad] patch_vda: no 10-byte cc padding cave near function\n");
+            klog_printf("[Ghostpad] patch_vda: no 10-byte cc padding cave near function, using in-place patch\n");
+            
+            /* Find the ret (0xC3) instruction in the function's epilogue */
+            size_t ret_off = 0;
+            for (size_t k = jne_off + 2; k < jne_off + 20 && k < SCAN_LEN; k++) {
+                if (buf[k] == 0xC3) {
+                    ret_off = k;
+                    break;
+                }
+            }
+
+            if (ret_off == 0) {
+                klog_printf("[Ghostpad] patch_vda: ret instruction not found in epilogue, abort\n");
+            } else {
+                size_t epilogue_len = ret_off + 1 - (jne_off + 2);
+                size_t canary_len = (jne_off + 2) - (call_off + 5);
+                size_t total_patch_len = canary_len + epilogue_len;
+
+                klog_printf("[Ghostpad] patch_vda: in-place patch: canary_len=%zu, epilogue_len=%zu, total_patch_len=%zu\n",
+                            canary_len, epilogue_len, total_patch_len);
+
+                if (!dump_only) {
+                    uint8_t patch[32];
+                    memset(patch, 0x90, sizeof(patch)); // fill with NOPs
+
+                    /* 1. xor eax, eax */
+                    patch[0] = 0x31;
+                    patch[1] = 0xC0;
+
+                    /* 2. copy original epilogue */
+                    memcpy(patch + 2, buf + jne_off + 2, epilogue_len);
+
+                    /* Write the patch to the target process memory */
+                    if (mdbg_copyin(target, patch, fn_vda + call_off + 5, total_patch_len) != 0) {
+                        klog_printf("[Ghostpad] patch_vda: in-place patch write failed\n");
+                    } else {
+                        klog_printf("[Ghostpad] patch_vda: IN-PLACE PATCHED successfully\n");
+                        patches++;
+                    }
+                } else {
+                    patches++;
+                }
+            }
         } else {
-            klog_printf("[Ghostpad] patch_vda: using code cave at +0x%zx\n", cave_off);
-            /* Cave layout (10 bytes — IMPORTANT: pop rax to discard the extra
-             * return address that the outer `call cave` pushed, since the
-             * sub's own ret already popped its own retaddr to here):
-             *   cave_off+0..4: e8 <rel32 to sub>  -- call original dispatcher
-             *   cave_off+5:    58                  -- pop rax (discard +0xfb retaddr)
-             *   cave_off+6..7: 31 c0               -- xor eax, eax (force success)
-             *   cave_off+8..9: eb <rel8 to +0xfb>  -- jmp short to canary
-             */
+            klog_printf("[Ghostpad] patch_vda: using code cave detour at +0x%zx\n", cave_off);
             int32_t cave_call_rel32 = (int32_t)(sub_target_off - (intptr_t)(cave_off + 5));
-            int32_t jmp_target = (int32_t)after_call_off;  /* canary epilogue */
+            int32_t jmp_target = (int32_t)after_call_off;
             int32_t jmp_rel8 = jmp_target - (int32_t)(cave_off + 10);
             klog_printf("[Ghostpad] patch_vda: cave call rel32=0x%x, jmp rel8=0x%x\n",
                         (uint32_t)cave_call_rel32, (uint32_t)jmp_rel8 & 0xff);
@@ -2713,20 +2769,20 @@ shellui_pad_patch_vda(int dump_only)
             if (jmp_rel8 < -128 || jmp_rel8 > 127) {
                 klog_printf("[Ghostpad] patch_vda: jmp rel8 out of range, abort\n");
             } else if (!dump_only) {
-                /* Write cave first */
+                /* Write detour code into cave */
                 uint8_t cave[10];
                 cave[0] = 0xE8;
                 cave[1] = (uint8_t)(cave_call_rel32 & 0xff);
                 cave[2] = (uint8_t)((cave_call_rel32 >> 8) & 0xff);
                 cave[3] = (uint8_t)((cave_call_rel32 >> 16) & 0xff);
                 cave[4] = (uint8_t)((cave_call_rel32 >> 24) & 0xff);
-                cave[5] = 0x58;  /* pop rax */
-                cave[6] = 0x31; cave[7] = 0xC0;  /* xor eax, eax */
+                cave[5] = 0x58;
+                cave[6] = 0x31; cave[7] = 0xC0;
                 cave[8] = 0xEB; cave[9] = (uint8_t)(jmp_rel8 & 0xff);
-                if (pt_io_write(target, fn_vda + cave_off, cave, 10) != 0) {
-                    klog_printf("[Ghostpad] patch_vda: cave write failed errno=%d\n", errno);
+                if (mdbg_copyin(target, cave, fn_vda + cave_off, 10) != 0) {
+                    klog_printf("[Ghostpad] patch_vda: cave write failed\n");
                 } else {
-                    /* Now patch original call site */
+                    /* Patch call-site to jump to cave */
                     int32_t new_call_rel32 = (int32_t)cave_off - (int32_t)after_call_off;
                     uint8_t new_call[5];
                     new_call[0] = 0xE8;
@@ -2734,8 +2790,8 @@ shellui_pad_patch_vda(int dump_only)
                     new_call[2] = (uint8_t)((new_call_rel32 >> 8) & 0xff);
                     new_call[3] = (uint8_t)((new_call_rel32 >> 16) & 0xff);
                     new_call[4] = (uint8_t)((new_call_rel32 >> 24) & 0xff);
-                    if (pt_io_write(target, fn_vda + call_off, new_call, 5) != 0) {
-                        klog_printf("[Ghostpad] patch_vda: call-site write failed errno=%d\n", errno);
+                    if (mdbg_copyin(target, new_call, fn_vda + call_off, 5) != 0) {
+                        klog_printf("[Ghostpad] patch_vda: call-site write failed\n");
                     } else {
                         klog_printf("[Ghostpad] patch_vda: PATCHED — call site +0x%zx -> cave +0x%zx, cave returns to +0x%zx\n",
                                     call_off, cave_off, after_call_off);
@@ -2748,7 +2804,7 @@ shellui_pad_patch_vda(int dump_only)
         }
     }
 
-    /* Scan for any `Bx 06 00 3B 80` (mov reg32, 0x803b0006) for x in 0..f */
+    /* Scan and replace raw constant checks: Bx 06 00 3B 80 (mov reg32, 0x803b0006) */
     for (size_t i = 0; i + 5 <= SCAN_LEN; i++) {
         if ((buf[i] & 0xF0) == 0xB0 && (buf[i] & 0x08) &&
             buf[i+1] == 0x06 && buf[i+2] == 0x00 &&
@@ -2756,13 +2812,8 @@ shellui_pad_patch_vda(int dump_only)
             klog_printf("[Ghostpad] patch_vda: MATCH Bx at +0x%zx (op=0x%02x) — mov reg, 0x803b0006\n",
                         i, buf[i]);
             if (!dump_only) {
-                /* Set RWX on the page */
-                intptr_t page = (fn_vda + i) & ~(intptr_t)0xFFF;
-                kernel_set_vmem_protection(target, page, 0x1000,
-                                           PROT_READ | PROT_WRITE | PROT_EXEC);
-                /* Replace `Bx 06 00 3B 80` with `Bx 00 00 00 00` (mov reg, 0) */
                 uint8_t replacement[4] = {0x00, 0x00, 0x00, 0x00};
-                if (pt_io_write(target, fn_vda + i + 1, replacement, 4) == 0) {
+                if (mdbg_copyin(target, replacement, fn_vda + i + 1, 4) == 0) {
                     klog_printf("[Ghostpad] patch_vda: PATCHED +0x%zx imm32 to 0\n", i);
                     patches++;
                 }
@@ -2772,15 +2823,12 @@ shellui_pad_patch_vda(int dump_only)
         }
     }
 
-    /* Scan for any 4-byte sequence 06 00 3B 80 (raw constant — could be in
-     * data pool or mov mem,imm32 encoding) */
     for (size_t i = 0; i + 4 <= SCAN_LEN; i++) {
         if (buf[i] == 0x06 && buf[i+1] == 0x00 && buf[i+2] == 0x3B && buf[i+3] == 0x80) {
             uint8_t prev1 = i>=1?buf[i-1]:0;
             uint8_t prev2 = i>=2?buf[i-2]:0;
             uint8_t prev3 = i>=3?buf[i-3]:0;
             uint8_t prev4 = i>=4?buf[i-4]:0;
-            /* skip if already counted as Bx 06 00 3B 80 */
             if ((prev1 & 0xF0) == 0xB0 && (prev1 & 0x08)) continue;
             klog_printf("[Ghostpad] patch_vda: raw 0x803b0006 at +0x%zx (prev4: %02x %02x %02x %02x)\n",
                         i, prev4, prev3, prev2, prev1);
@@ -2788,7 +2836,9 @@ shellui_pad_patch_vda(int dump_only)
     }
 
     klog_printf("[Ghostpad] patch_vda: done, patches=%d\n", patches);
-    sys_ptrace(PT_DETACH, target, (caddr_t)1, 0);
+    if (saved_authid) {
+        kernel_set_ucred_authid(mypid, saved_authid);
+    }
     return patches;
 }
 
@@ -2945,15 +2995,15 @@ shellui_pad_disconnect_device(uint64_t physicalDeviceId)
 {
     pid_t pids[4];
     if (find_pids("SceShellUI", pids, 4) == 0) {
-        klog_printf("[Ghostpad] disconnect: SceShellUI not found\n");
-        return -1;
+        klog_printf("[Ghostpad] disconnect: SceShellUI not found, using direct fallback\n");
+        goto fallback;
     }
     pid_t target = pids[0];
     klog_printf("[Ghostpad] disconnect: PT_ATTACH(SceShellUI pid=%d) dev=0x%llx\n",
                 target, (unsigned long long)physicalDeviceId);
     if (sys_ptrace(PT_ATTACH, target, 0, 0) != 0) {
-        klog_printf("[Ghostpad] disconnect: PT_ATTACH failed errno=%d\n", errno);
-        return -1;
+        klog_printf("[Ghostpad] disconnect: PT_ATTACH failed errno=%d, using direct fallback\n", errno);
+        goto fallback;
     }
     waitpid(target, NULL, 0);
 
@@ -2982,6 +3032,37 @@ shellui_pad_disconnect_device(uint64_t physicalDeviceId)
                 (unsigned long long)physicalDeviceId, (long long)ret);
     sys_ptrace(PT_DETACH, target, (caddr_t)1, 0);
     return (ret == 0) ? 0 : (int)ret;
+
+fallback:
+    {
+        klog_printf("[Ghostpad] disconnect: executing direct fallback for 0x%llx\n", (unsigned long long)physicalDeviceId);
+        void *h = dlopen("/system/common/lib/libSceMbus.sprx", RTLD_LAZY);
+        if (!h) {
+            klog_printf("[Ghostpad] disconnect: direct fallback failed to dlopen libSceMbus.sprx\n");
+            return -1;
+        }
+        typedef int (*fn_disconnect)(uint64_t);
+        fn_disconnect f = (fn_disconnect)dlsym(h, "sceMbusDisconnectDevice");
+        if (!f) {
+            klog_printf("[Ghostpad] disconnect: direct fallback failed to dlsym sceMbusDisconnectDevice\n");
+            dlclose(h);
+            return -1;
+        }
+        /* Elevate to SceShellCore credentials for direct system service call */
+        pid_t mypid = getpid();
+        uint64_t saved_authid = kernel_get_ucred_authid(mypid);
+        if (saved_authid) {
+            kernel_set_ucred_authid(mypid, 0x4800000000000010l);
+        }
+        int r = f(physicalDeviceId);
+        klog_printf("[Ghostpad] disconnect: direct sceMbusDisconnectDevice(0x%llx) returned %d\n",
+                    (unsigned long long)physicalDeviceId, r);
+        if (saved_authid) {
+            kernel_set_ucred_authid(mypid, saved_authid);
+        }
+        dlclose(h);
+        return r;
+    }
 }
 
 int
@@ -2990,16 +3071,16 @@ shellui_pad_force_bind(uint64_t virtualDeviceId, int32_t userId)
     pid_t pids[16];
     size_t count = find_pids("SceShellUI", pids, 16);
     if (count == 0) {
-        klog_printf("[Ghostpad] force_bind: SceShellUI not found\n");
-        return -1;
+        klog_printf("[Ghostpad] force_bind: SceShellUI not found, using direct fallback\n");
+        goto fallback;
     }
     pid_t target_pid = pids[0];
 
     klog_printf("[Ghostpad] force_bind: PT_ATTACH(SceShellUI pid=%d) dev=0x%llx user=0x%x\n",
                 target_pid, (unsigned long long)virtualDeviceId, (uint32_t)userId);
     if (sys_ptrace(PT_ATTACH, target_pid, 0, 0) != 0) {
-        klog_printf("[Ghostpad] force_bind: PT_ATTACH failed errno=%d\n", errno);
-        return -1;
+        klog_printf("[Ghostpad] force_bind: PT_ATTACH failed errno=%d, using direct fallback\n", errno);
+        goto fallback;
     }
     waitpid(target_pid, NULL, 0);
 
@@ -3042,6 +3123,38 @@ shellui_pad_force_bind(uint64_t virtualDeviceId, int32_t userId)
 
     sys_ptrace(PT_DETACH, target_pid, (caddr_t)1, 0);
     return (ret == 0) ? 0 : (int)ret;
+
+fallback:
+    {
+        klog_printf("[Ghostpad] force_bind: executing direct fallback for 0x%llx -> 0x%x\n",
+                    (unsigned long long)virtualDeviceId, (uint32_t)userId);
+        void *h = dlopen("/system/common/lib/libSceMbus.sprx", RTLD_LAZY);
+        if (!h) {
+            klog_printf("[Ghostpad] force_bind: direct fallback failed to dlopen libSceMbus.sprx\n");
+            return -1;
+        }
+        typedef int (*fn_bind)(uint64_t, uint32_t);
+        fn_bind f = (fn_bind)dlsym(h, "sceMbusBindDeviceWithUserId");
+        if (!f) {
+            klog_printf("[Ghostpad] force_bind: direct fallback failed to dlsym sceMbusBindDeviceWithUserId\n");
+            dlclose(h);
+            return -1;
+        }
+        /* Elevate to SceShellCore credentials for direct system service call */
+        pid_t mypid = getpid();
+        uint64_t saved_authid = kernel_get_ucred_authid(mypid);
+        if (saved_authid) {
+            kernel_set_ucred_authid(mypid, 0x4800000000000010l);
+        }
+        int r = f(virtualDeviceId, (uint32_t)userId);
+        klog_printf("[Ghostpad] force_bind: direct sceMbusBindDeviceWithUserId(0x%llx, 0x%x) returned %d\n",
+                    (unsigned long long)virtualDeviceId, (uint32_t)userId, r);
+        if (saved_authid) {
+            kernel_set_ucred_authid(mypid, saved_authid);
+        }
+        dlclose(h);
+        return r;
+    }
 }
 
 /* shellui_pad_relaunch_stub_with_handle — re-launch stub with known VDI handle.
@@ -3137,4 +3250,340 @@ shellui_pad_relaunch_stub_with_handle(int32_t handle)
     klog_printf("[Ghostpad] relaunch: SceShellCore detached — stub thread running\n");
 
     return (pret == 0) ? 0 : -1;
+}
+
+/*
+ * =====================================================================================
+ *            HOOK SceShellCore scePadGetHandle TO BYPASS PID IPC CHECK
+ * =====================================================================================
+ */
+
+int
+shellui_pad_hook_gethandle(void)
+{
+    pid_t pids[8];
+    if (find_pids("SceShellCore", pids, 8) == 0) {
+        klog_printf("[Ghostpad] hook_gh: SceShellCore not found\n");
+        return -1;
+    }
+    pid_t target = pids[0];
+
+    pid_t mypid = getpid();
+    uint64_t saved_authid = kernel_get_ucred_authid(mypid);
+    if (saved_authid) {
+        kernel_set_ucred_authid(mypid, 0x4800000000010003l);
+    }
+
+    uint32_t libpad_h = 0;
+    if (get_lib(target, "libScePad", &libpad_h)) {
+        if (saved_authid) kernel_set_ucred_authid(mypid, saved_authid);
+        return -1;
+    }
+
+    intptr_t fn_gethandle = resolve_sym(target, libpad_h, "scePadGetHandle");
+    intptr_t fn_vdi = resolve_sym(target, libpad_h, "scePadVirtualDeviceInsertData");
+    intptr_t fn_vda = resolve_sym(target, libpad_h, "scePadVirtualDeviceAddDevice");
+
+    if (!fn_gethandle || !fn_vdi || !fn_vda) {
+        klog_printf("[Ghostpad] hook_gh: symbols not found (gh=%p, vdi=%p, vda=%p)\n",
+                    (void *)fn_gethandle, (void *)fn_vdi, (void *)fn_vda);
+        if (saved_authid) kernel_set_ucred_authid(mypid, saved_authid);
+        return -1;
+    }
+
+    /* Read original 5 bytes of scePadGetHandle */
+    uint8_t orig_5[5];
+    if (mdbg_copyout(target, fn_gethandle, orig_5, 5) != 0) {
+        klog_printf("[Ghostpad] hook_gh: failed to read original 5 bytes of gethandle\n");
+        if (saved_authid) kernel_set_ucred_authid(mypid, saved_authid);
+        return -1;
+    }
+
+    klog_printf("[Ghostpad] hook_gh: original gethandle bytes: %02x %02x %02x %02x %02x\n",
+                orig_5[0], orig_5[1], orig_5[2], orig_5[3], orig_5[4]);
+
+    /* Construct 128-byte hook block */
+    uint8_t hook[128];
+    memset(hook, 0x90, sizeof(hook)); // pad with NOPs
+
+    /* 1. cmp edi, 0xdeadbeef */
+    hook[0] = 0x81; hook[1] = 0xFF;
+    hook[2] = 0xEF; hook[3] = 0xBE; hook[4] = 0xAD; hook[5] = 0xDE;
+
+    /* 2. jne +0x60 (trampoline at offset 104) */
+    hook[6] = 0x75; hook[7] = 0x60;
+
+    /* 3. push rbx */
+    hook[8] = 0x53;
+    /* 4. mov ebx, esi */
+    hook[9] = 0x89; hook[10] = 0xF3;
+
+    /* 5. push registers to preserve state */
+    hook[11] = 0x57; // push rdi
+    hook[12] = 0x56; // push rsi
+    hook[13] = 0x52; // push rdx
+    hook[14] = 0x51; // push rcx
+    hook[15] = 0x41; hook[16] = 0x50; // push r8
+    hook[17] = 0x41; hook[18] = 0x51; // push r9
+    hook[19] = 0x41; hook[20] = 0x52; // push r10
+    hook[21] = 0x41; hook[22] = 0x53; // push r11
+
+    /* 6. sub rsp, 40 */
+    hook[23] = 0x48; hook[24] = 0x83; hook[25] = 0xEC; hook[26] = 0x28;
+
+    /* 7. mov dword ptr [rsp], 32 (vd_param.size) */
+    hook[27] = 0xC7; hook[28] = 0x04; hook[29] = 0x24;
+    hook[30] = 32; hook[31] = 0; hook[32] = 0; hook[33] = 0;
+
+    /* 8. mov dword ptr [rsp+4], 0x10000000 (vd_param.userId) */
+    hook[34] = 0xC7; hook[35] = 0x44; hook[36] = 0x24; hook[37] = 0x04;
+    hook[38] = 0x00; hook[39] = 0x00; hook[40] = 0x00; hook[41] = 0x10;
+
+    /* 9. mov qword ptr [rsp+8], 0 */
+    hook[42] = 0x48; hook[43] = 0xC7; hook[44] = 0x44; hook[45] = 0x24; hook[46] = 0x08;
+    hook[47] = 0; hook[48] = 0; hook[49] = 0; hook[50] = 0;
+
+    /* 10. mov qword ptr [rsp+16], 0 */
+    hook[51] = 0x48; hook[52] = 0xC7; hook[53] = 0x44; hook[54] = 0x24; hook[55] = 0x10;
+    hook[56] = 0; hook[57] = 0; hook[58] = 0; hook[59] = 0;
+
+    /* 11. mov qword ptr [rsp+24], 0 */
+    hook[60] = 0x48; hook[61] = 0xC7; hook[62] = 0x44; hook[63] = 0x24; hook[64] = 0x18;
+    hook[65] = 0; hook[66] = 0; hook[67] = 0; hook[68] = 0;
+
+    /* 12. mov rdi, rsp */
+    hook[69] = 0x48; hook[70] = 0x89; hook[71] = 0xE7;
+    /* 13. mov esi, ebx */
+    hook[72] = 0x89; hook[73] = 0xDE;
+
+    /* 14. mov rax, fn_vda */
+    hook[74] = 0x48; hook[75] = 0xB8;
+    memcpy(&hook[76], &fn_vda, 8);
+
+    /* 15. call rax */
+    hook[84] = 0xFF; hook[85] = 0xD0;
+
+    /* 16. add rsp, 40 */
+    hook[86] = 0x48; hook[87] = 0x83; hook[88] = 0xC4; hook[89] = 0x28;
+
+    /* 17. pop r11, r10, r9, r8, rcx, rdx, rsi, rdi, rbx */
+    hook[90] = 0x41; hook[91] = 0x5B;
+    hook[92] = 0x41; hook[93] = 0x5A;
+    hook[94] = 0x41; hook[95] = 0x59;
+    hook[96] = 0x41; hook[97] = 0x58;
+    hook[98] = 0x59;
+    hook[99] = 0x5A;
+    hook[100] = 0x5E;
+    hook[101] = 0x5F;
+    hook[102] = 0x5B;
+
+    /* 18. ret */
+    hook[103] = 0xC3;
+
+    /* ---- Trampoline at offset 104 (0x68) ---- */
+    /* 1. Copy original 5 bytes of scePadGetHandle */
+    memcpy(&hook[104], orig_5, 5);
+
+    /* 2. mov rax, fn_gethandle + 5 */
+    hook[109] = 0x48; hook[110] = 0xB8;
+    intptr_t ret_addr = fn_gethandle + 5;
+    memcpy(&hook[111], &ret_addr, 8);
+
+    /* 3. jmp rax */
+    hook[119] = 0xFF; hook[120] = 0xE0;
+
+    /* Write the hook block into SceShellCore's scePadVirtualDeviceInsertData */
+    if (mdbg_copyin(target, hook, fn_vdi, 128) != 0) {
+        klog_printf("[Ghostpad] hook_gh: failed to write hook block to SceShellCore\n");
+        if (saved_authid) kernel_set_ucred_authid(mypid, saved_authid);
+        return -1;
+    }
+
+    /* Write 5-byte relative jump at scePadGetHandle */
+    uint8_t detour[5];
+    detour[0] = 0xE9;
+    int32_t jmp_rel32 = (int32_t)(fn_vdi - (fn_gethandle + 5));
+    memcpy(&detour[1], &jmp_rel32, 4);
+
+    if (mdbg_copyin(target, detour, fn_gethandle, 5) != 0) {
+        klog_printf("[Ghostpad] hook_gh: failed to write detour jump to SceShellCore\n");
+        if (saved_authid) kernel_set_ucred_authid(mypid, saved_authid);
+        return -1;
+    }
+
+    klog_printf("[Ghostpad] hook_gh: scePadGetHandle HOOKED successfully (detour -> %p)\n", (void *)fn_vdi);
+
+    if (saved_authid) kernel_set_ucred_authid(mypid, saved_authid);
+    return 0;
+}
+
+/*
+ * =====================================================================================
+ *            HOOK SceShellCore scePadSetProcessPrivilege FOR IN-PROCESS VDA
+ * =====================================================================================
+ */
+int
+shellui_pad_hook_setpriv(void)
+{
+    pid_t pids[8];
+    if (find_pids("SceShellCore", pids, 8) == 0) {
+        klog_printf("[Ghostpad] hook_sp: SceShellCore not found\n");
+        return -1;
+    }
+    pid_t target = pids[0];
+
+    pid_t mypid = getpid();
+    uint64_t saved_authid = kernel_get_ucred_authid(mypid);
+    if (saved_authid) {
+        kernel_set_ucred_authid(mypid, 0x4800000000010003l);
+    }
+
+    uint32_t libpad_h = 0;
+    if (get_lib(target, "libScePad", &libpad_h)) {
+        if (saved_authid) kernel_set_ucred_authid(mypid, saved_authid);
+        return -1;
+    }
+
+    intptr_t fn_setpriv = resolve_sym(target, libpad_h, "scePadSetProcessPrivilege");
+    intptr_t fn_vdi = resolve_sym(target, libpad_h, "scePadVirtualDeviceInsertData");
+    intptr_t fn_vda = resolve_sym(target, libpad_h, "scePadVirtualDeviceAddDevice");
+
+    if (!fn_setpriv || !fn_vdi || !fn_vda) {
+        klog_printf("[Ghostpad] hook_sp: symbols not found (sp=%p, vdi=%p, vda=%p)\n",
+                    (void *)fn_setpriv, (void *)fn_vdi, (void *)fn_vda);
+        if (saved_authid) kernel_set_ucred_authid(mypid, saved_authid);
+        return -1;
+    }
+
+    /* Read original 5 bytes of scePadSetProcessPrivilege */
+    uint8_t orig_5[5];
+    if (mdbg_copyout(target, fn_setpriv, orig_5, 5) != 0) {
+        klog_printf("[Ghostpad] hook_sp: failed to read original 5 bytes of setpriv\n");
+        if (saved_authid) kernel_set_ucred_authid(mypid, saved_authid);
+        return -1;
+    }
+
+    klog_printf("[Ghostpad] hook_sp: original setpriv bytes: %02x %02x %02x %02x %02x\n",
+                orig_5[0], orig_5[1], orig_5[2], orig_5[3], orig_5[4]);
+
+    /* Construct 128-byte hook block */
+    uint8_t hook[128];
+    memset(hook, 0x90, sizeof(hook)); // pad with NOPs
+
+    size_t off = 0;
+
+    /* 1. cmp edi, 0xdeadbeef */
+    hook[off++] = 0x81; hook[off++] = 0xFF;
+    hook[off++] = 0xEF; hook[off++] = 0xBE; hook[off++] = 0xAD; hook[off++] = 0xDE;
+
+    /* 2. jne displacement (trampoline at offset 104) */
+    size_t jne_instr_off = off;
+    hook[off++] = 0x75;
+    hook[off++] = 0x00; // placeholder for displacement
+
+    /* 3. push registers to preserve state */
+    hook[off++] = 0x53; // push rbx
+    hook[off++] = 0x55; // push rbp
+    hook[off++] = 0x57; // push rdi
+    hook[off++] = 0x56; // push rsi
+    hook[off++] = 0x52; // push rdx
+    hook[off++] = 0x51; // push rcx
+    hook[off++] = 0x41; hook[off++] = 0x50; // push r8
+    hook[off++] = 0x41; hook[off++] = 0x51; // push r9
+    hook[off++] = 0x41; hook[off++] = 0x52; // push r10
+    hook[off++] = 0x41; hook[off++] = 0x53; // push r11
+
+    /* 4. sub rsp, 40 (allocate stack frame) */
+    hook[off++] = 0x48; hook[off++] = 0x83; hook[off++] = 0xEC; hook[off++] = 0x28;
+
+    /* 5. mov dword ptr [rsp], 32 (vd_param.size) */
+    hook[off++] = 0xC7; hook[off++] = 0x04; hook[off++] = 0x24;
+    hook[off++] = 32; hook[off++] = 0; hook[off++] = 0; hook[off++] = 0;
+
+    /* 6. mov dword ptr [rsp+4], 0x10000000 (vd_param.userId) */
+    hook[off++] = 0xC7; hook[off++] = 0x44; hook[off++] = 0x24; hook[off++] = 0x04;
+    hook[off++] = 0x00; hook[off++] = 0x00; hook[off++] = 0x00; hook[off++] = 0x10;
+
+    /* 7. mov qword ptr [rsp+8], 0 */
+    hook[off++] = 0x48; hook[off++] = 0xC7; hook[off++] = 0x44; hook[off++] = 0x24; hook[off++] = 0x08;
+    hook[off++] = 0; hook[off++] = 0; hook[off++] = 0; hook[off++] = 0;
+
+    /* 8. mov qword ptr [rsp+16], 0 */
+    hook[off++] = 0x48; hook[off++] = 0xC7; hook[off++] = 0x44; hook[off++] = 0x24; hook[off++] = 0x10;
+    hook[off++] = 0; hook[off++] = 0; hook[off++] = 0; hook[off++] = 0;
+
+    /* 9. mov qword ptr [rsp+24], 0 */
+    hook[off++] = 0x48; hook[off++] = 0xC7; hook[off++] = 0x44; hook[off++] = 0x24; hook[off++] = 0x18;
+    hook[off++] = 0; hook[off++] = 0; hook[off++] = 0; hook[off++] = 0;
+
+    /* 10. mov rdi, rsp */
+    hook[off++] = 0x48; hook[off++] = 0x89; hook[off++] = 0xE7;
+
+    /* 11. mov esi, 3 */
+    hook[off++] = 0xBE; hook[off++] = 0x03; hook[off++] = 0x00; hook[off++] = 0x00; hook[off++] = 0x00;
+
+    /* 12. mov rax, fn_vda */
+    hook[off++] = 0x48; hook[off++] = 0xB8;
+    memcpy(&hook[off], &fn_vda, 8);
+    off += 8;
+
+    /* 13. call rax */
+    hook[off++] = 0xFF; hook[off++] = 0xD0;
+
+    /* 14. add rsp, 40 */
+    hook[off++] = 0x48; hook[off++] = 0x83; hook[off++] = 0xC4; hook[off++] = 0x28;
+
+    /* 15. pop registers to restore state */
+    hook[off++] = 0x41; hook[off++] = 0x5B; // pop r11
+    hook[off++] = 0x41; hook[off++] = 0x5A; // pop r10
+    hook[off++] = 0x41; hook[off++] = 0x59; // pop r9
+    hook[off++] = 0x41; hook[off++] = 0x58; // pop r8
+    hook[off++] = 0x59; // pop rcx
+    hook[off++] = 0x5A; // pop rdx
+    hook[off++] = 0x5E; // pop rsi
+    hook[off++] = 0x5F; // pop rdi
+    hook[off++] = 0x5D; // pop rbp
+    hook[off++] = 0x5B; // pop rbx
+
+    /* 16. ret */
+    hook[off++] = 0xC3;
+
+    /* Setup trampoline at offset 104 */
+    size_t tramp_off = 104;
+    hook[jne_instr_off + 1] = (uint8_t)(tramp_off - (jne_instr_off + 2));
+
+    /* Trampoline: original 5 bytes */
+    memcpy(&hook[tramp_off], orig_5, 5);
+
+    /* Trampoline: mov rax, fn_setpriv + 5 */
+    hook[tramp_off + 5] = 0x48; hook[tramp_off + 6] = 0xB8;
+    intptr_t ret_addr = fn_setpriv + 5;
+    memcpy(&hook[tramp_off + 7], &ret_addr, 8);
+
+    /* Trampoline: jmp rax */
+    hook[tramp_off + 15] = 0xFF; hook[tramp_off + 16] = 0xE0;
+
+    /* Write hook block to scePadVirtualDeviceInsertData in SceShellCore */
+    if (mdbg_copyin(target, hook, fn_vdi, 128) != 0) {
+        klog_printf("[Ghostpad] hook_sp: failed to write hook block to SceShellCore\n");
+        if (saved_authid) kernel_set_ucred_authid(mypid, saved_authid);
+        return -1;
+    }
+
+    /* Write relative jump in scePadSetProcessPrivilege */
+    uint8_t detour[5];
+    detour[0] = 0xE9;
+    int32_t jmp_rel32 = (int32_t)(fn_vdi - (fn_setpriv + 5));
+    memcpy(&detour[1], &jmp_rel32, 4);
+
+    if (mdbg_copyin(target, detour, fn_setpriv, 5) != 0) {
+        klog_printf("[Ghostpad] hook_sp: failed to write detour jump to SceShellCore\n");
+        if (saved_authid) kernel_set_ucred_authid(mypid, saved_authid);
+        return -1;
+    }
+
+    klog_printf("[Ghostpad] hook_sp: scePadSetProcessPrivilege HOOKED successfully (detour -> %p)\n", (void *)fn_vdi);
+
+    if (saved_authid) kernel_set_ucred_authid(mypid, saved_authid);
+    return 0;
 }
