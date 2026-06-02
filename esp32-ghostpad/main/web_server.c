@@ -16,6 +16,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
 
 static const char *TAG = "ghostpad_web";
 
@@ -56,6 +57,10 @@ typedef struct __attribute__((packed)) {
 
 static int console_tcp_socket = -1;
 static char current_console_ip[16] = "";
+static uint32_t s_gpad_tx_count = 0;
+static uint32_t s_gpad_tx_errors = 0;
+static uint32_t s_ws_rx_count = 0;
+static int s_last_console_errno = 0;
 
 /* Payload storage (uploaded via web UI) */
 static uint8_t *s_payload_data = NULL;
@@ -104,6 +109,53 @@ static int connect_to_console(const char *ip, int port, int timeout_ms) {
     close(sock);
     return -1;
 }
+
+static void close_console_socket(void) {
+    if (console_tcp_socket >= 0) {
+        close(console_tcp_socket);
+        console_tcp_socket = -1;
+    }
+    current_console_ip[0] = '\0';
+}
+
+static int send_all(int fd, const void *buf, size_t len) {
+    const uint8_t *p = (const uint8_t *)buf;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = send(fd, p + off, len - off, 0);
+        if (n <= 0) {
+            return -1;
+        }
+        off += (size_t)n;
+    }
+    return 0;
+}
+
+static esp_err_t ws_send_json(httpd_req_t *req, const char *json) {
+    httpd_ws_frame_t ws_resp = {0};
+    ws_resp.type = HTTPD_WS_TYPE_TEXT;
+    ws_resp.payload = (uint8_t *)json;
+    ws_resp.len = strlen(json);
+    return httpd_ws_send_frame(req, &ws_resp);
+}
+
+static int gpad_send_packet_raw(int sock, uint32_t buttons,
+                                uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry,
+                                uint8_t l2, uint8_t r2) {
+    GhostpadPacket pkt;
+    memcpy(pkt.magic, "GPAD", 4);
+    pkt.buttons = htonl(buttons);
+    pkt.lx = lx;
+    pkt.ly = ly;
+    pkt.rx = rx;
+    pkt.ry = ry;
+    pkt.l2 = l2;
+    pkt.r2 = r2;
+    pkt._pad[0] = 0;
+    pkt._pad[1] = 0;
+    return send_all(sock, &pkt, sizeof(pkt));
+}
+
 volatile gamepad_state_t g_gamepad = {0};
 
 static char local_ip[16] = "192.168.4.1";
@@ -340,6 +392,15 @@ static esp_err_t status_handler(httpd_req_t *req) {
     cJSON_AddBoolToObject(wifi_console, "connected", console_tcp_socket >= 0);
     cJSON_AddItemToObject(root, "wifi_console", wifi_console);
 
+    cJSON *controller = cJSON_CreateObject();
+    cJSON_AddBoolToObject(controller, "wifi_connected", console_tcp_socket >= 0);
+    cJSON_AddStringToObject(controller, "target_ip", current_console_ip);
+    cJSON_AddNumberToObject(controller, "tx_packets", s_gpad_tx_count);
+    cJSON_AddNumberToObject(controller, "tx_errors", s_gpad_tx_errors);
+    cJSON_AddNumberToObject(controller, "ws_rx", s_ws_rx_count);
+    cJSON_AddNumberToObject(controller, "last_errno", s_last_console_errno);
+    cJSON_AddItemToObject(root, "controller", controller);
+
     const char *json = cJSON_Print(root);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, json);
@@ -384,14 +445,87 @@ static const httpd_uri_t status_uri = {
     .user_ctx  = NULL,
 };
 
+static esp_err_t controller_pulse_handler(httpd_req_t *req) {
+    char query[128] = {0};
+    char ip[32] = {0};
+    int sent = 0;
+    int last_errno = 0;
+    int sock = -1;
+
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        httpd_query_key_value(query, "ip", ip, sizeof(ip));
+    }
+
+    if (ip[0] == '\0') {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"missing ip query param\"}");
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Controller pulse test: connecting to %s:6967", ip);
+    sock = connect_to_console(ip, 6967, 1500);
+    if (sock < 0) {
+        last_errno = errno;
+        char resp[160];
+        snprintf(resp, sizeof(resp),
+                 "{\"ok\":false,\"stage\":\"connect\",\"ip\":\"%s\",\"errno\":%d}",
+                 ip, last_errno);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, resp);
+        return ESP_OK;
+    }
+
+    for (int i = 0; i < 6; i++) {
+        if (gpad_send_packet_raw(sock, 0, 128, 128, 128, 128, 0, 0) != 0) goto send_fail;
+        sent++;
+        usleep(33000);
+    }
+    for (int i = 0; i < 12; i++) {
+        if (gpad_send_packet_raw(sock, 1, 128, 128, 128, 128, 0, 0) != 0) goto send_fail;
+        sent++;
+        usleep(33000);
+    }
+    for (int i = 0; i < 10; i++) {
+        if (gpad_send_packet_raw(sock, 0, 128, 128, 128, 128, 0, 0) != 0) goto send_fail;
+        sent++;
+        usleep(33000);
+    }
+
+    close(sock);
+    {
+        char resp[160];
+        snprintf(resp, sizeof(resp),
+                 "{\"ok\":true,\"ip\":\"%s\",\"port\":6967,\"packets\":%d,\"button\":\"cross\"}",
+                 ip, sent);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, resp);
+    }
+    return ESP_OK;
+
+send_fail:
+    last_errno = errno;
+    if (sock >= 0) close(sock);
+    {
+        char resp[192];
+        snprintf(resp, sizeof(resp),
+                 "{\"ok\":false,\"stage\":\"send\",\"ip\":\"%s\",\"errno\":%d,\"packets\":%d}",
+                 ip, last_errno, sent);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, resp);
+    }
+    return ESP_OK;
+}
+
+static const httpd_uri_t controller_pulse_uri = {
+    .uri       = "/api/controller/pulse",
+    .method    = HTTP_GET,
+    .handler   = controller_pulse_handler,
+    .user_ctx  = NULL,
+};
+
 static esp_err_t ws_handler(httpd_req_t *req) {
     if (req->method == HTTP_GET) {
-        ESP_LOGI(TAG, "New WebSocket handshake, resetting wireless console socket.");
-        if (console_tcp_socket >= 0) {
-            close(console_tcp_socket);
-            console_tcp_socket = -1;
-            strcpy(current_console_ip, "");
-        }
+        ESP_LOGI(TAG, "Controller WebSocket handshake");
         return ESP_OK;
     }
 
@@ -416,21 +550,26 @@ static esp_err_t ws_handler(httpd_req_t *req) {
     free(buf);
     if (!json) return ESP_OK;
 
+    s_ws_rx_count++;
+
     cJSON *target_ip = cJSON_GetObjectItem(json, "target_ip");
     if (cJSON_IsString(target_ip)) {
-        if (console_tcp_socket >= 0) {
-            close(console_tcp_socket);
-            console_tcp_socket = -1;
-            strcpy(current_console_ip, "");
-        }
-        if (strcmp(target_ip->valuestring, "usb") != 0 && strlen(target_ip->valuestring) > 0) {
-            ESP_LOGI(TAG, "Connecting to wireless console at %s...", target_ip->valuestring);
-            console_tcp_socket = connect_to_console(target_ip->valuestring, 6967, 1000);
+        const char *ip = target_ip->valuestring;
+        if (strcmp(ip, "usb") == 0 || strlen(ip) == 0) {
+            close_console_socket();
+        } else if (console_tcp_socket < 0 || strcmp(current_console_ip, ip) != 0) {
+            close_console_socket();
+            ESP_LOGI(TAG, "Connecting to wireless console GPAD at %s:6967...", ip);
+            console_tcp_socket = connect_to_console(ip, 6967, 1500);
             if (console_tcp_socket >= 0) {
-                ESP_LOGI(TAG, "Connected to wireless console at %s!", target_ip->valuestring);
-                strlcpy(current_console_ip, target_ip->valuestring, sizeof(current_console_ip));
+                ESP_LOGI(TAG, "Connected to wireless console GPAD at %s:6967", ip);
+                strlcpy(current_console_ip, ip, sizeof(current_console_ip));
+                ws_send_json(req, "{\"event\":\"console_connected\"}");
             } else {
-                ESP_LOGE(TAG, "Failed to connect to wireless console at %s", target_ip->valuestring);
+                s_last_console_errno = errno;
+                s_gpad_tx_errors++;
+                ESP_LOGE(TAG, "Failed to connect to wireless console GPAD at %s:6967", ip);
+                ws_send_json(req, "{\"event\":\"console_error\",\"msg\":\"GPAD connect failed\"}");
             }
         }
     }
@@ -466,22 +605,27 @@ static esp_err_t ws_handler(httpd_req_t *req) {
         pkt._pad[0] = 0;
         pkt._pad[1] = 0;
 
-        int sent_bytes = send(console_tcp_socket, &pkt, sizeof(pkt), 0);
-        if (sent_bytes < 0) {
-            ESP_LOGE(TAG, "Failed to send packet to wireless console, closing socket");
-            close(console_tcp_socket);
-            console_tcp_socket = -1;
-            strcpy(current_console_ip, "");
+        if (send_all(console_tcp_socket, &pkt, sizeof(pkt)) != 0) {
+            s_last_console_errno = errno;
+            s_gpad_tx_errors++;
+            ESP_LOGE(TAG, "Failed to send GPAD packet to wireless console, closing socket");
+            close_console_socket();
+        } else {
+            s_gpad_tx_count++;
         }
     } else {
         hid_gamepad_send_report();
     }
 
-    httpd_ws_frame_t ws_resp = {0};
-    ws_resp.type = HTTPD_WS_TYPE_TEXT;
-    ws_resp.payload = (uint8_t *)"ok";
-    ws_resp.len = 2;
-    httpd_ws_send_frame(req, &ws_resp);
+    static uint32_t s_ws_state_ack_div = 0;
+    if ((s_ws_state_ack_div++ % 30u) == 0u) {
+        char resp[128];
+        snprintf(resp, sizeof(resp), "{\"event\":\"state\",\"connected\":%s,\"tx\":%lu,\"err\":%lu}",
+                 console_tcp_socket >= 0 ? "true" : "false",
+                 (unsigned long)s_gpad_tx_count,
+                 (unsigned long)s_gpad_tx_errors);
+        ws_send_json(req, resp);
+    }
 
     return ESP_OK;
 }
@@ -1153,6 +1297,7 @@ esp_err_t web_server_start(void) {
     httpd_register_uri_handler(server, &scan_uri);
     httpd_register_uri_handler(server, &status_uri);
     httpd_register_uri_handler(server, &ws_uri);
+    httpd_register_uri_handler(server, &controller_pulse_uri);
     httpd_register_uri_handler(server, &ble_scan_uri);
     httpd_register_uri_handler(server, &ble_status_uri);
     httpd_register_uri_handler(server, &ble_connect_uri);

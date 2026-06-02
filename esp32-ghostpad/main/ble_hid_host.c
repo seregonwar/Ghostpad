@@ -23,6 +23,7 @@
 
 #include "cJSON.h"
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -52,9 +53,25 @@ static const char *TAG = "ble_hid";
 #define BLE_UUID_HID_SERVICE        0x1812
 #define BLE_UUID_HID_REPORT         0x2A4D
 #define BLE_UUID_CCCD               0x2902
+#define BLE_UUID_DEVICE_INFO        0x180A
+#define BLE_UUID_BATTERY_SERVICE    0x180F
 
-#define MAX_SCAN_RESULTS            16
-#define SCAN_DURATION_MS            10000  /* 10 s active window for pairing controllers */
+#define BLE_APPEARANCE_HID_GENERIC  0x03C0
+#define BLE_APPEARANCE_HID_JOYSTICK 0x03C3
+#define BLE_APPEARANCE_HID_GAMEPAD  0x03C4
+
+#define SONY_USB_VID                0x054C
+#define SONY_PID_DS4_CUH_ZCT1       0x05C4
+#define SONY_PID_DS4_CUH_ZCT2       0x09CC
+#define SONY_PID_DUALSENSE          0x0CE6
+#define SONY_PID_DUALSENSE_EDGE     0x0DF2
+
+#define MICROSOFT_USB_VID           0x045E
+#define NINTENDO_USB_VID            0x057E
+#define EIGHTBITDO_USB_VID          0x2DC8
+
+#define MAX_SCAN_RESULTS            32
+#define SCAN_DURATION_MS            12000  /* 12 s active window; pairing advertisements can be sparse */
 
 /*
  * =====================================================================================
@@ -65,13 +82,17 @@ static const char *TAG = "ble_hid";
 typedef struct {
     ble_addr_t  addr;
     char        name[64];
+    char        model[40];
     int8_t      rssi;
     uint16_t    appearance;
-    bool        appearance_present;
-    bool        hid_service;
-    bool        sony_name;
-    bool        candidate;
+    uint8_t     addr_type;
+    int         score;
     bool        valid;
+    bool        candidate;
+    bool        hid_service;
+    bool        gamepad_appearance;
+    bool        known_name;
+    bool        sony_name;
 } scan_result_t;
 
 static scan_result_t s_results[MAX_SCAN_RESULTS];
@@ -324,6 +345,100 @@ static int on_disc_service(uint16_t conn_handle,
  * =====================================================================================
  */
 
+typedef struct {
+    const char *needle;
+    const char *model;
+    int         score;
+    bool        sony;
+} controller_name_match_t;
+
+static const controller_name_match_t s_controller_names[] = {
+    /* Sony controllers normally appear with one of these names when pairing. */
+    {"dualsense edge",              "DualSense Edge",       95, true},
+    {"dualsense",                   "DualSense",            90, true},
+    {"wireless controller",         "DualShock/DualSense",  80, true},
+    {"dualshock",                   "DualShock",            80, true},
+    {"dualsense wireless controller","DualSense",           95, true},
+
+    /* Useful generic controller names; these are candidates, not Sony-only. */
+    {"xbox wireless controller",    "Xbox Wireless",        70, false},
+    {"xbox controller",             "Xbox",                 65, false},
+    {"pro controller",              "Nintendo Pro",         65, false},
+    {"joy-con",                     "Nintendo Joy-Con",     60, false},
+    {"8bitdo",                      "8BitDo",               60, false},
+    {"gamepad",                     "Generic Gamepad",      55, false},
+    {"joystick",                    "Generic Joystick",     50, false},
+};
+
+static bool ascii_contains_ci(const char *haystack, const char *needle) {
+    size_t hlen, nlen;
+    if (!haystack || !needle) return false;
+    hlen = strlen(haystack);
+    nlen = strlen(needle);
+    if (nlen == 0 || hlen < nlen) return false;
+    for (size_t i = 0; i + nlen <= hlen; i++) {
+        if (strncasecmp(haystack + i, needle, nlen) == 0) return true;
+    }
+    return false;
+}
+
+static void classify_controller_adv(const char *name,
+                                    uint16_t appearance,
+                                    bool hid_service,
+                                    bool *candidate,
+                                    bool *known_name,
+                                    bool *sony_name,
+                                    int *score,
+                                    char *model,
+                                    size_t model_len) {
+    int s = 0;
+    bool cand = false;
+    bool known = false;
+    bool sony = false;
+
+    if (model && model_len > 0) model[0] = '\0';
+
+    if (hid_service) {
+        s += 50;
+        cand = true;
+    }
+    if (appearance == BLE_APPEARANCE_HID_GAMEPAD ||
+        appearance == BLE_APPEARANCE_HID_JOYSTICK ||
+        appearance == BLE_APPEARANCE_HID_GENERIC) {
+        s += (appearance == BLE_APPEARANCE_HID_GAMEPAD) ? 50 : 35;
+        cand = true;
+    }
+
+    if (name && name[0]) {
+        for (size_t i = 0; i < sizeof(s_controller_names) / sizeof(s_controller_names[0]); i++) {
+            if (ascii_contains_ci(name, s_controller_names[i].needle)) {
+                if (s_controller_names[i].score > s) s = s_controller_names[i].score;
+                known = true;
+                cand = true;
+                if (s_controller_names[i].sony) sony = true;
+                if (model && model_len > 0 && model[0] == '\0') {
+                    strlcpy(model, s_controller_names[i].model, model_len);
+                }
+            }
+        }
+    }
+
+    if (model && model_len > 0 && model[0] == '\0') {
+        if (hid_service || appearance == BLE_APPEARANCE_HID_GAMEPAD) {
+            strlcpy(model, "BLE HID Gamepad", model_len);
+        } else if (name && name[0]) {
+            strlcpy(model, "Named BLE device", model_len);
+        } else {
+            strlcpy(model, "Unknown BLE device", model_len);
+        }
+    }
+
+    if (candidate) *candidate = cand;
+    if (known_name) *known_name = known;
+    if (sony_name) *sony_name = sony;
+    if (score) *score = s;
+}
+
 static void addr_to_str(const ble_addr_t *addr, char *buf, size_t len) {
     snprintf(buf, len, "%02x:%02x:%02x:%02x:%02x:%02x",
              addr->val[5], addr->val[4], addr->val[3],
@@ -354,11 +469,37 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
             break;
         }
 
-        bool is_hid     = false;
+        bool is_hid = false;
         bool is_gamepad = false;
+        bool is_candidate = false;
+        bool is_known_name = false;
+        bool is_sony = false;
+        int score = 0;
+        uint16_t appearance = fields.appearance_is_present ? fields.appearance : 0;
+        char adv_name[64] = "";
+        char model[40] = "";
 
-        if (fields.appearance_is_present &&
-            (fields.appearance == 0x03C4 || fields.appearance == 0x03C0)) {
+        if (fields.name && fields.name_len > 0) {
+            size_t n = fields.name_len < sizeof(adv_name) - 1 ? fields.name_len : sizeof(adv_name) - 1;
+            memcpy(adv_name, fields.name, n);
+            adv_name[n] = '\0';
+        }
+
+        {
+            char hexbuf[256];
+            int pos = 0;
+            for (int i = 0; i < event->disc.length_data && i < 64 && pos < (int)sizeof(hexbuf) - 4; i++) {
+                pos += snprintf(hexbuf + pos, sizeof(hexbuf) - pos, "%02x", event->disc.data[i]);
+            }
+            hexbuf[pos] = '\0';
+            ESP_LOGI(TAG, "RAW ADV rssi=%d len=%d hex=%s name=%s",
+                     event->disc.rssi, event->disc.length_data,
+                     hexbuf, adv_name[0] ? adv_name : "(none)");
+        }
+
+        if (appearance == BLE_APPEARANCE_HID_GAMEPAD ||
+            appearance == BLE_APPEARANCE_HID_JOYSTICK ||
+            appearance == BLE_APPEARANCE_HID_GENERIC) {
             is_gamepad = true;
         }
 
@@ -369,20 +510,13 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
             }
         }
 
-        /* Sony controllers in pairing mode may be sparse in ADV and only expose
-         * a usable name/appearance in scan response. Do not filter them out at
-         * discovery time; store all devices with classification metadata so the
-         * dashboard can show diagnostics and we can still connect manually. */
-        bool is_sony = false;
-        if (fields.name && fields.name_len > 0) {
-            if (strncmp((char *)fields.name, "DualSense", 9) == 0 ||
-                strncmp((char *)fields.name, "Wireless Controller", 19) == 0 ||
-                strncmp((char *)fields.name, "DUALSHOCK", 9) == 0) {
-                is_sony = true;
-            }
-        }
+        classify_controller_adv(adv_name, appearance, is_hid,
+                                &is_candidate, &is_known_name, &is_sony,
+                                &score, model, sizeof(model));
 
-        bool candidate = is_hid || is_gamepad || is_sony;
+        /* Store every device — don't filter at advertisement level because
+         * DualSense often omits name/HID/appearance from ADV_IND, providing
+         * them only in SCAN_RSP or not at all. MAX_SCAN_RESULTS bounds the list. */
 
         xSemaphoreTake(s_results_mutex, portMAX_DELAY);
         bool found = false;
@@ -391,17 +525,16 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
                 s_results[i].addr.type == event->disc.addr.type) {
                 found = true;
                 s_results[i].rssi = event->disc.rssi;
-                s_results[i].appearance_present |= fields.appearance_is_present;
-                if (fields.appearance_is_present) s_results[i].appearance = fields.appearance;
-                s_results[i].hid_service |= is_hid;
-                s_results[i].sony_name |= is_sony;
-                s_results[i].candidate |= candidate;
-                if (fields.name && fields.name_len > 0) {
-                    size_t n = fields.name_len < (sizeof(s_results[i].name) - 1)
-                               ? fields.name_len : (sizeof(s_results[i].name) - 1);
-                    memcpy(s_results[i].name, fields.name, n);
-                    s_results[i].name[n] = '\0';
-                }
+                s_results[i].appearance = appearance;
+                s_results[i].addr_type = event->disc.addr.type;
+                s_results[i].score = score;
+                s_results[i].candidate = is_candidate;
+                s_results[i].hid_service = is_hid;
+                s_results[i].gamepad_appearance = is_gamepad;
+                s_results[i].known_name = is_known_name;
+                s_results[i].sony_name = is_sony;
+                if (adv_name[0]) strlcpy(s_results[i].name, adv_name, sizeof(s_results[i].name));
+                if (model[0]) strlcpy(s_results[i].model, model, sizeof(s_results[i].model));
                 break;
             }
         }
@@ -410,26 +543,25 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
             r->addr  = event->disc.addr;
             r->rssi  = event->disc.rssi;
             r->valid = true;
-            r->appearance_present = fields.appearance_is_present;
-            r->appearance = fields.appearance_is_present ? fields.appearance : 0;
+            r->appearance = appearance;
+            r->addr_type = event->disc.addr.type;
+            r->score = score;
+            r->candidate = is_candidate;
             r->hid_service = is_hid;
+            r->gamepad_appearance = is_gamepad;
+            r->known_name = is_known_name;
             r->sony_name = is_sony;
-            r->candidate = candidate;
-            if (fields.name && fields.name_len > 0) {
-                size_t n = fields.name_len < (sizeof(r->name) - 1)
-                           ? fields.name_len : (sizeof(r->name) - 1);
-                memcpy(r->name, fields.name, n);
-                r->name[n] = '\0';
+            if (adv_name[0]) {
+                strlcpy(r->name, adv_name, sizeof(r->name));
             } else {
-                strlcpy(r->name, candidate ? "HID/Sony candidate" : "BLE Device", sizeof(r->name));
+                strlcpy(r->name, is_candidate ? "HID/Sony candidate" : "BLE Device", sizeof(r->name));
             }
+            if (model[0]) strlcpy(r->model, model, sizeof(r->model));
             char addr_str[18];
             addr_to_str(&r->addr, addr_str, sizeof(addr_str));
-            ESP_LOGI(TAG, "Discovered%s: %s (%s) \"%s\" RSSI=%d app=%s0x%04x hid=%d sony=%d",
-                     candidate ? " candidate" : "",
+            ESP_LOGI(TAG, "Discovered: %s (%s) \"%s\" RSSI=%d app=0x%04x hid=%d sony=%d score=%d",
                      addr_str, addr_type_name(r->addr.type), r->name, r->rssi,
-                     r->appearance_present ? "" : "none/",
-                     r->appearance, r->hid_service, r->sony_name);
+                     r->appearance, r->hid_service, r->sony_name, r->score);
         }
         s_last_disc_count = s_result_count;
         xSemaphoreGive(s_results_mutex);
@@ -640,14 +772,17 @@ char *ble_hid_host_get_scan_results_json(void) {
         char addr_str[18];
         addr_to_str(&s_results[i].addr, addr_str, sizeof(addr_str));
         cJSON_AddStringToObject(obj, "addr", addr_str);
-        cJSON_AddStringToObject(obj, "addr_type", addr_type_name(s_results[i].addr.type));
+        cJSON_AddNumberToObject(obj, "addr_type", s_results[i].addr_type);
         cJSON_AddStringToObject(obj, "name", s_results[i].name);
+        cJSON_AddStringToObject(obj, "model", s_results[i].model);
         cJSON_AddNumberToObject(obj, "rssi", s_results[i].rssi);
+        cJSON_AddNumberToObject(obj, "score", s_results[i].score);
+        cJSON_AddNumberToObject(obj, "appearance", s_results[i].appearance);
         cJSON_AddBoolToObject(obj, "candidate", s_results[i].candidate);
         cJSON_AddBoolToObject(obj, "hid_service", s_results[i].hid_service);
+        cJSON_AddBoolToObject(obj, "gamepad_appearance", s_results[i].gamepad_appearance);
+        cJSON_AddBoolToObject(obj, "known_name", s_results[i].known_name);
         cJSON_AddBoolToObject(obj, "sony_name", s_results[i].sony_name);
-        cJSON_AddBoolToObject(obj, "appearance_present", s_results[i].appearance_present);
-        cJSON_AddNumberToObject(obj, "appearance", s_results[i].appearance);
         cJSON_AddItemToArray(arr, obj);
     }
 
