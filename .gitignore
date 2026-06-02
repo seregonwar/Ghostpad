@@ -5,3 +5,8 @@
 *.elf
 *.elf
 /git-patch
+*.elf
+*.rej
+esp32-ghostpad/sdkconfig.defaults
+*.defaults
+*.bak

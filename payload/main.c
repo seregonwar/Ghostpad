@@ -457,10 +457,41 @@ static int32_t  injectUserId     = -1;
 
 static uint64_t g_phys_dev_id      = 0;
 static uint64_t g_last_bound_virt_id = 0;
-static volatile int g_klog_client_fd = -1;
+#ifndef GHOSTPAD_KLOG_MAX_CLIENTS
+#define GHOSTPAD_KLOG_MAX_CLIENTS 4
+#endif
 
-static pthread_mutex_t g_klog_mbus_lock = PTHREAD_MUTEX_INITIALIZER;
-static uint64_t g_klog_pending_virtual_dev_id = 0;
+static pthread_mutex_t g_klog_clients_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_klog_clients[GHOSTPAD_KLOG_MAX_CLIENTS] = { -1, -1, -1, -1 };
+
+/* New TCP clients should not miss the boot/startup lines already consumed by
+ * the internal /dev/klog reader. Keep a payload-side replay ring and send it
+ * once to every ESP32/dashboard client before live streaming.
+ *
+ * This is bounded by the kernel klog ring: if the console has been on long
+ * enough for old lines to be overwritten before Ghostpad opens /dev/klog, no
+ * payload can recover those lines without a kernel msgbuf-specific dumper. */
+#ifndef GHOSTPAD_KLOG_BACKLOG_SIZE
+#define GHOSTPAD_KLOG_BACKLOG_SIZE (256 * 1024)
+#endif
+
+static pthread_mutex_t g_klog_backlog_lock = PTHREAD_MUTEX_INITIALIZER;
+static char   g_klog_backlog[GHOSTPAD_KLOG_BACKLOG_SIZE];
+static size_t g_klog_backlog_head = 0;
+static size_t g_klog_backlog_len = 0;
+static uint64_t g_klog_backlog_total = 0;
+
+static pthread_mutex_t g_klog_candidate_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_klog_candidate_vdev_id = 0;
+static uint64_t g_klog_candidate_seq = 0;
+static uint64_t g_klog_candidate_consumed_seq = 0;
+
+typedef int32_t (*GhostpadMbusBindDeviceWithUserIdFn)(uint64_t deviceId, int32_t userId);
+typedef int32_t (*GhostpadMbusDisconnectDeviceFn)(uint64_t deviceId);
+static GhostpadMbusBindDeviceWithUserIdFn g_mbus_bind_device_with_user_id = NULL;
+static GhostpadMbusDisconnectDeviceFn g_mbus_disconnect_device = NULL;
+
+static int klog_write_all(int fd, const char *buf, size_t len);
 
 
 
@@ -571,139 +602,445 @@ static uint64_t parse_klog_device_id(const char *line) {
     return 0;
 }
 
-static void klog_store_pending_virtual_device(uint64_t dev_id, const char *why) {
-    if (dev_id == 0 || dev_id == g_last_bound_virt_id) {
-        return;
+static int klog_write_all(int fd, const char *buf, size_t len) {
+    size_t written = 0;
+    while (written < len) {
+        ssize_t n = write(fd, buf + written, len - written);
+        if (n < 0) {
+            return -1;
+        }
+        written += (size_t)n;
     }
-
-    pthread_mutex_lock(&g_klog_mbus_lock);
-    if (g_klog_pending_virtual_dev_id != dev_id) {
-        g_klog_pending_virtual_dev_id = dev_id;
-        pthread_mutex_unlock(&g_klog_mbus_lock);
-        gp_log("[Ghostpad] klog observed VDA candidate deviceId=0x%llx (%s)\n",
-               (unsigned long long)dev_id, why ? why : "unknown");
-        return;
-    }
-    pthread_mutex_unlock(&g_klog_mbus_lock);
+    return 0;
 }
 
-static uint64_t klog_take_pending_virtual_device(void) {
-    uint64_t dev_id;
+static void klog_backlog_append(const char *buf, size_t len) {
+    if (!buf || len == 0) {
+        return;
+    }
 
-    pthread_mutex_lock(&g_klog_mbus_lock);
-    dev_id = g_klog_pending_virtual_dev_id;
-    g_klog_pending_virtual_dev_id = 0;
-    pthread_mutex_unlock(&g_klog_mbus_lock);
+    pthread_mutex_lock(&g_klog_backlog_lock);
 
-    return dev_id;
+    if (len >= sizeof(g_klog_backlog)) {
+        const char *tail = buf + (len - sizeof(g_klog_backlog));
+        memcpy(g_klog_backlog, tail, sizeof(g_klog_backlog));
+        g_klog_backlog_head = 0;
+        g_klog_backlog_len = sizeof(g_klog_backlog);
+        g_klog_backlog_total += len;
+        pthread_mutex_unlock(&g_klog_backlog_lock);
+        return;
+    }
+
+    size_t first = sizeof(g_klog_backlog) - g_klog_backlog_head;
+    if (first > len) {
+        first = len;
+    }
+    memcpy(g_klog_backlog + g_klog_backlog_head, buf, first);
+    if (len > first) {
+        memcpy(g_klog_backlog, buf + first, len - first);
+    }
+
+    g_klog_backlog_head = (g_klog_backlog_head + len) % sizeof(g_klog_backlog);
+    if (g_klog_backlog_len + len < g_klog_backlog_len ||
+        g_klog_backlog_len + len > sizeof(g_klog_backlog)) {
+        g_klog_backlog_len = sizeof(g_klog_backlog);
+    } else {
+        g_klog_backlog_len += len;
+    }
+    g_klog_backlog_total += len;
+
+    pthread_mutex_unlock(&g_klog_backlog_lock);
 }
 
-static void parse_klog_line(const char *line) {
-    uint64_t dev_id;
-    int is_add_event;
+static int klog_backlog_replay(int fd) {
+    char *snapshot = NULL;
+    size_t len = 0;
+    size_t start = 0;
+    uint64_t total = 0;
 
-    if (!line || !*line) {
+    pthread_mutex_lock(&g_klog_backlog_lock);
+    len = g_klog_backlog_len;
+    total = g_klog_backlog_total;
+    if (len > 0) {
+        snapshot = (char *)malloc(len);
+        if (snapshot) {
+            start = (g_klog_backlog_head + sizeof(g_klog_backlog) - len) % sizeof(g_klog_backlog);
+            size_t first = sizeof(g_klog_backlog) - start;
+            if (first > len) {
+                first = len;
+            }
+            memcpy(snapshot, g_klog_backlog + start, first);
+            if (len > first) {
+                memcpy(snapshot + first, g_klog_backlog, len - first);
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_klog_backlog_lock);
+
+    if (len == 0) {
+        return 0;
+    }
+    if (!snapshot) {
+        gp_log("[Ghostpad] klog bridge: backlog replay malloc failed len=%zu\n", len);
+        return -1;
+    }
+
+    gp_log("[Ghostpad] klog bridge: replaying backlog bytes=%zu captured_total=%llu\n",
+           len, (unsigned long long)total);
+    int ret = klog_write_all(fd, snapshot, len);
+    free(snapshot);
+    return ret;
+}
+
+static void klog_clients_add(int fd) {
+    if (klog_backlog_replay(fd) != 0) {
+        gp_log("[Ghostpad] klog bridge: backlog replay failed; closing client fd=%d\n", fd);
+        close(fd);
         return;
     }
 
-    is_add_event = (gp_strcasestr(line, "DEVICE_ADDED") != NULL) ||
-                   (gp_strcasestr(line, "DeviceAdded") != NULL) ||
-                   (gp_strcasestr(line, "eventId=1 ADD") != NULL);
-    if (!is_add_event) {
+    pthread_mutex_lock(&g_klog_clients_lock);
+    for (int i = 0; i < GHOSTPAD_KLOG_MAX_CLIENTS; i++) {
+        if (g_klog_clients[i] < 0) {
+            g_klog_clients[i] = fd;
+            pthread_mutex_unlock(&g_klog_clients_lock);
+            gp_log("[Ghostpad] klog bridge: client attached slot=%d port=%d\n", i, GHOSTPAD_KLOG_PORT);
+            return;
+        }
+    }
+    pthread_mutex_unlock(&g_klog_clients_lock);
+    gp_log("[Ghostpad] klog bridge: too many clients; rejecting fd=%d\n", fd);
+    close(fd);
+}
+
+static void klog_clients_broadcast(const char *buf, size_t len) {
+    if (!buf || len == 0) {
         return;
     }
 
-    dev_id = parse_klog_device_id(line);
+    pthread_mutex_lock(&g_klog_clients_lock);
+    for (int i = 0; i < GHOSTPAD_KLOG_MAX_CLIENTS; i++) {
+        int fd = g_klog_clients[i];
+        if (fd < 0) {
+            continue;
+        }
+        if (klog_write_all(fd, buf, len) != 0) {
+            close(fd);
+            g_klog_clients[i] = -1;
+            gp_log("[Ghostpad] klog bridge: client detached slot=%d\n", i);
+        }
+    }
+    pthread_mutex_unlock(&g_klog_clients_lock);
+}
+
+static void klog_note_vda_candidate(uint64_t dev_id, const char *reason) {
     if (dev_id == 0) {
         return;
     }
 
-    if (gp_strcasestr(line, "capabilityBattery:1")) {
+    pthread_mutex_lock(&g_klog_candidate_lock);
+    if (g_klog_candidate_vdev_id != dev_id) {
+        g_klog_candidate_vdev_id = dev_id;
+        g_klog_candidate_seq++;
+        gp_log("[Ghostpad] klog observed VDA candidate deviceId=0x%llx%s%s seq=%llu\n",
+               (unsigned long long)dev_id,
+               reason ? " " : "",
+               reason ? reason : "",
+               (unsigned long long)g_klog_candidate_seq);
+    }
+    pthread_mutex_unlock(&g_klog_candidate_lock);
+}
+
+static int klog_take_vda_candidate(uint64_t *dev_id_out) {
+    int found = 0;
+    if (dev_id_out) {
+        *dev_id_out = 0;
+    }
+
+    pthread_mutex_lock(&g_klog_candidate_lock);
+    if (g_klog_candidate_vdev_id != 0 &&
+        g_klog_candidate_seq != g_klog_candidate_consumed_seq) {
+        if (dev_id_out) {
+            *dev_id_out = g_klog_candidate_vdev_id;
+        }
+        g_klog_candidate_consumed_seq = g_klog_candidate_seq;
+        found = 1;
+    }
+    pthread_mutex_unlock(&g_klog_candidate_lock);
+    return found;
+}
+
+static const char *find_hex_value_after_any(const char *line, const char **keys, size_t key_count) {
+    if (!line || !keys) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < key_count; i++) {
+        const char *p = gp_strcasestr(line, keys[i]);
+        if (!p) {
+            continue;
+        }
+        p += strlen(keys[i]);
+        while (*p == ' ' || *p == '\t' || *p == '=' || *p == ':') {
+            p++;
+        }
+        if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+            return p + 2;
+        }
+    }
+
+    return NULL;
+}
+
+static uint64_t parse_hex_value_after_any(const char *line, const char **keys, size_t key_count, int *ok) {
+    const char *p = find_hex_value_after_any(line, keys, key_count);
+    if (ok) {
+        *ok = (p != NULL);
+    }
+    return p ? parse_hex(p) : 0;
+}
+
+static void parse_klog_line(const char *line) {
+    static const char *dev_id_keys[] = {
+        "DeviceId",
+        "DeviceID",
+        "deviceId",
+        "deviceID",
+        "device id",
+    };
+
+    const char *p = gp_strcasestr(line, "DEVICE_ADDED");
+    if (!p) {
+        p = gp_strcasestr(line, "DeviceAdded");
+    }
+    if (!p) {
+        p = gp_strcasestr(line, "GetUnassignedDeviceInfo");
+    }
+    if (!p) {
+        return;
+    }
+
+    int have_dev = 0;
+    uint64_t dev_id = parse_hex_value_after_any(line, dev_id_keys,
+        sizeof(dev_id_keys) / sizeof(dev_id_keys[0]), &have_dev);
+    if (!have_dev) {
+        return;
+    }
+
+    int is_phys = gp_strcasestr(line, "capabilityBattery:1") != NULL;
+    int is_unassigned =
+        gp_strcasestr(line, "capabilityBattery:0") != NULL ||
+        gp_strcasestr(line, "userId=0xffffffff") != NULL ||
+        gp_strcasestr(line, "UserId:0xffffffff") != NULL ||
+        gp_strcasestr(line, "UserId:0x000000ff") != NULL ||
+        gp_strcasestr(line, "UserId:0xff") != NULL;
+
+    /* PS4 VDA type=3 is reported by LoginMgr/ScePsP as RemotePlay-like
+     * MBus device events, e.g.
+     *   SCE_MBUS_EVENT_DEVICE_ADDED [DeviceId:0x90305][type:4][subType:2]
+     * There is no capabilityBattery field in that log format, so the previous
+     * parser missed exactly the deviceId we need.
+     */
+    int is_vda_remoteplay =
+        gp_strcasestr(line, "REMOTEPLAY") != NULL ||
+        ((gp_strcasestr(line, "type:4") != NULL || gp_strcasestr(line, "type=4") != NULL) &&
+         (gp_strcasestr(line, "subType:2") != NULL || gp_strcasestr(line, "subtype:2") != NULL ||
+          gp_strcasestr(line, "subType=2") != NULL || gp_strcasestr(line, "subtype=2") != NULL));
+
+    if (is_phys) {
         g_phys_dev_id = dev_id;
         gp_log("[Ghostpad] Auto-Klog: Detected Physical Controller: 0x%llx\n",
                (unsigned long long)g_phys_dev_id);
         return;
     }
 
-    if (gp_strcasestr(line, "capabilityBattery:0") ||
-        gp_strcasestr(line, "userId=0xffffffff") ||
-        gp_strcasestr(line, "type:4") ||
-        gp_strcasestr(line, "subType:2") ||
-        gp_strcasestr(line, "REMOTEPLAY")) {
+    if (is_vda_remoteplay || is_unassigned) {
+        gp_log("[Ghostpad] Auto-Klog: Detected candidate virtual/MBus device: 0x%llx%s%s\n",
+               (unsigned long long)dev_id,
+               is_vda_remoteplay ? " remoteplay" : "",
+               is_unassigned ? " unassigned" : "");
+        klog_note_vda_candidate(dev_id, is_vda_remoteplay ? "remoteplay" : "unassigned");
 #if GHOSTPAD_ENABLE_KLOG_AUTOBIND
         if (dev_id != g_last_bound_virt_id) {
-            gp_log("[Ghostpad] Auto-Klog: Detected Virtual Controller: 0x%llx\n",
-                   (unsigned long long)dev_id);
             trigger_auto_bind(dev_id, g_phys_dev_id);
         }
-#else
-        klog_store_pending_virtual_device(dev_id, "ADD/type4/RemotePlay");
 #endif
     }
 }
 
-static void *klog_listener_thread(void *arg) {
-    int listener_fd = (int)(intptr_t)arg;
-    while (1) {
-        int client = accept(listener_fd, NULL, NULL);
-        if (client >= 0) {
-            int old_client = g_klog_client_fd;
-            g_klog_client_fd = client;
-            if (old_client >= 0) {
-                close(old_client);
-            }
-        }
-    }
-    return NULL;
-}
-
-static void *klog_reader_thread(void *arg) {
+static void *klog_capture_thread(void *arg) {
     (void)arg;
+    char buf[512];
+    char line[1024];
+    size_t line_len = 0;
+
     int fd = open("/dev/klog", O_RDONLY);
     if (fd < 0) {
-        gp_log("[Ghostpad] Failed to open /dev/klog: %d\n", errno);
+        gp_log("[Ghostpad] klog capture: open(/dev/klog) failed errno=%d\n", errno);
         return NULL;
     }
-    
-    char chunk[256];
-    char line[1024];
-    int line_len = 0;
-    
+
+    gp_log("[Ghostpad] klog capture: opened /dev/klog for always-on capture; backlog=%u bytes\n",
+           (unsigned)sizeof(g_klog_backlog));
+
     while (1) {
-        ssize_t n = read(fd, chunk, sizeof(chunk));
-        if (n <= 0) {
-            if (n < 0 && errno == EINTR) continue;
+        ssize_t len = read(fd, buf, sizeof(buf));
+        if (len < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            gp_log("[Ghostpad] klog capture: read failed errno=%d\n", errno);
+            usleep(200000);
+            continue;
+        }
+        if (len == 0) {
             usleep(10000);
             continue;
         }
-        
-        int client = g_klog_client_fd;
-        if (client >= 0) {
-            ssize_t nw = write(client, chunk, n);
-            if (nw != n) {
-                close(client);
-                if (g_klog_client_fd == client) {
-                    g_klog_client_fd = -1;
-                }
-            }
-        }
-        
-        ssize_t i;
-        for (i = 0; i < n; i++) {
-            char c = chunk[i];
-            if (c == '\n' || line_len >= (int)sizeof(line) - 1) {
+
+        klog_backlog_append(buf, (size_t)len);
+        klog_clients_broadcast(buf, (size_t)len);
+
+        for (ssize_t i = 0; i < len; i++) {
+            char c = buf[i];
+            if (c == '\n' || line_len >= sizeof(line) - 1) {
                 line[line_len] = '\0';
-#if GHOSTPAD_ENABLE_KLOG_AUTOBIND
                 parse_klog_line(line);
-#endif
                 line_len = 0;
             } else if (c != '\r') {
                 line[line_len++] = c;
             }
         }
     }
+
     close(fd);
     return NULL;
+}
+
+static void *klog_bridge_thread(void *arg) {
+    (void)arg;
+    struct sockaddr_in sin;
+    int sockfd;
+    int opt;
+
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        gp_log("[Ghostpad] klog bridge: socket failed errno=%d\n", errno);
+        return NULL;
+    }
+
+    opt = 1;
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+
+    memset(&sin, 0, sizeof(sin));
+    sin.sin_family = AF_INET;
+    sin.sin_addr.s_addr = htonl(INADDR_ANY);
+    sin.sin_port = htons(GHOSTPAD_KLOG_PORT);
+
+    if (bind(sockfd, (struct sockaddr *)&sin, sizeof(sin)) < 0) {
+        gp_log("[Ghostpad] klog bridge: bind failed errno=%d\n", errno);
+        close(sockfd);
+        return NULL;
+    }
+
+    if (listen(sockfd, 5) < 0) {
+        gp_log("[Ghostpad] klog bridge: listen failed errno=%d\n", errno);
+        close(sockfd);
+        return NULL;
+    }
+
+    gp_log("[Ghostpad] klog bridge: listening on port %d\n", GHOSTPAD_KLOG_PORT);
+
+    while (1) {
+        fd_set set;
+        FD_ZERO(&set);
+        FD_SET(sockfd, &set);
+        struct timeval tv = { 1, 0 };
+
+        if (select(sockfd + 1, &set, NULL, NULL, &tv) <= 0) {
+            continue;
+        }
+
+        if (FD_ISSET(sockfd, &set)) {
+            int client_fd = accept(sockfd, NULL, NULL);
+            if (client_fd < 0) {
+                if (errno != EINTR) {
+                    gp_log("[Ghostpad] klog bridge: accept failed errno=%d\n", errno);
+                }
+                continue;
+            }
+#ifdef SO_NOSIGPIPE
+            int opt2 = 1;
+            setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &opt2, sizeof(opt2));
+#endif
+            klog_clients_add(client_fd);
+        }
+    }
+
+    close(sockfd);
+    return NULL;
+}
+
+
+static int ghostpad_try_klog_candidate_bind(int32_t default_user)
+{
+    uint64_t vDevId = 0;
+    if (!klog_take_vda_candidate(&vDevId) || vDevId == 0) {
+        return 0;
+    }
+
+    int32_t bindUid = (default_user != 0) ? default_user : injectUserId;
+    if (bindUid < 0) {
+        bindUid = userId;
+    }
+    if (bindUid < 0) {
+        bindUid = 0x10000000;
+    }
+
+    int32_t dev_h = (int32_t)(vDevId & 0xffffffffu);
+    gp_log("[Ghostpad] klog prebind candidate: virt=0x%llx user=0x%x handle=0x%x\n",
+           (unsigned long long)vDevId, (uint32_t)bindUid, (uint32_t)dev_h);
+
+    int br = -1;
+    if (g_mbus_bind_device_with_user_id) {
+        br = g_mbus_bind_device_with_user_id(vDevId, bindUid);
+        gp_log("[Ghostpad] klog prebind: direct sceMbusBindDeviceWithUserId ret=0x%x\n", (uint32_t)br);
+    } else {
+        br = shellui_pad_force_bind(vDevId, bindUid);
+        gp_log("[Ghostpad] klog prebind: shellui_pad_force_bind ret=0x%x\n", (uint32_t)br);
+    }
+
+    if (br != 0) {
+        return 0;
+    }
+
+    ScePadData probe;
+    memset(&probe, 0, sizeof(probe));
+    probe.connected = 1;
+    probe.quat.w = 1.0f;
+    probe.leftStick.x = 128;
+    probe.leftStick.y = 128;
+    probe.rightStick.x = 128;
+    probe.rightStick.y = 128;
+
+    int vr = scePadVirtualDeviceInsertData(dev_h, &probe);
+    gp_log("[Ghostpad] klog prebind: direct InsertData devId=0x%x ret=0x%x\n",
+           (uint32_t)dev_h, (uint32_t)vr);
+
+    if (vr == 0) {
+        padHandle = dev_h;
+        vdi_handle = dev_h;
+        device_vdi_ready = 1;
+        bound_virtual_device_id = vDevId;
+        g_last_bound_virt_id = vDevId;
+        gp_log("[Ghostpad] *** KLOG PREBIND DIRECT VDI ACTIVE: padHandle=0x%x ***\n",
+               (uint32_t)padHandle);
+        notify("Ghostpad: VDI active 0x%x", (uint32_t)padHandle);
+        return 1;
+    }
+
+    return 0;
 }
 
 static int ghostpad_ctrl_try_bind_once(int ctrlFd, int32_t default_user)
@@ -831,6 +1168,15 @@ int main(void) {
     /* Load libSceMbus to prevent PRX_NOT_RESOLVED_FUNCTION crash when calling libScePad functions */
     void *mbus_handle = dlopen("/system/common/lib/libSceMbus.sprx", RTLD_NOW | RTLD_GLOBAL);
     gp_log("[Ghostpad] dlopen(libSceMbus): %p\n", mbus_handle);
+    if (mbus_handle) {
+        g_mbus_bind_device_with_user_id =
+            (GhostpadMbusBindDeviceWithUserIdFn)dlsym(mbus_handle, "sceMbusBindDeviceWithUserId");
+        g_mbus_disconnect_device =
+            (GhostpadMbusDisconnectDeviceFn)dlsym(mbus_handle, "sceMbusDisconnectDevice");
+        gp_log("[Ghostpad] dlsym(libSceMbus): bind=%p disconnect=%p\n",
+               (void *)g_mbus_bind_device_with_user_id,
+               (void *)g_mbus_disconnect_device);
+    }
 #endif
 
     gp_log("[Ghostpad] ===== Ghostpad v1.0 Starting =====\n");
@@ -898,40 +1244,29 @@ int main(void) {
     ret = scePadSetProcessPrivilege(1);
     gp_log("[Ghostpad] scePadSetProcessPrivilege(1): 0x%08x\n", ret);
 
-    /* ---- Optional Background Klog Threads ----
-     * Disabled by default on Orbis bring-up: the TCP klog bridge and parser can
-     * race external klog tools and trigger bind/disconnect side effects while
-     * GPAD/CTRL sockets are still being initialized.
-     */
+    /* ---- Always-on /dev/klog capture and TCP bridge ----
+     * klog_capture_thread opens /dev/klog before the VDA call so we never
+     * miss early MBus DEVICE_ADDED events. klog_bridge_thread serves TCP
+     * clients on GHOSTPAD_KLOG_PORT by registering them with the capture
+     * thread's broadcast pool. */
 #if GHOSTPAD_ENABLE_INTERNAL_KLOG
-    int klog_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (klog_listen_fd >= 0) {
-        int opt = 1;
-        setsockopt(klog_listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-        setsockopt(klog_listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
-        
-        struct sockaddr_in klog_sin;
-        memset(&klog_sin, 0, sizeof(klog_sin));
-        klog_sin.sin_family = AF_INET;
-        klog_sin.sin_addr.s_addr = htonl(INADDR_ANY);
-        klog_sin.sin_port = htons(GHOSTPAD_KLOG_PORT);
-
-        if (bind(klog_listen_fd, (struct sockaddr *)&klog_sin, sizeof(klog_sin)) == 0 &&
-            listen(klog_listen_fd, 5) == 0) {
-            gp_log("[Ghostpad] Klog listener started on port %d\n", GHOSTPAD_KLOG_PORT);
-
-            pthread_t listen_tid;
-            pthread_create(&listen_tid, NULL, klog_listener_thread, (void *)(intptr_t)klog_listen_fd);
-            pthread_detach(listen_tid);
-        } else {
-            gp_log("[Ghostpad] Failed to bind klog listener to port %d: %d\n", GHOSTPAD_KLOG_PORT, errno);
-            close(klog_listen_fd);
-        }
+    pthread_t klog_capture_tid;
+    ret = pthread_create(&klog_capture_tid, NULL, klog_capture_thread, NULL);
+    if (ret == 0) {
+        pthread_detach(klog_capture_tid);
+        gp_log("[Ghostpad] Klog capture thread started for %s\n", "/dev/klog");
+    } else {
+        gp_log("[Ghostpad] klog capture pthread_create failed ret=%d errno=%d\n", ret, errno);
     }
 
-    pthread_t reader_tid;
-    pthread_create(&reader_tid, NULL, klog_reader_thread, NULL);
-    pthread_detach(reader_tid);
+    pthread_t klog_tid;
+    ret = pthread_create(&klog_tid, NULL, klog_bridge_thread, NULL);
+    if (ret == 0) {
+        pthread_detach(klog_tid);
+        gp_log("[Ghostpad] Klog bridge thread started on port %d\n", GHOSTPAD_KLOG_PORT);
+    } else {
+        gp_log("[Ghostpad] klog bridge pthread_create failed ret=%d errno=%d\n", ret, errno);
+    }
 #else
     gp_log("[Ghostpad] internal klog TCP bridge disabled (safe baseline)\n");
 #endif
@@ -1235,16 +1570,8 @@ int main(void) {
     if (padHandle < 0 && shellui_args == 0 && vda_pending_mbus_bind) {
         gp_log("[Ghostpad] VDA device pending MBus bind; waiting for GBND on port %d before injection fallback\n", GP_CTRL_PORT);
         for (int bw = 0; bw < 300 && padHandle < 0; bw++) { /* 60s */
-            uint64_t klog_dev = klog_take_pending_virtual_device();
-            if (klog_dev != 0) {
-                gp_log("[Ghostpad] klog prebind candidate: virt=0x%llx phys=0x%llx user=0x%x\n",
-                       (unsigned long long)klog_dev,
-                       (unsigned long long)g_phys_dev_id,
-                       (uint32_t)injectUserId);
-                trigger_auto_bind(klog_dev, g_phys_dev_id);
-                if (padHandle >= 0) {
-                    break;
-                }
+            if (ghostpad_try_klog_candidate_bind(injectUserId) > 0) {
+                break;
             }
 
             if (ghostpad_ctrl_try_bind_once(ctrlFd, injectUserId) > 0) {
