@@ -54,7 +54,7 @@ static const char *TAG = "ble_hid";
 #define BLE_UUID_CCCD               0x2902
 
 #define MAX_SCAN_RESULTS            16
-#define SCAN_DURATION_MS            6000   /* 6 s active window */
+#define SCAN_DURATION_MS            10000  /* 10 s active window for pairing controllers */
 
 /*
  * =====================================================================================
@@ -66,6 +66,11 @@ typedef struct {
     ble_addr_t  addr;
     char        name[64];
     int8_t      rssi;
+    uint16_t    appearance;
+    bool        appearance_present;
+    bool        hid_service;
+    bool        sony_name;
+    bool        candidate;
     bool        valid;
 } scan_result_t;
 
@@ -92,6 +97,10 @@ static bool s_discovering = false;
 
 /* True once NimBLE host is synced with the controller */
 static bool s_synced = false;
+static bool s_scanning = false;
+static int  s_last_scan_rc = 0;
+static int  s_last_gap_event = 0;
+static int  s_last_disc_count = 0;
 
 /*
  * =====================================================================================
@@ -321,6 +330,16 @@ static void addr_to_str(const ble_addr_t *addr, char *buf, size_t len) {
              addr->val[2], addr->val[1], addr->val[0]);
 }
 
+static const char *addr_type_name(uint8_t type) {
+    switch (type) {
+    case 0: return "public";
+    case 1: return "random";
+    case 2: return "public_id";
+    case 3: return "random_id";
+    default: return "unknown";
+    }
+}
+
 static int gap_event_cb(struct ble_gap_event *event, void *arg) {
     switch (event->type) {
 
@@ -329,10 +348,12 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
         struct ble_hs_adv_fields fields;
         int rc = ble_hs_adv_parse_fields(&fields, event->disc.data,
                                          event->disc.length_data);
-        if (rc != 0) break;
+        if (rc != 0) {
+            ESP_LOGW(TAG, "adv parse failed rc=%d len=%d rssi=%d",
+                     rc, event->disc.length_data, event->disc.rssi);
+            break;
+        }
 
-        /* Accept only devices that advertise the HID service (0x1812)
-         * or the HID gamepad appearance (0x03C4), or the Sony name prefix */
         bool is_hid     = false;
         bool is_gamepad = false;
 
@@ -348,25 +369,39 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
             }
         }
 
-        /* Also match known Sony name prefixes */
+        /* Sony controllers in pairing mode may be sparse in ADV and only expose
+         * a usable name/appearance in scan response. Do not filter them out at
+         * discovery time; store all devices with classification metadata so the
+         * dashboard can show diagnostics and we can still connect manually. */
         bool is_sony = false;
         if (fields.name && fields.name_len > 0) {
             if (strncmp((char *)fields.name, "DualSense", 9) == 0 ||
-                strncmp((char *)fields.name, "Wireless Controller", 19) == 0) {
+                strncmp((char *)fields.name, "Wireless Controller", 19) == 0 ||
+                strncmp((char *)fields.name, "DUALSHOCK", 9) == 0) {
                 is_sony = true;
             }
         }
 
-        if (!is_hid && !is_gamepad && !is_sony) break;
+        bool candidate = is_hid || is_gamepad || is_sony;
 
         xSemaphoreTake(s_results_mutex, portMAX_DELAY);
-        /* Deduplicate by address */
         bool found = false;
         for (int i = 0; i < s_result_count; i++) {
-            if (memcmp(s_results[i].addr.val, event->disc.addr.val, 6) == 0) {
+            if (memcmp(s_results[i].addr.val, event->disc.addr.val, 6) == 0 &&
+                s_results[i].addr.type == event->disc.addr.type) {
                 found = true;
-                /* Update RSSI */
                 s_results[i].rssi = event->disc.rssi;
+                s_results[i].appearance_present |= fields.appearance_is_present;
+                if (fields.appearance_is_present) s_results[i].appearance = fields.appearance;
+                s_results[i].hid_service |= is_hid;
+                s_results[i].sony_name |= is_sony;
+                s_results[i].candidate |= candidate;
+                if (fields.name && fields.name_len > 0) {
+                    size_t n = fields.name_len < (sizeof(s_results[i].name) - 1)
+                               ? fields.name_len : (sizeof(s_results[i].name) - 1);
+                    memcpy(s_results[i].name, fields.name, n);
+                    s_results[i].name[n] = '\0';
+                }
                 break;
             }
         }
@@ -375,25 +410,36 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
             r->addr  = event->disc.addr;
             r->rssi  = event->disc.rssi;
             r->valid = true;
+            r->appearance_present = fields.appearance_is_present;
+            r->appearance = fields.appearance_is_present ? fields.appearance : 0;
+            r->hid_service = is_hid;
+            r->sony_name = is_sony;
+            r->candidate = candidate;
             if (fields.name && fields.name_len > 0) {
                 size_t n = fields.name_len < (sizeof(r->name) - 1)
                            ? fields.name_len : (sizeof(r->name) - 1);
                 memcpy(r->name, fields.name, n);
                 r->name[n] = '\0';
             } else {
-                strlcpy(r->name, "HID Device", sizeof(r->name));
+                strlcpy(r->name, candidate ? "HID/Sony candidate" : "BLE Device", sizeof(r->name));
             }
             char addr_str[18];
             addr_to_str(&r->addr, addr_str, sizeof(addr_str));
-            ESP_LOGI(TAG, "Discovered: %s  \"%s\"  RSSI=%d",
-                     addr_str, r->name, r->rssi);
+            ESP_LOGI(TAG, "Discovered%s: %s (%s) \"%s\" RSSI=%d app=%s0x%04x hid=%d sony=%d",
+                     candidate ? " candidate" : "",
+                     addr_str, addr_type_name(r->addr.type), r->name, r->rssi,
+                     r->appearance_present ? "" : "none/",
+                     r->appearance, r->hid_service, r->sony_name);
         }
+        s_last_disc_count = s_result_count;
         xSemaphoreGive(s_results_mutex);
         break;
     }
 
     /* ---- Scan complete ---- */
     case BLE_GAP_EVENT_DISC_COMPLETE:
+        s_scanning = false;
+        s_last_gap_event = event->type;
         ESP_LOGI(TAG, "BLE scan complete (%d devices found)", s_result_count);
         break;
 
@@ -456,8 +502,11 @@ static void on_ble_sync(void) {
     ESP_LOGI(TAG, "NimBLE host synced with controller");
     s_synced = true;
 
-    /* Ensure we have an address to use as scanner */
+    /* Ensure we have an address to use as scanner. */
     ble_hs_util_ensure_addr(0);
+    uint8_t own_addr_type = 0;
+    int rc = ble_hs_id_infer_auto(0, &own_addr_type);
+    ESP_LOGI(TAG, "BLE own address type: %s rc=%d", addr_type_name(own_addr_type), rc);
 }
 
 static void on_ble_reset(int reason) {
@@ -514,7 +563,6 @@ esp_err_t ble_hid_host_start_scan(void) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* Cancel any running scan first */
     ble_gap_disc_cancel();
 
     xSemaphoreTake(s_results_mutex, portMAX_DELAY);
@@ -522,27 +570,40 @@ esp_err_t ble_hid_host_start_scan(void) {
     s_result_count = 0;
     xSemaphoreGive(s_results_mutex);
 
+    uint8_t own_addr_type = 0;
+    int rc = ble_hs_id_infer_auto(0, &own_addr_type);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_hs_id_infer_auto failed: %d", rc);
+        s_last_scan_rc = rc;
+        return ESP_FAIL;
+    }
+
     struct ble_gap_disc_params params = {
-        .itvl             = 0,        /* use defaults */
-        .window           = 0,
+        .itvl             = 0x0010,   /* 10 ms */
+        .window           = 0x0010,   /* continuous active scan */
         .filter_policy    = BLE_HCI_SCAN_FILT_NO_WL,
         .limited          = 0,
-        .passive          = 0,        /* active scan to get full name */
+        .passive          = 0,        /* active scan to request scan-response name */
         .filter_duplicates = 0,
     };
 
-    int rc = ble_gap_disc(BLE_OWN_ADDR_PUBLIC, SCAN_DURATION_MS, &params,
-                          gap_event_cb, NULL);
+    rc = ble_gap_disc(own_addr_type, SCAN_DURATION_MS, &params,
+                      gap_event_cb, NULL);
+    s_last_scan_rc = rc;
     if (rc != 0 && rc != BLE_HS_EALREADY) {
-        ESP_LOGE(TAG, "ble_gap_disc failed: %d", rc);
+        ESP_LOGE(TAG, "ble_gap_disc failed: %d own_addr_type=%s",
+                 rc, addr_type_name(own_addr_type));
         return ESP_FAIL;
     }
-    ESP_LOGI(TAG, "BLE scan started (%d ms)", SCAN_DURATION_MS);
+    s_scanning = true;
+    ESP_LOGI(TAG, "BLE scan started (%d ms), own_addr_type=%s",
+             SCAN_DURATION_MS, addr_type_name(own_addr_type));
     return ESP_OK;
 }
 
 void ble_hid_host_stop_scan(void) {
     ble_gap_disc_cancel();
+    s_scanning = false;
 }
 
 void ble_hid_host_clear_results(void) {
@@ -550,6 +611,23 @@ void ble_hid_host_clear_results(void) {
     memset(s_results, 0, sizeof(s_results));
     s_result_count = 0;
     xSemaphoreGive(s_results_mutex);
+}
+
+
+char *ble_hid_host_get_debug_json(void) {
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return NULL;
+    cJSON_AddBoolToObject(root, "synced", s_synced);
+    cJSON_AddBoolToObject(root, "scanning", s_scanning);
+    cJSON_AddBoolToObject(root, "connected", s_connected);
+    cJSON_AddNumberToObject(root, "last_scan_rc", s_last_scan_rc);
+    cJSON_AddNumberToObject(root, "last_gap_event", s_last_gap_event);
+    cJSON_AddNumberToObject(root, "result_count", s_last_disc_count);
+    cJSON_AddStringToObject(root, "device_name", s_device_name);
+    cJSON_AddStringToObject(root, "device_addr", s_device_addr);
+    char *json = cJSON_Print(root);
+    cJSON_Delete(root);
+    return json;
 }
 
 char *ble_hid_host_get_scan_results_json(void) {
@@ -562,8 +640,14 @@ char *ble_hid_host_get_scan_results_json(void) {
         char addr_str[18];
         addr_to_str(&s_results[i].addr, addr_str, sizeof(addr_str));
         cJSON_AddStringToObject(obj, "addr", addr_str);
+        cJSON_AddStringToObject(obj, "addr_type", addr_type_name(s_results[i].addr.type));
         cJSON_AddStringToObject(obj, "name", s_results[i].name);
         cJSON_AddNumberToObject(obj, "rssi", s_results[i].rssi);
+        cJSON_AddBoolToObject(obj, "candidate", s_results[i].candidate);
+        cJSON_AddBoolToObject(obj, "hid_service", s_results[i].hid_service);
+        cJSON_AddBoolToObject(obj, "sony_name", s_results[i].sony_name);
+        cJSON_AddBoolToObject(obj, "appearance_present", s_results[i].appearance_present);
+        cJSON_AddNumberToObject(obj, "appearance", s_results[i].appearance);
         cJSON_AddItemToArray(arr, obj);
     }
 
@@ -609,8 +693,13 @@ esp_err_t ble_hid_host_connect(const char *addr_str) {
 
     strlcpy(s_device_addr, addr_str, sizeof(s_device_addr));
 
-    uint8_t own_addr_type = BLE_OWN_ADDR_RANDOM;
+    uint8_t own_addr_type = 0;
     ble_hs_util_ensure_addr(0);
+    int own_rc = ble_hs_id_infer_auto(0, &own_addr_type);
+    if (own_rc != 0) {
+        ESP_LOGE(TAG, "ble_hs_id_infer_auto failed before connect: %d", own_rc);
+        return ESP_FAIL;
+    }
 
     struct ble_gap_conn_params cp = {
         .itvl_min            = 8,    /* 10 ms */
@@ -628,7 +717,8 @@ esp_err_t ble_hid_host_connect(const char *addr_str) {
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Connecting to %s...", addr_str);
+    ESP_LOGI(TAG, "Connecting to %s (%s) using own_addr_type=%s...",
+             addr_str, addr_type_name(addr.type), addr_type_name(own_addr_type));
     return ESP_OK;
 }
 

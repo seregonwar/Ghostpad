@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "esp_hosted.h"
 #include "nvs_flash.h"
+#include <string.h>
 
 static const char *TAG = "ghostpad_main";
 
@@ -28,8 +29,17 @@ void app_main(void) {
     ESP_ERROR_CHECK(hid_gamepad_init());
     ESP_ERROR_CHECK(ble_hid_host_init());
 
+    char ip[16] = "";
+    if (ghostpad_wifi_get_primary_ip(ip, sizeof(ip)) != ESP_OK) {
+        strlcpy(ip, "unknown", sizeof(ip));
+    }
+
     ESP_LOGI(TAG, "Ghostpad Bridge ready");
-    ESP_LOGI(TAG, "WiFi AP: %s / %s", WIFI_AP_SSID, WIFI_AP_PASS);
-    ESP_LOGI(TAG, "Web GUI: http://192.168.4.1");
+    ESP_LOGI(TAG, "WiFi mode: %s", ghostpad_wifi_mode_name());
+    ESP_LOGI(TAG, "WiFi SSID: %s", ghostpad_wifi_active_ssid());
+    ESP_LOGI(TAG, "Web GUI: http://%s", ip);
+#if CONFIG_GHOSTPAD_ENABLE_MDNS
+    ESP_LOGI(TAG, "Web GUI mDNS: http://%s.local/", CONFIG_GHOSTPAD_WIFI_HOSTNAME);
+#endif
 }
 

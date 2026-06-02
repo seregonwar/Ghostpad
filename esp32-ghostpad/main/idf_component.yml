@@ -7,3 +7,4 @@ dependencies:
     rules:
       - if: "target in [esp32p4]"
   espressif/esp_tinyusb: "*"
+  espressif/mdns: "*"

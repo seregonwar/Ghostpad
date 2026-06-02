@@ -1,0 +1,55 @@
+menu "Ghostpad Bridge Configuration"
+
+    config GHOSTPAD_WIFI_HOSTNAME
+        string "mDNS/WiFi hostname"
+        default "ghostpad"
+
+    config GHOSTPAD_STA_SSID
+        string "WiFi STA SSID (LAN client mode)"
+        default ""
+
+    config GHOSTPAD_STA_PASSWORD
+        string "WiFi STA Password"
+        default ""
+
+    config GHOSTPAD_STA_MAX_RETRY
+        int "STA max reconnection retries"
+        default 5
+        range 0 100
+
+    config GHOSTPAD_STA_CONNECT_TIMEOUT_SEC
+        int "STA connection timeout (seconds)"
+        default 15
+        range 1 120
+
+    config GHOSTPAD_AP_SSID
+        string "SoftAP SSID (fallback)"
+        default "Ghostpad-ESP32"
+
+    config GHOSTPAD_AP_PASSWORD
+        string "SoftAP password"
+        default "ghostpad123"
+
+    config GHOSTPAD_AP_MAX_CONN
+        int "SoftAP max connections"
+        default 4
+        range 1 10
+
+    config GHOSTPAD_AP_CHANNEL
+        int "SoftAP channel"
+        default 1
+        range 1 13
+
+    config GHOSTPAD_WIFI_MODE_AP_ONLY
+        bool "AP-only mode (no STA)"
+        default n
+
+    config GHOSTPAD_WIFI_MODE_STA_ONLY
+        bool "STA-only mode (no AP fallback)"
+        default n
+
+    config GHOSTPAD_ENABLE_MDNS
+        bool "Enable mDNS responder"
+        default n
+
+endmenu

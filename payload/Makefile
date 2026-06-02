@@ -11,6 +11,7 @@
 PS4_HOST    ?= ps4
 PS5_HOST    ?= ps5
 PORT        ?= 9021
+EXTRA_CFLAGS ?=
 
 # ── TARGET CONFIGURATION ──────────────────────────────────────────────────
 
@@ -32,7 +33,7 @@ endif
 
 # ── COMPILATION FLAGS ─────────────────────────────────────────────────────
 
-CFLAGS  += -Wall -Wextra -g -O2 -fPIC -fno-stack-protector
+CFLAGS  += -Wall -Wextra -g -O2 -fPIC -fno-stack-protector $(EXTRA_CFLAGS)
 LDFLAGS += -lScePad -lSceUserService -lpthread -ldl
 
 SRC     := main.c shellui_pad.c

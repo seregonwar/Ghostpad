@@ -50,6 +50,11 @@
 
 #include "shellui_pad.h"
 
+/* Route shellui_pad diagnostics through the persistent status logger as well
+ * as klog. main.c owns ghostpad_status_log(), which keeps klog_printf behavior
+ * and appends the same line to /data/ghostpad/ghostpad_status.log. */
+#define klog_printf ghostpad_status_log
+
 #ifdef __ORBIS__
 extern int kernel_set_vmem_protection(pid_t pid, intptr_t addr, size_t size, int prot);
 #endif
@@ -57,6 +62,50 @@ extern int kernel_set_vmem_protection(pid_t pid, intptr_t addr, size_t size, int
 #define GHOSTPAD_ASSIGNMENT_SCREEN_RET ((int32_t)0x803B0006u)
 #define GHOSTPAD_AUTO_DISMISS_ACTIVE   ((int32_t)0x44534D31u) /* "DSM1" */
 #define GHOSTPAD_AUTO_DISMISS_DONE     ((int32_t)0x44534D32u) /* "DSM2" */
+
+#ifndef GHOSTPAD_ALLOW_UNSAFE_VDA_PATCH
+#define GHOSTPAD_ALLOW_UNSAFE_VDA_PATCH 0
+#endif
+
+#ifndef GHOSTPAD_ALLOW_UNSAFE_SETPRIV_HOOK
+#define GHOSTPAD_ALLOW_UNSAFE_SETPRIV_HOOK 0
+#endif
+
+#ifndef GHOSTPAD_ENABLE_KNOWN_VDA_PATCH
+#define GHOSTPAD_ENABLE_KNOWN_VDA_PATCH 1
+#endif
+
+#define GHOSTPAD_VDA_PS4_LIBSCEPAD_VDA_OFF     0x5b40u
+#define GHOSTPAD_VDA_PS4_HASH256               0xbb22d8acd843d81eull
+#define GHOSTPAD_VDA_PS4_HASH4K                0x346f2b8071895f89ull
+#define GHOSTPAD_VDA_PS4_CALL_OFF              0x0c0u
+#define GHOSTPAD_VDA_PS4_AFTER_CALL_OFF        0x0c5u
+#define GHOSTPAD_VDA_PS4_BRANCH_OFF            0x0cdu
+#define GHOSTPAD_VDA_PS4_CAVE_OFF              0x0dd2u
+#define GHOSTPAD_VDA_PS4_CAVE_LEN              14u
+
+static uint64_t
+ghostpad_fnv1a64(const uint8_t *buf, size_t len)
+{
+    uint64_t h = 1469598103934665603ull;
+    if (!buf) return 0;
+    for (size_t i = 0; i < len; i++) {
+        h ^= (uint64_t)buf[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+static int
+ghostpad_all_byte(const uint8_t *buf, size_t len, uint8_t value)
+{
+    if (!buf || len == 0) return 0;
+    for (size_t i = 0; i < len; i++) {
+        if (buf[i] != value) return 0;
+    }
+    return 1;
+}
+
 /* PT_IO fallback for shellui_pad_update — always enabled */
 
 /* sys_ptrace — elevate credentials for ptrace, then restore */
@@ -2585,261 +2634,349 @@ shellcore_pad_test_vdi_neutral(int32_t pad_handle)
 }
 
 /* shellui_pad_probe_legacy_disabled — legacy probe, disabled; returns -1 immediately */
-/* ============================================================
- * shellui_pad_patch_vda — disassemble + patch scePadVirtualDeviceAddDevice
- * in SceShellCore's libScePad to bypass the 0x803b0006 assignment-screen
- * return.  Strategy: scan the function bytes for `B8 06 00 3B 80`
- * (mov eax, 0x803b0006) and overwrite with `B8 00 00 00 00` (mov eax, 0)
- * so VDA falls into the success path or returns 0 instead of the assignment
- * sentinel.  Reads dump_only bytes when dump_only=1 (no write).
- *
- * Returns: number of patches applied (0 if none found, -1 on error).
- * ============================================================ */
 /*
  * =====================================================================================
- *            DISASSEMBLE AND PATCH scePadVirtualDeviceAddDevice IN SceShellCore
+ *     MANIFEST-VERIFIED PS4 VDA PATCH FOR scePadVirtualDeviceAddDevice
  * =====================================================================================
+ *
+ * This patcher intentionally does not scan live code for generic patterns.
+ * It applies only to the exact PS4 libScePad fingerprint reported by
+ * vda_probe_report.txt:
+ *
+ *   scePadVirtualDeviceAddDevice rel  +0x5b40
+ *   hash256                          0xbb22d8acd843d81e
+ *   hash4k                           0x346f2b8071895f89
+ *   patch call                       +0x0c0
+ *   code cave                        +0x0dd2, 14-byte NOP run
+ *
+ * Patch shape:
+ *   original call @ +0xc0 -> verified cave @ +0xdd2
+ *   cave: call original dispatcher; xor eax,eax; ret
+ *
+ * Returning with RET uses the original call-site return address and resumes at
+ * +0xc5, so the original canary check and epilogue remain intact.  Early
+ * validation returns are left untouched.
  */
+
+static int
+shellui_pad_patch_vda_target(pid_t target, const char *target_name, int dump_only)
+{
+#if !GHOSTPAD_ENABLE_KNOWN_VDA_PATCH
+    (void)dump_only;
+    (void)target;
+    (void)target_name;
+    klog_printf("[Ghostpad] patch_vda: known VDA patcher disabled; compile with -DGHOSTPAD_ENABLE_KNOWN_VDA_PATCH=1\n");
+    return 0;
+#elif !defined(__ORBIS__)
+    (void)dump_only;
+    (void)target;
+    (void)target_name;
+    klog_printf("[Ghostpad] patch_vda: no verified manifest for this platform yet\n");
+    return 0;
+#else
+    static const uint8_t expected_prologue32[32] = {
+        0x55,0x48,0x89,0xe5,0x53,0x48,0x83,0xe4,
+        0xe0,0x48,0x81,0xec,0x80,0x00,0x00,0x00,
+        0x48,0x8b,0x1d,0xd1,0x64,0x00,0x00,0x48,
+        0x8b,0x03,0x48,0x89,0x44,0x24,0x60,0xb8
+    };
+    static const uint8_t expected_call[5] = {
+        0xe8,0x33,0xa5,0xff,0xff
+    };
+    static const uint8_t expected_after_call[17] = {
+        0x48,0x8b,0x0b,0x48,0x3b,0x4c,0x24,0x60,
+        0x75,0x07,0x48,0x8d,0x65,0xf8,0x5b,0x5d,0xc3
+    };
+
+    pid_t mypid = getpid();
+    uint8_t privcaps[16] = {
+        0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+        0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff
+    };
+    uint8_t saved_caps[16];
+    uint64_t saved_authid = kernel_get_ucred_authid(mypid);
+    int have_saved_caps = 0;
+
+    if (saved_authid && kernel_get_ucred_caps(mypid, saved_caps) == 0) {
+        have_saved_caps = 1;
+        kernel_set_ucred_authid(mypid, 0x4800000000010003l);
+        kernel_set_ucred_caps(mypid, privcaps);
+    }
+
+    if (!target_name) target_name = "target";
+    klog_printf("[Ghostpad] patch_vda: %s pid=%d dump_only=%d manifest=PS4-libScePad-vda-0xbb22d8acd843d81e\n", target_name,
+                target, dump_only);
+
+    uint32_t libpad_h = 0;
+    if (get_lib(target, "libScePad", &libpad_h)) {
+        klog_printf("[Ghostpad] patch_vda: libScePad not found\n");
+        if (have_saved_caps) {
+            kernel_set_ucred_authid(mypid, saved_authid);
+            kernel_set_ucred_caps(mypid, saved_caps);
+        }
+        return -1;
+    }
+
+    intptr_t libpad_init = kernel_dynlib_init_addr(target, libpad_h);
+    intptr_t fn_vda = resolve_sym(target, libpad_h, "scePadVirtualDeviceAddDevice");
+    if (!fn_vda) {
+        klog_printf("[Ghostpad] patch_vda: scePadVirtualDeviceAddDevice not found\n");
+        if (have_saved_caps) {
+            kernel_set_ucred_authid(mypid, saved_authid);
+            kernel_set_ucred_caps(mypid, saved_caps);
+        }
+        return -1;
+    }
+
+    klog_printf("[Ghostpad] patch_vda: libScePad init=0x%lx fn_vda=0x%lx rel=0x%lx\n",
+                (unsigned long)libpad_init,
+                (unsigned long)fn_vda,
+                libpad_init ? (unsigned long)(fn_vda - libpad_init) : 0ul);
+
+    if (libpad_init && (uint32_t)(fn_vda - libpad_init) != GHOSTPAD_VDA_PS4_LIBSCEPAD_VDA_OFF) {
+        klog_printf("[Ghostpad] patch_vda: manifest reject: VDA offset 0x%lx != 0x%x\n",
+                    (unsigned long)(fn_vda - libpad_init),
+                    (unsigned)GHOSTPAD_VDA_PS4_LIBSCEPAD_VDA_OFF);
+        if (have_saved_caps) {
+            kernel_set_ucred_authid(mypid, saved_authid);
+            kernel_set_ucred_caps(mypid, saved_caps);
+        }
+        return 0;
+    }
+
+    static uint8_t buf[4096];
+    memset(buf, 0, sizeof(buf));
+    if (mdbg_copyout(target, fn_vda, buf, sizeof(buf)) != 0) {
+        klog_printf("[Ghostpad] patch_vda: mdbg_copyout failed len=%zu errno=%d\n", sizeof(buf), errno);
+        if (have_saved_caps) {
+            kernel_set_ucred_authid(mypid, saved_authid);
+            kernel_set_ucred_caps(mypid, saved_caps);
+        }
+        return -1;
+    }
+
+    uint64_t hash256 = ghostpad_fnv1a64(buf, 256);
+    uint64_t hash4k  = ghostpad_fnv1a64(buf, sizeof(buf));
+
+    int already_patched = 0;
+    int32_t patched_call_rel = (int32_t)((intptr_t)GHOSTPAD_VDA_PS4_CAVE_OFF -
+                                         (intptr_t)GHOSTPAD_VDA_PS4_AFTER_CALL_OFF);
+    if (buf[GHOSTPAD_VDA_PS4_CALL_OFF] == 0xe8) {
+        int32_t cur_rel = (int32_t)((uint32_t)buf[GHOSTPAD_VDA_PS4_CALL_OFF + 1] |
+                                    ((uint32_t)buf[GHOSTPAD_VDA_PS4_CALL_OFF + 2] << 8) |
+                                    ((uint32_t)buf[GHOSTPAD_VDA_PS4_CALL_OFF + 3] << 16) |
+                                    ((uint32_t)buf[GHOSTPAD_VDA_PS4_CALL_OFF + 4] << 24));
+        already_patched = (cur_rel == patched_call_rel &&
+                           buf[GHOSTPAD_VDA_PS4_CAVE_OFF + 0] == 0xe8 &&
+                           buf[GHOSTPAD_VDA_PS4_CAVE_OFF + 5] == 0x31 &&
+                           buf[GHOSTPAD_VDA_PS4_CAVE_OFF + 6] == 0xc0 &&
+                           buf[GHOSTPAD_VDA_PS4_CAVE_OFF + 7] == 0xc3);
+    }
+
+    if (!already_patched) {
+        if (memcmp(buf, expected_prologue32, sizeof(expected_prologue32)) != 0) {
+            klog_printf("[Ghostpad] patch_vda: manifest reject: prologue32 mismatch\n");
+            if (have_saved_caps) {
+                kernel_set_ucred_authid(mypid, saved_authid);
+                kernel_set_ucred_caps(mypid, saved_caps);
+            }
+            return 0;
+        }
+        if (hash256 != GHOSTPAD_VDA_PS4_HASH256 || hash4k != GHOSTPAD_VDA_PS4_HASH4K) {
+            klog_printf("[Ghostpad] patch_vda: manifest reject: hash256=0x%016llx hash4k=0x%016llx\n",
+                        (unsigned long long)hash256,
+                        (unsigned long long)hash4k);
+            if (have_saved_caps) {
+                kernel_set_ucred_authid(mypid, saved_authid);
+                kernel_set_ucred_caps(mypid, saved_caps);
+            }
+            return 0;
+        }
+
+        if (memcmp(buf + GHOSTPAD_VDA_PS4_CALL_OFF, expected_call, sizeof(expected_call)) != 0 ||
+            memcmp(buf + GHOSTPAD_VDA_PS4_AFTER_CALL_OFF, expected_after_call, sizeof(expected_after_call)) != 0 ||
+            buf[GHOSTPAD_VDA_PS4_BRANCH_OFF] != 0x75) {
+            klog_printf("[Ghostpad] patch_vda: manifest reject: call/canary bytes mismatch\n");
+            if (have_saved_caps) {
+                kernel_set_ucred_authid(mypid, saved_authid);
+                kernel_set_ucred_caps(mypid, saved_caps);
+            }
+            return 0;
+        }
+
+        if (!ghostpad_all_byte(buf + GHOSTPAD_VDA_PS4_CAVE_OFF,
+                               GHOSTPAD_VDA_PS4_CAVE_LEN, 0x90)) {
+            klog_printf("[Ghostpad] patch_vda: manifest reject: cave +0x%x is not the expected NOP run\n",
+                        (unsigned)GHOSTPAD_VDA_PS4_CAVE_OFF);
+            if (have_saved_caps) {
+                kernel_set_ucred_authid(mypid, saved_authid);
+                kernel_set_ucred_caps(mypid, saved_caps);
+            }
+            return 0;
+        }
+    }
+
+    klog_printf("[Ghostpad] patch_vda: manifest match: hash256=0x%016llx hash4k=0x%016llx call=+0x%x cave=+0x%x%s\n",
+                (unsigned long long)hash256,
+                (unsigned long long)hash4k,
+                (unsigned)GHOSTPAD_VDA_PS4_CALL_OFF,
+                (unsigned)GHOSTPAD_VDA_PS4_CAVE_OFF,
+                already_patched ? " already_patched=1" : "");
+
+    if (dump_only || already_patched) {
+        if (have_saved_caps) {
+            kernel_set_ucred_authid(mypid, saved_authid);
+            kernel_set_ucred_caps(mypid, saved_caps);
+        }
+        return 1;
+    }
+
+    intptr_t call_addr = fn_vda + (intptr_t)GHOSTPAD_VDA_PS4_CALL_OFF;
+    intptr_t cave_addr = fn_vda + (intptr_t)GHOSTPAD_VDA_PS4_CAVE_OFF;
+    intptr_t page_call = call_addr & ~(intptr_t)0xfff;
+    intptr_t page_cave = cave_addr & ~(intptr_t)0xfff;
+
+    int protect_call_ok = 0;
+    int protect_cave_ok = 0;
+
+    /* On some PS4/HEN combinations kernel_set_vmem_protection() rejects
+     * SceShellCore text pages even though mdbg_copyin() can still perform a
+     * privileged debug write.  Do not abort on protection failure: log it, try
+     * a narrow unaligned range as a fallback, then attempt mdbg_copyin and
+     * verify by reading the bytes back.  The pages are already executable; we
+     * only need a reliable write primitive. */
+    if (kernel_set_vmem_protection(target, page_call, 0x1000,
+                                   PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+        protect_call_ok = 1;
+    } else if (kernel_set_vmem_protection(target, call_addr, 5,
+                                          PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+        protect_call_ok = 1;
+        klog_printf("[Ghostpad] patch_vda: RWX call page failed, narrow call range accepted addr=0x%lx\n",
+                    (unsigned long)call_addr);
+    } else {
+        klog_printf("[Ghostpad] patch_vda: RWX call page/range failed page=0x%lx addr=0x%lx; trying mdbg_copyin anyway\n",
+                    (unsigned long)page_call, (unsigned long)call_addr);
+    }
+
+    if (page_cave == page_call) {
+        protect_cave_ok = protect_call_ok;
+    } else if (kernel_set_vmem_protection(target, page_cave, 0x1000,
+                                          PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+        protect_cave_ok = 1;
+    } else if (kernel_set_vmem_protection(target, cave_addr, GHOSTPAD_VDA_PS4_CAVE_LEN,
+                                          PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+        protect_cave_ok = 1;
+        klog_printf("[Ghostpad] patch_vda: RWX cave page failed, narrow cave range accepted addr=0x%lx\n",
+                    (unsigned long)cave_addr);
+    } else {
+        klog_printf("[Ghostpad] patch_vda: RWX cave page/range failed page=0x%lx addr=0x%lx; trying mdbg_copyin anyway\n",
+                    (unsigned long)page_cave, (unsigned long)cave_addr);
+    }
+
+    uint8_t cave_patch[GHOSTPAD_VDA_PS4_CAVE_LEN];
+    memset(cave_patch, 0x90, sizeof(cave_patch));
+
+    int32_t orig_rel32 = (int32_t)((uint32_t)buf[GHOSTPAD_VDA_PS4_CALL_OFF + 1] |
+                                   ((uint32_t)buf[GHOSTPAD_VDA_PS4_CALL_OFF + 2] << 8) |
+                                   ((uint32_t)buf[GHOSTPAD_VDA_PS4_CALL_OFF + 3] << 16) |
+                                   ((uint32_t)buf[GHOSTPAD_VDA_PS4_CALL_OFF + 4] << 24));
+    intptr_t orig_target_off = (intptr_t)GHOSTPAD_VDA_PS4_AFTER_CALL_OFF + (intptr_t)orig_rel32;
+    int32_t cave_call_rel32 = (int32_t)(orig_target_off -
+                                        ((intptr_t)GHOSTPAD_VDA_PS4_CAVE_OFF + 5));
+
+    cave_patch[0] = 0xe8;
+    cave_patch[1] = (uint8_t)(cave_call_rel32 & 0xff);
+    cave_patch[2] = (uint8_t)((cave_call_rel32 >> 8) & 0xff);
+    cave_patch[3] = (uint8_t)((cave_call_rel32 >> 16) & 0xff);
+    cave_patch[4] = (uint8_t)((cave_call_rel32 >> 24) & 0xff);
+    cave_patch[5] = 0x31;
+    cave_patch[6] = 0xc0;
+    cave_patch[7] = 0xc3;
+
+    uint8_t call_patch[5];
+    call_patch[0] = 0xe8;
+    call_patch[1] = (uint8_t)(patched_call_rel & 0xff);
+    call_patch[2] = (uint8_t)((patched_call_rel >> 8) & 0xff);
+    call_patch[3] = (uint8_t)((patched_call_rel >> 16) & 0xff);
+    call_patch[4] = (uint8_t)((patched_call_rel >> 24) & 0xff);
+
+    if (mdbg_copyin(target, cave_patch, cave_addr, sizeof(cave_patch)) != 0) {
+        klog_printf("[Ghostpad] patch_vda: cave write failed errno=%d\n", errno);
+        if (have_saved_caps) {
+            kernel_set_ucred_authid(mypid, saved_authid);
+            kernel_set_ucred_caps(mypid, saved_caps);
+        }
+        return -1;
+    }
+
+    if (mdbg_copyin(target, call_patch, call_addr, sizeof(call_patch)) != 0) {
+        uint8_t nop_restore[GHOSTPAD_VDA_PS4_CAVE_LEN];
+        memset(nop_restore, 0x90, sizeof(nop_restore));
+        (void)mdbg_copyin(target, nop_restore, cave_addr, sizeof(nop_restore));
+        klog_printf("[Ghostpad] patch_vda: call-site write failed errno=%d; cave restored\n", errno);
+        if (have_saved_caps) {
+            kernel_set_ucred_authid(mypid, saved_authid);
+            kernel_set_ucred_caps(mypid, saved_caps);
+        }
+        return -1;
+    }
+
+    uint8_t verify_cave[GHOSTPAD_VDA_PS4_CAVE_LEN];
+    uint8_t verify_call[sizeof(call_patch)];
+    memset(verify_cave, 0, sizeof(verify_cave));
+    memset(verify_call, 0, sizeof(verify_call));
+    if (mdbg_copyout(target, cave_addr, verify_cave, sizeof(verify_cave)) != 0 ||
+        mdbg_copyout(target, call_addr, verify_call, sizeof(verify_call)) != 0 ||
+        memcmp(verify_cave, cave_patch, sizeof(cave_patch)) != 0 ||
+        memcmp(verify_call, call_patch, sizeof(call_patch)) != 0) {
+        klog_printf("[Ghostpad] patch_vda: write verification failed; patch not trusted\n");
+        if (have_saved_caps) {
+            kernel_set_ucred_authid(mypid, saved_authid);
+            kernel_set_ucred_caps(mypid, saved_caps);
+        }
+        return -1;
+    }
+
+    if (protect_call_ok) {
+        (void)kernel_set_vmem_protection(target, page_call, 0x1000, PROT_READ | PROT_EXEC);
+    }
+    if (protect_cave_ok && page_cave != page_call) {
+        (void)kernel_set_vmem_protection(target, page_cave, 0x1000, PROT_READ | PROT_EXEC);
+    }
+
+    klog_printf("[Ghostpad] patch_vda: PATCHED %s libScePad VDA call +0x%x -> cave +0x%x; dispatcher rel=0x%08x protect_call=%d protect_cave=%d\n",
+                target_name,
+                (unsigned)GHOSTPAD_VDA_PS4_CALL_OFF,
+                (unsigned)GHOSTPAD_VDA_PS4_CAVE_OFF,
+                (uint32_t)cave_call_rel32, protect_call_ok, protect_cave_ok);
+
+    if (have_saved_caps) {
+        kernel_set_ucred_authid(mypid, saved_authid);
+        kernel_set_ucred_caps(mypid, saved_caps);
+    }
+    return 1;
+#endif
+}
+
+int
+shellui_pad_patch_vda_self(int dump_only)
+{
+    return shellui_pad_patch_vda_target(getpid(), "self", dump_only);
+}
 
 int
 shellui_pad_patch_vda(int dump_only)
 {
+#if !GHOSTPAD_ENABLE_KNOWN_VDA_PATCH || !defined(__ORBIS__)
+    return shellui_pad_patch_vda_target(0, "SceShellCore", dump_only);
+#else
     pid_t pids[8];
     if (find_pids("SceShellCore", pids, 8) == 0) {
         klog_printf("[Ghostpad] patch_vda: SceShellCore not found\n");
         return -1;
     }
-    pid_t target = pids[0];
-
-    /* Elevate credentials to debugger authid for memory patch operations */
-    pid_t mypid = getpid();
-    uint64_t saved_authid = kernel_get_ucred_authid(mypid);
-    if (saved_authid) {
-        kernel_set_ucred_authid(mypid, 0x4800000000010003l);
-    }
-
-    klog_printf("[Ghostpad] patch_vda: SceShellCore pid=%d dump_only=%d (using direct mdbg memory access)\n",
-                target, dump_only);
-
-    uint32_t libpad_h = 0;
-    if (get_lib(target, "libScePad", &libpad_h)) {
-        if (saved_authid) {
-            kernel_set_ucred_authid(mypid, saved_authid);
-        }
-        return -1;
-    }
-    intptr_t fn_vda = resolve_sym(target, libpad_h, "scePadVirtualDeviceAddDevice");
-    if (!fn_vda) {
-        klog_printf("[Ghostpad] patch_vda: scePadVirtualDeviceAddDevice not found\n");
-        if (saved_authid) {
-            kernel_set_ucred_authid(mypid, saved_authid);
-        }
-        return -1;
-    }
-    klog_printf("[Ghostpad] patch_vda: fn_vda @ 0x%lx\n", fn_vda);
-
-    /* Text pages are usually execute-only. Change protection to RWX to read and patch. */
-    intptr_t page0 = fn_vda & ~(intptr_t)0xFFF;
-    for (int pg = 0; pg < 24; pg++) {
-        intptr_t pa = page0 + (intptr_t)(pg * 0x1000);
-        kernel_set_vmem_protection(target, pa, 0x1000,
-                                   PROT_READ | PROT_WRITE | PROT_EXEC);
-    }
-    klog_printf("[Ghostpad] patch_vda: set RWX on 24 pages from 0x%lx\n", page0);
-
-    /* Read fn_vda + 96KB to cover target functions and search for patterns. */
-    const size_t SCAN_LEN = 96 * 1024;
-    static uint8_t buf[96 * 1024];
-    
-    if (mdbg_copyout(target, fn_vda, buf, SCAN_LEN) != 0) {
-        klog_printf("[Ghostpad] patch_vda: mdbg_copyout failed len=%zu\n", SCAN_LEN);
-        if (saved_authid) {
-            kernel_set_ucred_authid(mypid, saved_authid);
-        }
-        return -1;
-    }
-
-    /* Print out diagnostic hex dump */
-    for (size_t off = 0; off < 512 && off < SCAN_LEN; off += 16) {
-        klog_printf("[Ghostpad] patch_vda: +%03zx: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
-            off,
-            buf[off+0],buf[off+1],buf[off+2],buf[off+3],
-            buf[off+4],buf[off+5],buf[off+6],buf[off+7],
-            buf[off+8],buf[off+9],buf[off+10],buf[off+11],
-            buf[off+12],buf[off+13],buf[off+14],buf[off+15]);
-    }
-
-    int patches = 0;
-
-    /* Search for target IPC call pattern: e8 ?? ?? ?? ?? 48 8B 0B 48 3B <canary_op> 75 ?? */
-    size_t call_off = 0;
-    size_t jne_off = 0;
-    int found_call = 0;
-    for (size_t i = 0; i + 14 <= SCAN_LEN && i < 1024; i++) {
-        if (buf[i+0] == 0xE8 &&
-            buf[i+5] == 0x48 && buf[i+6] == 0x8B && buf[i+7] == 0x0B &&
-            buf[i+8] == 0x48 && buf[i+9] == 0x3B) {
-            /* Find the jne (0x75) instruction within the next 10 bytes */
-            for (size_t j = i + 10; j < i + 20 && j < SCAN_LEN; j++) {
-                if (buf[j] == 0x75) {
-                    call_off = i;
-                    jne_off = j;
-                    found_call = 1;
-                    klog_printf("[Ghostpad] patch_vda: IPC dispatch call at +0x%zx (canary jne at +0x%zx)\n",
-                                i, j);
-                    break;
-                }
-            }
-            if (found_call) break;
-        }
-    }
-
-    if (!found_call) {
-        klog_printf("[Ghostpad] patch_vda: dispatch-call pattern not found\n");
-    } else {
-        int32_t orig_rel32 = (int32_t)(buf[call_off+1] |
-                                       (buf[call_off+2] << 8) |
-                                       (buf[call_off+3] << 16) |
-                                       (buf[call_off+4] << 24));
-        size_t after_call_off = call_off + 5;
-        intptr_t sub_target_off = (intptr_t)after_call_off + (intptr_t)orig_rel32;
-
-        /* Find 10-byte code cave of CCs for our detour hook */
-        size_t cave_off = 0;
-        for (size_t i = call_off + 18; i + 10 <= SCAN_LEN; i++) {
-            int all_cc = 1;
-            for (int k = 0; k < 10; k++) {
-                if (buf[i+k] != 0xCC) { all_cc = 0; break; }
-            }
-            if (all_cc) { cave_off = i; break; }
-        }
-
-        if (cave_off == 0) {
-            klog_printf("[Ghostpad] patch_vda: no 10-byte cc padding cave near function, using in-place patch\n");
-            
-            /* Find the ret (0xC3) instruction in the function's epilogue */
-            size_t ret_off = 0;
-            for (size_t k = jne_off + 2; k < jne_off + 20 && k < SCAN_LEN; k++) {
-                if (buf[k] == 0xC3) {
-                    ret_off = k;
-                    break;
-                }
-            }
-
-            if (ret_off == 0) {
-                klog_printf("[Ghostpad] patch_vda: ret instruction not found in epilogue, abort\n");
-            } else {
-                size_t epilogue_len = ret_off + 1 - (jne_off + 2);
-                size_t canary_len = (jne_off + 2) - (call_off + 5);
-                size_t total_patch_len = canary_len + epilogue_len;
-
-                klog_printf("[Ghostpad] patch_vda: in-place patch: canary_len=%zu, epilogue_len=%zu, total_patch_len=%zu\n",
-                            canary_len, epilogue_len, total_patch_len);
-
-                if (!dump_only) {
-                    uint8_t patch[32];
-                    memset(patch, 0x90, sizeof(patch)); // fill with NOPs
-
-                    /* 1. xor eax, eax */
-                    patch[0] = 0x31;
-                    patch[1] = 0xC0;
-
-                    /* 2. copy original epilogue */
-                    memcpy(patch + 2, buf + jne_off + 2, epilogue_len);
-
-                    /* Write the patch to the target process memory */
-                    if (mdbg_copyin(target, patch, fn_vda + call_off + 5, total_patch_len) != 0) {
-                        klog_printf("[Ghostpad] patch_vda: in-place patch write failed\n");
-                    } else {
-                        klog_printf("[Ghostpad] patch_vda: IN-PLACE PATCHED successfully\n");
-                        patches++;
-                    }
-                } else {
-                    patches++;
-                }
-            }
-        } else {
-            klog_printf("[Ghostpad] patch_vda: using code cave detour at +0x%zx\n", cave_off);
-            int32_t cave_call_rel32 = (int32_t)(sub_target_off - (intptr_t)(cave_off + 5));
-            int32_t jmp_target = (int32_t)after_call_off;
-            int32_t jmp_rel8 = jmp_target - (int32_t)(cave_off + 10);
-            klog_printf("[Ghostpad] patch_vda: cave call rel32=0x%x, jmp rel8=0x%x\n",
-                        (uint32_t)cave_call_rel32, (uint32_t)jmp_rel8 & 0xff);
-
-            if (jmp_rel8 < -128 || jmp_rel8 > 127) {
-                klog_printf("[Ghostpad] patch_vda: jmp rel8 out of range, abort\n");
-            } else if (!dump_only) {
-                /* Write detour code into cave */
-                uint8_t cave[10];
-                cave[0] = 0xE8;
-                cave[1] = (uint8_t)(cave_call_rel32 & 0xff);
-                cave[2] = (uint8_t)((cave_call_rel32 >> 8) & 0xff);
-                cave[3] = (uint8_t)((cave_call_rel32 >> 16) & 0xff);
-                cave[4] = (uint8_t)((cave_call_rel32 >> 24) & 0xff);
-                cave[5] = 0x58;
-                cave[6] = 0x31; cave[7] = 0xC0;
-                cave[8] = 0xEB; cave[9] = (uint8_t)(jmp_rel8 & 0xff);
-                if (mdbg_copyin(target, cave, fn_vda + cave_off, 10) != 0) {
-                    klog_printf("[Ghostpad] patch_vda: cave write failed\n");
-                } else {
-                    /* Patch call-site to jump to cave */
-                    int32_t new_call_rel32 = (int32_t)cave_off - (int32_t)after_call_off;
-                    uint8_t new_call[5];
-                    new_call[0] = 0xE8;
-                    new_call[1] = (uint8_t)(new_call_rel32 & 0xff);
-                    new_call[2] = (uint8_t)((new_call_rel32 >> 8) & 0xff);
-                    new_call[3] = (uint8_t)((new_call_rel32 >> 16) & 0xff);
-                    new_call[4] = (uint8_t)((new_call_rel32 >> 24) & 0xff);
-                    if (mdbg_copyin(target, new_call, fn_vda + call_off, 5) != 0) {
-                        klog_printf("[Ghostpad] patch_vda: call-site write failed\n");
-                    } else {
-                        klog_printf("[Ghostpad] patch_vda: PATCHED — call site +0x%zx -> cave +0x%zx, cave returns to +0x%zx\n",
-                                    call_off, cave_off, after_call_off);
-                        patches++;
-                    }
-                }
-            } else {
-                patches++;
-            }
-        }
-    }
-
-    /* Scan and replace raw constant checks: Bx 06 00 3B 80 (mov reg32, 0x803b0006) */
-    for (size_t i = 0; i + 5 <= SCAN_LEN; i++) {
-        if ((buf[i] & 0xF0) == 0xB0 && (buf[i] & 0x08) &&
-            buf[i+1] == 0x06 && buf[i+2] == 0x00 &&
-            buf[i+3] == 0x3B && buf[i+4] == 0x80) {
-            klog_printf("[Ghostpad] patch_vda: MATCH Bx at +0x%zx (op=0x%02x) — mov reg, 0x803b0006\n",
-                        i, buf[i]);
-            if (!dump_only) {
-                uint8_t replacement[4] = {0x00, 0x00, 0x00, 0x00};
-                if (mdbg_copyin(target, replacement, fn_vda + i + 1, 4) == 0) {
-                    klog_printf("[Ghostpad] patch_vda: PATCHED +0x%zx imm32 to 0\n", i);
-                    patches++;
-                }
-            } else {
-                patches++;
-            }
-        }
-    }
-
-    for (size_t i = 0; i + 4 <= SCAN_LEN; i++) {
-        if (buf[i] == 0x06 && buf[i+1] == 0x00 && buf[i+2] == 0x3B && buf[i+3] == 0x80) {
-            uint8_t prev1 = i>=1?buf[i-1]:0;
-            uint8_t prev2 = i>=2?buf[i-2]:0;
-            uint8_t prev3 = i>=3?buf[i-3]:0;
-            uint8_t prev4 = i>=4?buf[i-4]:0;
-            if ((prev1 & 0xF0) == 0xB0 && (prev1 & 0x08)) continue;
-            klog_printf("[Ghostpad] patch_vda: raw 0x803b0006 at +0x%zx (prev4: %02x %02x %02x %02x)\n",
-                        i, prev4, prev3, prev2, prev1);
-        }
-    }
-
-    klog_printf("[Ghostpad] patch_vda: done, patches=%d\n", patches);
-    if (saved_authid) {
-        kernel_set_ucred_authid(mypid, saved_authid);
-    }
-    return patches;
+    return shellui_pad_patch_vda_target(pids[0], "SceShellCore", dump_only);
+#endif
 }
 
 int32_t
@@ -3425,6 +3562,10 @@ shellui_pad_hook_gethandle(void)
 int
 shellui_pad_hook_setpriv(void)
 {
+#if !GHOSTPAD_ALLOW_UNSAFE_SETPRIV_HOOK
+    klog_printf("[Ghostpad] hook_sp: disabled by default; compile with -DGHOSTPAD_ALLOW_UNSAFE_SETPRIV_HOOK=1 to enable\n");
+    return 0;
+#else
     pid_t pids[8];
     if (find_pids("SceShellCore", pids, 8) == 0) {
         klog_printf("[Ghostpad] hook_sp: SceShellCore not found\n");
@@ -3586,4 +3727,5 @@ shellui_pad_hook_setpriv(void)
 
     if (saved_authid) kernel_set_ucred_authid(mypid, saved_authid);
     return 0;
+#endif /* GHOSTPAD_ALLOW_UNSAFE_SETPRIV_HOOK */
 }

@@ -12,6 +12,12 @@
 #pragma once
 #include <stdint.h>
 
+/* Persistent status log exported by main.c. It mirrors critical logs to
+ * /data/ghostpad/ghostpad_status.log so diagnostics survive when /dev/klog
+ * or the TCP klog bridge are unavailable. */
+void ghostpad_status_log(const char *fmt, ...);
+void ghostpad_status_log_reset(void);
+
 /* Maximum size of ScePadData we forward to the stub (padded for alignment) */
 #define SHELLUI_PAD_DATA_SIZE 256
 
@@ -117,10 +123,17 @@ int shellcore_pad_test_vdi_neutral(int32_t pad_handle); /* buttons=0, no UI inpu
  * assignment.  Returns VDA return value; if >= 0 it is the VDI write handle. */
 int32_t shellui_pad_retry_vda_shellcore(int32_t userId);
 
-/* PT_ATTACH SceShellCore and patch scePadVirtualDeviceAddDevice's IPC-dispatch
- * call path through a small code cave.  The cave calls the original dispatcher,
- * discards the extra call-site return address, then forces eax=0 before
- * jumping back to the original canary epilogue.  Early validation errors are
- * left intact.  Returns number of patches applied. */
+/* Manifest-verified SceShellCore VDA patch.
+ *
+ * PS4 firmware fingerprint from vda_probe_report:
+ *   libScePad:scePadVirtualDeviceAddDevice hash256=0xbb22d8acd843d81e
+ *   hash4k=0x346f2b8071895f89, VDA offset +0x5b40
+ *
+ * The patch only applies if prologue/hash/callsite/cave all match. It detours
+ * the dispatcher call at VDA+0xc0 into the verified NOP cave at VDA+0xdd2,
+ * calls the original dispatcher, forces eax=0, and returns to the original
+ * canary/epilogue path. Early validation errors are left intact.
+ * Returns 1 when applicable/applied/already applied, 0 on safe non-match. */
 int shellui_pad_patch_vda(int dump_only);
+int shellui_pad_patch_vda_self(int dump_only);
 int shellui_pad_hook_setpriv(void);

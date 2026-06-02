@@ -41,6 +41,9 @@ void ble_hid_host_clear_results(void);
 // Format: [{"addr":"xx:xx:xx:xx:xx:xx","name":"...","rssi":-60}, ...]
 char *ble_hid_host_get_scan_results_json(void);
 
+// Return heap-allocated JSON with BLE host diagnostics; caller frees it.
+char *ble_hid_host_get_debug_json(void);
+
 // Connect to a device by its BLE address string (e.g. "aa:bb:cc:dd:ee:ff").
 // Kicks off GATT service discovery and HID report subscription automatically.
 esp_err_t ble_hid_host_connect(const char *addr_str);

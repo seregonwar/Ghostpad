@@ -24,6 +24,7 @@
 #include <fcntl.h>
 #include <sys/time.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -43,17 +44,136 @@
 
 #include "shellui_pad.h"
 
-/* gp_log — thin wrapper around klog_printf (kernel debug log, port 9081) */
+#ifndef GHOSTPAD_ENABLE_INTERNAL_KLOG
+#define GHOSTPAD_ENABLE_INTERNAL_KLOG 1
+#endif
+
+#ifndef GHOSTPAD_KLOG_PORT
+#define GHOSTPAD_KLOG_PORT 3434
+#endif
+
+#ifndef GHOSTPAD_ENABLE_KLOG_AUTOBIND
+#define GHOSTPAD_ENABLE_KLOG_AUTOBIND 0
+#endif
+
+/*
+ * Safety defaults for the PS4/Orbis bring-up path.
+ *
+ * The previous build enabled three invasive mechanisms at startup:
+ *   - an in-payload /dev/klog TCP bridge with auto-bind side effects,
+ *   - direct SceShellCore VDA memory patching,
+ *   - a scePadSetProcessPrivilege detour used as a fake VDA trigger.
+ *
+ * Runtime VDA patching remains opt-in, but the patcher is now manifest-verified
+ * for the PS4 libScePad fingerprint captured by vda_probe.
+ */
+#ifndef GHOSTPAD_ENABLE_INTERNAL_KLOG
+#define GHOSTPAD_ENABLE_INTERNAL_KLOG 0
+#endif
+
+#ifndef GHOSTPAD_ENABLE_STARTUP_VDA_PATCH
+#define GHOSTPAD_ENABLE_STARTUP_VDA_PATCH 0
+#endif
+
+#ifndef GHOSTPAD_ENABLE_RUNTIME_VDA_PATCH
+#define GHOSTPAD_ENABLE_RUNTIME_VDA_PATCH 1
+#endif
+
+#ifndef GHOSTPAD_ENABLE_SETPRIV_HOOK
+#define GHOSTPAD_ENABLE_SETPRIV_HOOK 0
+#endif
+
+#ifndef GHOSTPAD_ENABLE_ORBIS_SETPRIV_VDA_SENTINEL
+#define GHOSTPAD_ENABLE_ORBIS_SETPRIV_VDA_SENTINEL 0
+#endif
+
+/* Persistent status log. This is intentionally separate from /dev/klog so
+ * failures in the klog reader/bridge do not hide critical startup state. */
+#ifndef GHOSTPAD_STATUS_LOG_DIR
+#define GHOSTPAD_STATUS_LOG_DIR  "/data/ghostpad"
+#endif
+
+#ifndef GHOSTPAD_STATUS_LOG_PATH
+#define GHOSTPAD_STATUS_LOG_PATH "/data/ghostpad/ghostpad_status.log"
+#endif
+
 #define LOG_MSG_MAX 480
 
+static pthread_mutex_t g_status_log_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_status_log_fd = -1;
+
+static int ghostpad_status_open_locked(int truncate) {
+    int flags = O_WRONLY | O_CREAT | (truncate ? O_TRUNC : O_APPEND);
+
+    (void)mkdir(GHOSTPAD_STATUS_LOG_DIR, 0755);
+
+    if (g_status_log_fd >= 0) {
+        close(g_status_log_fd);
+        g_status_log_fd = -1;
+    }
+
+    g_status_log_fd = open(GHOSTPAD_STATUS_LOG_PATH, flags, 0600);
+    return g_status_log_fd;
+}
+
+void ghostpad_status_log_reset(void) {
+    pthread_mutex_lock(&g_status_log_lock);
+    if (ghostpad_status_open_locked(1) >= 0) {
+        static const char header[] =
+            "===== Ghostpad status log start =====\n"
+            "path=/data/ghostpad/ghostpad_status.log\n";
+        (void)write(g_status_log_fd, header, sizeof(header) - 1);
+    }
+    pthread_mutex_unlock(&g_status_log_lock);
+}
+
+void ghostpad_status_log(const char *fmt, ...) {
+    char buf[LOG_MSG_MAX];
+    va_list ap;
+    int n;
+
+    if (!fmt) {
+        return;
+    }
+
+    va_start(ap, fmt);
+    n = vsnprintf(buf, sizeof(buf) - 1, fmt, ap);
+    va_end(ap);
+
+    if (n < 0) {
+        return;
+    }
+    buf[sizeof(buf) - 1] = '\0';
+
+    /* Keep existing klog behavior for users who can read /dev/klog. */
+    klog_printf("%s", buf);
+
+    pthread_mutex_lock(&g_status_log_lock);
+    if (g_status_log_fd < 0) {
+        (void)ghostpad_status_open_locked(0);
+    }
+    if (g_status_log_fd >= 0) {
+        size_t len = strnlen(buf, sizeof(buf));
+        if (len > 0) {
+            (void)write(g_status_log_fd, buf, len);
+            if (buf[len - 1] != '\n') {
+                (void)write(g_status_log_fd, "\n", 1);
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_status_log_lock);
+}
+
+/* gp_log — log to klog and to /data/ghostpad/ghostpad_status.log. */
 static void gp_log(const char *fmt, ...) {
     char buf[LOG_MSG_MAX];
     va_list ap;
+
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf) - 1, fmt, ap);
     va_end(ap);
     buf[LOG_MSG_MAX - 1] = '\0';
-    klog_printf("%s", buf);
+    ghostpad_status_log("%s", buf);
 }
 
 /* SCE function declarations — linked via sce_stubs (-lSceUserService -lScePad) */
@@ -134,9 +254,23 @@ typedef struct {
     uint8_t     unknown[15];
 } ScePadData;
 
-/* Virtual device type: 3 = DualSense (PS5), 0 = DS4-compat fallback */
+/* Virtual device type: 3 is the working VDA/RemotePlay path on PS4 and
+ * DualSense path on PS5.  Type 0 is a classic DS4 pad type, but on PS4
+ * scePadVirtualDeviceAddDevice returns 0x80920001 for it, so do not use it
+ * as the default VDA type. */
 #define VIRTUAL_DEVICE_TYPE_DUALSENSE  3
 #define VIRTUAL_DEVICE_TYPE_DS4COMPAT  0
+
+static const char *ghostpad_vda_type_name(int32_t type) {
+    switch (type) {
+    case VIRTUAL_DEVICE_TYPE_DUALSENSE:
+        return "DualSense/RemotePlay";
+    case VIRTUAL_DEVICE_TYPE_DS4COMPAT:
+        return "DS4-compatible";
+    default:
+        return "custom";
+    }
+}
 
 /* Network packet protocol (shared with Python GUI, ~60 Hz over TCP) */
 #define GP_MAGIC      "GPAD"
@@ -313,13 +447,20 @@ static pid_t    shellui_pid      = -1;
 static intptr_t shellui_args     = 0;
 static int32_t  vdi_handle       = -1;
 static uint64_t bound_virtual_device_id = 0;
+#ifdef __ORBIS__
 static int32_t  virtual_device_type = VIRTUAL_DEVICE_TYPE_DUALSENSE;
+#else
+static int32_t  virtual_device_type = VIRTUAL_DEVICE_TYPE_DUALSENSE;
+#endif
 static int      device_vdi_ready = 0;
 static int32_t  injectUserId     = -1;
 
 static uint64_t g_phys_dev_id      = 0;
 static uint64_t g_last_bound_virt_id = 0;
 static volatile int g_klog_client_fd = -1;
+
+static pthread_mutex_t g_klog_mbus_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_klog_pending_virtual_dev_id = 0;
 
 
 
@@ -360,110 +501,144 @@ static uint64_t parse_hex(const char *str) {
 }
 
 static void trigger_auto_bind(uint64_t vDevId, uint64_t pDevId) {
-    int32_t bindUid = userId;
-    if (bindUid < 0) {
-        bindUid = 0x10000000;
-    }
-    
-    gp_log("[Ghostpad] Auto-Klog: Triggering bind for virt=0x%llx, phys=0x%llx, user=0x%x\n",
-           (unsigned long long)vDevId, (unsigned long long)pDevId, (uint32_t)bindUid);
-           
-    if (pDevId != 0) {
-        int dr = shellui_pad_disconnect_device(pDevId);
-        gp_log("[Ghostpad] Auto-Klog: disconnect_device(0x%llx) ret=%d\n", (unsigned long long)pDevId, dr);
-        usleep(200000);
+    if (vDevId == 0 || vDevId == g_last_bound_virt_id) {
+        return;
     }
 
-    int br = shellui_pad_force_bind(vDevId, bindUid);
-    gp_log("[Ghostpad] Auto-Klog: force_bind(0x%llx, 0x%x) ret=%d\n", (unsigned long long)vDevId, (uint32_t)bindUid, br);
-    
-    if (br == 0) {
-        g_last_bound_virt_id = vDevId;
-        bound_virtual_device_id = vDevId;
-        
-        int32_t dev_handle = (int32_t)(vDevId & 0xffffffffu);
-        gp_log("[Ghostpad] Auto-Klog: force_bind succeeded; testing VDI (neutral) handle=0x%x\n",
-               (uint32_t)dev_handle);
-               
-        int dr = shellcore_pad_test_vdi_neutral(dev_handle);
-        gp_log("[Ghostpad] Auto-Klog: deviceId vdi_neutral ret=%d\n", dr);
-        
-        if (dr == 0) {
-            vdi_handle = dev_handle;
-            device_vdi_ready = 1;
-            
-            if (shellui_pad_direct_adopt_vdi_handle(shellui_pid, shellui_args, dev_handle) == 0) {
-                gp_log("[Ghostpad] Auto-Klog: adopted deviceId for direct SceShellCore VDI input\n");
-            } else {
-                gp_log("[Ghostpad] Auto-Klog: direct adopt of deviceId failed\n");
-            }
-            
-            if (padHandle < 0 && shellui_args != 0) {
-                gp_log("[Ghostpad] Auto-Klog: relaunching stub for no-lag mdbg path...\n");
-                int rl = shellui_pad_relaunch_stub_with_handle(dev_handle);
-                gp_log("[Ghostpad] Auto-Klog: relaunch_stub ret=%d\n", rl);
-                if (rl == 0) {
-                    int rw;
-                    for (rw = 0; rw < 30; rw++) {
-                        usleep(100000);
-                        int32_t rdy = (int32_t)mdbg_getint(shellui_pid,
-                            shellui_args + (intptr_t)offsetof(ShellUiPadArgs, ready));
-                        if (rdy == 1) {
-                            gp_log("[Ghostpad] Auto-Klog: stub ready! NO-LAG mdbg path active.\n");
-                            notify("Ghostpad: mdbg VDI active");
-                            device_vdi_ready = 2;
-                            break;
-                        }
-                    }
-                    if (device_vdi_ready != 2) {
-                        gp_log("[Ghostpad] Auto-Klog: stub not ready after 3s; falling back to pt_call\n");
-                    }
-                }
-            }
-        }
-        
-        if (padHandle < 0) {
-            ScePadData vdi_probe;
-            memset(&vdi_probe, 0, sizeof(vdi_probe));
-            vdi_probe.connected = 1;
-            vdi_probe.quat.w = 1.0f;
-            vdi_probe.leftStick.x = 128;
-            vdi_probe.leftStick.y = 128;
-            vdi_probe.rightStick.x = 128;
-            vdi_probe.rightStick.y = 128;
-            int32_t dev_h = (int32_t)(vDevId & 0xffffffffu);
-            int vr = scePadVirtualDeviceInsertData(dev_h, &vdi_probe);
-            gp_log("[Ghostpad] Auto-Klog: direct-VDI: devId=0x%x ret=0x%x\n",
-                   (uint32_t)dev_h, (uint32_t)vr);
-            if (vr == 0) {
-                padHandle = dev_h;
-                gp_log("[Ghostpad] *** ZERO-LAG DIRECT VDI! padHandle=%d ***\n", padHandle);
-                notify("Ghostpad: process injected VDI=%d", padHandle);
-            }
-        }
+    g_last_bound_virt_id = vDevId;
+
+    gp_log("[Ghostpad] Auto-Klog: trigger_auto_bind virt=0x%llx phys=0x%llx\n",
+           (unsigned long long)vDevId, (unsigned long long)pDevId);
+    if (padHandle < 0) {
+        vdi_handle = -1;
+    }
+
+    int br = shellui_pad_force_bind(vDevId, injectUserId);
+    gp_log("[Ghostpad] Auto-Klog: force_bind(0x%llx) ret=%d\n",
+           (unsigned long long)vDevId, br);
+
+    if (br != 0) {
+        gp_log("[Ghostpad] Auto-Klog: force_bind failed; fallback to GBND port\n");
+        return;
+    }
+
+    int32_t dev_h = (int32_t)(vDevId & 0xffffffffu);
+    int tr = shellcore_pad_test_vdi_neutral(dev_h);
+    gp_log("[Ghostpad] Auto-Klog: shellcore vdi_neutral ret=%d\n", tr);
+
+    ScePadData probe;
+    memset(&probe, 0, sizeof(probe));
+    probe.connected = 1;
+    probe.quat.w = 1.0f;
+    probe.leftStick.x = 128;
+    probe.leftStick.y = 128;
+    probe.rightStick.x = 128;
+    probe.rightStick.y = 128;
+
+    int vr = scePadVirtualDeviceInsertData(dev_h, &probe);
+    gp_log("[Ghostpad] Auto-Klog: direct InsertData devId=0x%x ret=0x%x\n",
+           (uint32_t)dev_h, (uint32_t)vr);
+
+    if (tr == 0 || vr == 0) {
+        vdi_handle = dev_h;
+        device_vdi_ready = 1;
+        padHandle = dev_h;
+        gp_log("[Ghostpad] *** Auto-Klog: padHandle=0x%x ***\n",
+               (uint32_t)padHandle);
+        notify("Ghostpad: Auto-Klog VDI active 0x%x", (uint32_t)padHandle);
+    } else {
+        gp_log("[Ghostpad] Auto-Klog: VDI test failed; waiting for GBND/HVDI fallback\n");
     }
 }
 
-static void parse_klog_line(const char *line) {
-    const char *p = gp_strcasestr(line, "DEVICE_ADDED");
-    if (!p) {
-        p = gp_strcasestr(line, "DeviceAdded");
+static uint64_t parse_klog_device_id(const char *line) {
+    const char *id_ptr;
+
+    if (!line) {
+        return 0;
     }
-    if (p) {
-        const char *id_ptr = gp_strcasestr(line, "deviceId=0x");
-        if (id_ptr) {
-            uint64_t dev_id = parse_hex(id_ptr + 11);
-            if (gp_strcasestr(line, "capabilityBattery:1")) {
-                g_phys_dev_id = dev_id;
-                gp_log("[Ghostpad] Auto-Klog: Detected Physical Controller: 0x%llx\n", g_phys_dev_id);
-            }
-            else if (gp_strcasestr(line, "capabilityBattery:0") || gp_strcasestr(line, "userId=0xffffffff")) {
-                if (dev_id != g_last_bound_virt_id) {
-                    gp_log("[Ghostpad] Auto-Klog: Detected Virtual Controller: 0x%llx\n", dev_id);
-                    trigger_auto_bind(dev_id, g_phys_dev_id);
-                }
-            }
+
+    id_ptr = gp_strcasestr(line, "DeviceId:0x");
+    if (id_ptr) {
+        return parse_hex(id_ptr + 11);
+    }
+
+    id_ptr = gp_strcasestr(line, "deviceId=0x");
+    if (id_ptr) {
+        return parse_hex(id_ptr + 11);
+    }
+
+    return 0;
+}
+
+static void klog_store_pending_virtual_device(uint64_t dev_id, const char *why) {
+    if (dev_id == 0 || dev_id == g_last_bound_virt_id) {
+        return;
+    }
+
+    pthread_mutex_lock(&g_klog_mbus_lock);
+    if (g_klog_pending_virtual_dev_id != dev_id) {
+        g_klog_pending_virtual_dev_id = dev_id;
+        pthread_mutex_unlock(&g_klog_mbus_lock);
+        gp_log("[Ghostpad] klog observed VDA candidate deviceId=0x%llx (%s)\n",
+               (unsigned long long)dev_id, why ? why : "unknown");
+        return;
+    }
+    pthread_mutex_unlock(&g_klog_mbus_lock);
+}
+
+static uint64_t klog_take_pending_virtual_device(void) {
+    uint64_t dev_id;
+
+    pthread_mutex_lock(&g_klog_mbus_lock);
+    dev_id = g_klog_pending_virtual_dev_id;
+    g_klog_pending_virtual_dev_id = 0;
+    pthread_mutex_unlock(&g_klog_mbus_lock);
+
+    return dev_id;
+}
+
+static void parse_klog_line(const char *line) {
+    uint64_t dev_id;
+    int is_add_event;
+
+    if (!line || !*line) {
+        return;
+    }
+
+    is_add_event = (gp_strcasestr(line, "DEVICE_ADDED") != NULL) ||
+                   (gp_strcasestr(line, "DeviceAdded") != NULL) ||
+                   (gp_strcasestr(line, "eventId=1 ADD") != NULL);
+    if (!is_add_event) {
+        return;
+    }
+
+    dev_id = parse_klog_device_id(line);
+    if (dev_id == 0) {
+        return;
+    }
+
+    if (gp_strcasestr(line, "capabilityBattery:1")) {
+        g_phys_dev_id = dev_id;
+        gp_log("[Ghostpad] Auto-Klog: Detected Physical Controller: 0x%llx\n",
+               (unsigned long long)g_phys_dev_id);
+        return;
+    }
+
+    if (gp_strcasestr(line, "capabilityBattery:0") ||
+        gp_strcasestr(line, "userId=0xffffffff") ||
+        gp_strcasestr(line, "type:4") ||
+        gp_strcasestr(line, "subType:2") ||
+        gp_strcasestr(line, "REMOTEPLAY")) {
+#if GHOSTPAD_ENABLE_KLOG_AUTOBIND
+        if (dev_id != g_last_bound_virt_id) {
+            gp_log("[Ghostpad] Auto-Klog: Detected Virtual Controller: 0x%llx\n",
+                   (unsigned long long)dev_id);
+            trigger_auto_bind(dev_id, g_phys_dev_id);
         }
+#else
+        klog_store_pending_virtual_device(dev_id, "ADD/type4/RemotePlay");
+#endif
     }
 }
 
@@ -518,7 +693,9 @@ static void *klog_reader_thread(void *arg) {
             char c = chunk[i];
             if (c == '\n' || line_len >= (int)sizeof(line) - 1) {
                 line[line_len] = '\0';
+#if GHOSTPAD_ENABLE_KLOG_AUTOBIND
                 parse_klog_line(line);
+#endif
                 line_len = 0;
             } else if (c != '\r') {
                 line[line_len++] = c;
@@ -529,12 +706,122 @@ static void *klog_reader_thread(void *arg) {
     return NULL;
 }
 
+static int ghostpad_ctrl_try_bind_once(int ctrlFd, int32_t default_user)
+{
+    int cfd;
+    char magic[4];
+
+    if (ctrlFd < 0) {
+        return 0;
+    }
+
+    cfd = accept(ctrlFd, NULL, NULL);
+    if (cfd < 0) {
+        return 0;
+    }
+
+    set_recv_timeout_ms(cfd, 750);
+    int nr4 = recv_exact(cfd, magic, 4);
+    if (nr4 != 4) {
+        gp_log("[Ghostpad] ctrlFd(prebind): short magic recv nr4=%d errno=%d\n", nr4, errno);
+        close(cfd);
+        return 0;
+    }
+
+    if (memcmp(magic, "TYPE", 4) == 0) {
+        GhostpadTypePacket tpkt;
+        memcpy(tpkt.magic, magic, 4);
+        if (recv_exact(cfd, (char *)&tpkt + 4, GP_TYPE_PACKET_SIZE - 4) ==
+            (int)(GP_TYPE_PACKET_SIZE - 4)) {
+            virtual_device_type = (int32_t)tpkt.deviceType;
+            gp_log("[Ghostpad] TYPE(prebind): virtual_device_type=%d\n", virtual_device_type);
+        }
+        close(cfd);
+        return 0;
+    }
+
+    if (memcmp(magic, "GBND", 4) != 0) {
+        gp_log("[Ghostpad] ctrlFd(prebind): ignored magic '%c%c%c%c'\n",
+               magic[0], magic[1], magic[2], magic[3]);
+        close(cfd);
+        return 0;
+    }
+
+    GhostpadBindPacket bpkt;
+    memcpy(bpkt.magic, magic, 4);
+    int nr = recv_exact(cfd, (char *)&bpkt + 4, GP_BIND_PACKET_SIZE - 4);
+    close(cfd);
+    if (nr != (int)(GP_BIND_PACKET_SIZE - 4)) {
+        gp_log("[Ghostpad] GBND(prebind): short packet nr=%d errno=%d\n", nr, errno);
+        return 0;
+    }
+
+    uint64_t vDevId  = bpkt.virtualDevId;
+    uint64_t pDevId  = bpkt.physicalDevId;
+    int32_t bindUid  = (bpkt.userId != 0) ? (int32_t)bpkt.userId : default_user;
+    int32_t dev_h    = (int32_t)(vDevId & 0xffffffffu);
+
+    gp_log("[Ghostpad] GBND(prebind): virt=0x%llx phys=0x%llx user=0x%x handle=0x%x\n",
+           (unsigned long long)vDevId,
+           (unsigned long long)pDevId,
+           (uint32_t)bindUid,
+           (uint32_t)dev_h);
+
+    bound_virtual_device_id = vDevId;
+
+    if (pDevId != 0) {
+        int dr = shellui_pad_disconnect_device(pDevId);
+        gp_log("[Ghostpad] GBND(prebind): disconnect_device ret=%d\n", dr);
+        usleep(200000);
+    }
+
+    int br = shellui_pad_force_bind(vDevId, bindUid);
+    gp_log("[Ghostpad] GBND(prebind): force_bind ret=%d\n", br);
+
+    if (br != 0) {
+        return 0;
+    }
+
+    int tr = shellcore_pad_test_vdi_neutral(dev_h);
+    gp_log("[Ghostpad] GBND(prebind): shellcore vdi_neutral ret=%d\n", tr);
+
+    ScePadData probe;
+    memset(&probe, 0, sizeof(probe));
+    probe.connected = 1;
+    probe.quat.w = 1.0f;
+    probe.leftStick.x = 128;
+    probe.leftStick.y = 128;
+    probe.rightStick.x = 128;
+    probe.rightStick.y = 128;
+
+    int vr = scePadVirtualDeviceInsertData(dev_h, &probe);
+    gp_log("[Ghostpad] GBND(prebind): direct InsertData devId=0x%x ret=0x%x\n",
+           (uint32_t)dev_h, (uint32_t)vr);
+
+    if (tr == 0 || vr == 0) {
+        vdi_handle = dev_h;
+        device_vdi_ready = 1;
+        padHandle = dev_h;
+        gp_log("[Ghostpad] *** GBND prebind active: padHandle=0x%x ***\n",
+               (uint32_t)padHandle);
+        notify("Ghostpad: GBND VDI active 0x%x", (uint32_t)padHandle);
+        return 1;
+    }
+
+    gp_log("[Ghostpad] GBND(prebind): bind ok but VDI test failed; waiting for another GBND/HVDI\n");
+    return 0;
+}
+
 /* ---- Main ---- */
 int main(void) {
     int      serverFd         = -1;
     int      ctrlFd           = -1;
     int      clientFd         = -1;
     int      ret;
+    int      vda_pending_mbus_bind = 0;
+
+    ghostpad_status_log_reset();
+    gp_log("[Ghostpad] persistent status log: %s\n", GHOSTPAD_STATUS_LOG_PATH);
 
     /* Notify immediately so we know the payload is running at all.
      * If this notification never appears, the ELF didn't load. */
@@ -548,6 +835,9 @@ int main(void) {
 
     gp_log("[Ghostpad] ===== Ghostpad v1.0 Starting =====\n");
     gp_log("[Ghostpad] Control port: %d\n", GP_PORT);
+    gp_log("[Ghostpad] build config: internal_klog=%d klog_port=%d runtime_vda_patch=%d startup_vda_patch=%d\n",
+           GHOSTPAD_ENABLE_INTERNAL_KLOG, GHOSTPAD_KLOG_PORT,
+           GHOSTPAD_ENABLE_RUNTIME_VDA_PATCH, GHOSTPAD_ENABLE_STARTUP_VDA_PATCH);
 
     /* ---- Initialize SCE User Service ---- */
     ret = sceUserServiceInitialize(NULL);
@@ -608,7 +898,12 @@ int main(void) {
     ret = scePadSetProcessPrivilege(1);
     gp_log("[Ghostpad] scePadSetProcessPrivilege(1): 0x%08x\n", ret);
 
-    /* ---- Start Background Klog Threads ---- */
+    /* ---- Optional Background Klog Threads ----
+     * Disabled by default on Orbis bring-up: the TCP klog bridge and parser can
+     * race external klog tools and trigger bind/disconnect side effects while
+     * GPAD/CTRL sockets are still being initialized.
+     */
+#if GHOSTPAD_ENABLE_INTERNAL_KLOG
     int klog_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (klog_listen_fd >= 0) {
         int opt = 1;
@@ -619,17 +914,17 @@ int main(void) {
         memset(&klog_sin, 0, sizeof(klog_sin));
         klog_sin.sin_family = AF_INET;
         klog_sin.sin_addr.s_addr = htonl(INADDR_ANY);
-        klog_sin.sin_port = htons(3232);
-        
+        klog_sin.sin_port = htons(GHOSTPAD_KLOG_PORT);
+
         if (bind(klog_listen_fd, (struct sockaddr *)&klog_sin, sizeof(klog_sin)) == 0 &&
             listen(klog_listen_fd, 5) == 0) {
-            gp_log("[Ghostpad] Klog listener started on port 3232\n");
-            
+            gp_log("[Ghostpad] Klog listener started on port %d\n", GHOSTPAD_KLOG_PORT);
+
             pthread_t listen_tid;
             pthread_create(&listen_tid, NULL, klog_listener_thread, (void *)(intptr_t)klog_listen_fd);
             pthread_detach(listen_tid);
         } else {
-            gp_log("[Ghostpad] Failed to bind klog listener to port 3232: %d\n", errno);
+            gp_log("[Ghostpad] Failed to bind klog listener to port %d: %d\n", GHOSTPAD_KLOG_PORT, errno);
             close(klog_listen_fd);
         }
     }
@@ -637,12 +932,31 @@ int main(void) {
     pthread_t reader_tid;
     pthread_create(&reader_tid, NULL, klog_reader_thread, NULL);
     pthread_detach(reader_tid);
+#else
+    gp_log("[Ghostpad] internal klog TCP bridge disabled (safe baseline)\n");
+#endif
+
+
+    /* Patch this payload process' libScePad before the direct VDA attempts.
+     * The SceShellCore manifest patch is still applied later for the injected
+     * path, but PT_ATTACH can fail on PS4. Patching self lets the immediate
+     * scePadVirtualDeviceAddDevice() attempt use the same verified VDA fix. */
+#if GHOSTPAD_ENABLE_RUNTIME_VDA_PATCH
+    gp_log("[Ghostpad] Early self VDA patch: dry run...\n");
+    int self_pdry = shellui_pad_patch_vda_self(1);
+    gp_log("[Ghostpad] self patch_vda dry: matches=%d\n", self_pdry);
+    if (self_pdry > 0) {
+        int self_p = shellui_pad_patch_vda_self(0);
+        gp_log("[Ghostpad] self patch_vda applied: patches=%d\n", self_p);
+    }
+#endif
 
     /*
      * =====================================================================================
-     *            PATCH SceShellCore VDA PROCESS MEMORY DIRECTLY ON STARTUP
+     *            OPTIONAL SceShellCore VDA PATCHING / SETPRIV HOOK
      * =====================================================================================
      */
+#if GHOSTPAD_ENABLE_STARTUP_VDA_PATCH
     gp_log("[Ghostpad] Startup VDA Patching: attempting to patch SceShellCore...\n");
     int pdry = shellui_pad_patch_vda(1);
     gp_log("[Ghostpad] Startup VDA Patching: dry run returned %d matches\n", pdry);
@@ -652,10 +966,17 @@ int main(void) {
         gp_log("[Ghostpad] Startup VDA Patching: patch applied, count = %d\n", p);
         notify("Ghostpad: VDA patch applied %d", p);
     }
+#else
+    gp_log("[Ghostpad] Startup VDA patch disabled (safe baseline)\n");
+#endif
 
+#if GHOSTPAD_ENABLE_SETPRIV_HOOK
     gp_log("[Ghostpad] Startup Privilege Hooking: attempting to hook SceShellCore's scePadSetProcessPrivilege...\n");
     int hret = shellui_pad_hook_setpriv();
     gp_log("[Ghostpad] Startup Privilege Hooking: hook returned %d\n", hret);
+#else
+    gp_log("[Ghostpad] Startup setpriv hook disabled (safe baseline)\n");
+#endif
 
     /* ---- Acquire pad handle ---- */
 
@@ -712,19 +1033,21 @@ int main(void) {
         }
 
         /* Sentinel pattern to detect which struct fields VDA writes to */
+        int vda_created_without_handle = 0;
         const int32_t VDA_SENTINEL = (int32_t)0xDEADBEEF;
         memset(&vd_param, 0, sizeof(vd_param));
         vd_param.size   = (int32_t)sizeof(vd_param);
         vd_param.userId = userId;
         for (int k = 0; k < 6; k++) vd_param.pad[k] = VDA_SENTINEL;
 
-        gp_log("[Ghostpad] VDA call: size=%d userId=0x%08x type=DualSense\n",
-               vd_param.size, (uint32_t)vd_param.userId);
+        gp_log("[Ghostpad] VDA call: size=%d userId=0x%08x type=%d (%s)\n",
+               vd_param.size, (uint32_t)vd_param.userId,
+               (int)virtual_device_type, ghostpad_vda_type_name(virtual_device_type));
 
-#ifdef __ORBIS__
+#if defined(__ORBIS__) && GHOSTPAD_ENABLE_ORBIS_SETPRIV_VDA_SENTINEL
         ret = scePadSetProcessPrivilege(0xDEADBEEF);
 #else
-        ret = scePadVirtualDeviceAddDevice(&vd_param, VIRTUAL_DEVICE_TYPE_DUALSENSE);
+        ret = scePadVirtualDeviceAddDevice(&vd_param, virtual_device_type);
 #endif
 
         /* VDA writes handle to struct field, not return value — log all fields */
@@ -736,22 +1059,29 @@ int main(void) {
         gp_log("[Ghostpad] VDA pad[4-5]=0x%08x 0x%08x\n",
                (uint32_t)vd_param.pad[4], (uint32_t)vd_param.pad[5]);
 
-        if (ret >= 0) {
-            padHandle = ret;
-        } else {
-            /* Check if VDA wrote the handle into a struct field despite the error */
-            for (int k = 0; k < 6; k++) {
-                if (vd_param.pad[k] != VDA_SENTINEL && vd_param.pad[k] >= 0) {
-                    gp_log("[Ghostpad] VDA handle found in pad[%d] = %d\n",
-                           k, vd_param.pad[k]);
-                    padHandle = vd_param.pad[k];
-                    break;
-                }
+        /* VDA returns a status code.  After the VDA return-value patch this is
+         * expected to be 0, but 0 is not a usable pad handle.  Only accept a
+         * handle if libScePad actually writes one into the parameter buffer. */
+        for (int k = 0; k < 6; k++) {
+            if (vd_param.pad[k] != VDA_SENTINEL && vd_param.pad[k] > 0) {
+                gp_log("[Ghostpad] VDA handle found in pad[%d] = %d\n",
+                       k, vd_param.pad[k]);
+                padHandle = vd_param.pad[k];
+                break;
             }
         }
+        if (ret >= 0 && padHandle < 0) {
+            vda_created_without_handle = 1;
+            vda_pending_mbus_bind = 1;
+            gp_log("[Ghostpad] VDA returned success/status 0x%08x but did not expose a handle; waiting for MBus/klog deviceId path\n",
+                   (uint32_t)ret);
+        }
 
-        /* Retry VDA with SceShellCore authid (0x4800000000000010) */
-        if (padHandle < 0) {
+        /* Retry VDA with SceShellCore authid only if the first call did not
+         * successfully create a device.  If the patched first call returns
+         * success without a handle, a device may already be present on MBus;
+         * a second VDA call just creates another orphan RemotePlay device. */
+        if (padHandle < 0 && !vda_created_without_handle) {
             pid_t mypid2 = getpid();
             uint64_t saved_authid2 = kernel_get_ucred_authid(mypid2);
             kernel_set_ucred_authid(mypid2, 0x4800000000000010l);
@@ -761,10 +1091,10 @@ int main(void) {
             vd_param.userId = userId;
             for (int k = 0; k < 6; k++) vd_param.pad[k] = VDA_SENTINEL;
 
-#ifdef __ORBIS__
+#if defined(__ORBIS__) && GHOSTPAD_ENABLE_ORBIS_SETPRIV_VDA_SENTINEL
             int32_t vda2 = scePadSetProcessPrivilege(0xDEADBEEF);
 #else
-            int32_t vda2 = scePadVirtualDeviceAddDevice(&vd_param, VIRTUAL_DEVICE_TYPE_DUALSENSE);
+            int32_t vda2 = scePadVirtualDeviceAddDevice(&vd_param, virtual_device_type);
 #endif
             gp_log("[Ghostpad] VDA(shellcore-authid) ret=0x%08x pad[0-3]=0x%08x 0x%08x 0x%08x 0x%08x\n",
                    (uint32_t)vda2,
@@ -773,18 +1103,22 @@ int main(void) {
 
             kernel_set_ucred_authid(mypid2, saved_authid2);
 
-            if (vda2 >= 0) {
-                padHandle = vda2;
-            } else {
-                for (int k = 0; k < 6; k++) {
-                    if (vd_param.pad[k] != VDA_SENTINEL && vd_param.pad[k] >= 0) {
-                        gp_log("[Ghostpad] VDA(shellcore) handle in pad[%d]=%d\n",
-                               k, vd_param.pad[k]);
-                        padHandle = vd_param.pad[k];
-                        break;
-                    }
+            for (int k = 0; k < 6; k++) {
+                if (vd_param.pad[k] != VDA_SENTINEL && vd_param.pad[k] > 0) {
+                    gp_log("[Ghostpad] VDA(shellcore) handle in pad[%d]=%d\n",
+                           k, vd_param.pad[k]);
+                    padHandle = vd_param.pad[k];
+                    break;
                 }
             }
+            if (vda2 >= 0 && padHandle < 0) {
+                vda_created_without_handle = 1;
+                vda_pending_mbus_bind = 1;
+                gp_log("[Ghostpad] VDA(shellcore) returned success/status 0x%08x but did not expose a handle; waiting for MBus/klog deviceId path\n",
+                       (uint32_t)vda2);
+            }
+        } else if (padHandle < 0 && vda_created_without_handle) {
+            gp_log("[Ghostpad] VDA created/accepted without local handle; skipping second VDA call to avoid duplicate orphan device\n");
         }
 
         if (padHandle >= 0) {
@@ -895,8 +1229,38 @@ int main(void) {
         }
     }
 
+    /* ---- If VDA already created a device but did not expose a local handle,
+     * wait for ESP32/klog automation to send GBND on the control port.  In this
+     * mode PT_ATTACH injection is usually unnecessary and often unavailable. */
+    if (padHandle < 0 && shellui_args == 0 && vda_pending_mbus_bind) {
+        gp_log("[Ghostpad] VDA device pending MBus bind; waiting for GBND on port %d before injection fallback\n", GP_CTRL_PORT);
+        for (int bw = 0; bw < 300 && padHandle < 0; bw++) { /* 60s */
+            uint64_t klog_dev = klog_take_pending_virtual_device();
+            if (klog_dev != 0) {
+                gp_log("[Ghostpad] klog prebind candidate: virt=0x%llx phys=0x%llx user=0x%x\n",
+                       (unsigned long long)klog_dev,
+                       (unsigned long long)g_phys_dev_id,
+                       (uint32_t)injectUserId);
+                trigger_auto_bind(klog_dev, g_phys_dev_id);
+                if (padHandle >= 0) {
+                    break;
+                }
+            }
+
+            if (ghostpad_ctrl_try_bind_once(ctrlFd, injectUserId) > 0) {
+                break;
+            }
+            usleep(200000);
+        }
+        if (padHandle >= 0) {
+            gp_log("[Ghostpad] GBND completed before injection; using direct VDI handle=0x%x\n", (uint32_t)padHandle);
+        } else {
+            gp_log("[Ghostpad] GBND wait ended without handle; skipping PT_ATTACH injection for VDA self-patch path\n");
+        }
+    }
+
     /* ---- Process injection — attempted after listen() so server is already reachable ---- */
-    if (padHandle < 0 && shellui_args == 0) {
+    if (padHandle < 0 && shellui_args == 0 && !vda_pending_mbus_bind) {
         if (ctrlFd >= 0) {
             gp_log("[Ghostpad] Waiting briefly for TYPE config on port %d\n", GP_CTRL_PORT);
             for (int tw = 0; tw < 25; tw++) {
@@ -921,7 +1285,10 @@ int main(void) {
             }
         }
 
-        /* Patch libScePad VDA in SceShellCore to bypass assignment-screen return */
+        /* Optional libScePad VDA patch in SceShellCore. This is no longer a
+         * pattern-guess patch: shellui_pad_patch_vda() validates the exact PS4
+         * vda_probe fingerprint before writing. */
+#if GHOSTPAD_ENABLE_RUNTIME_VDA_PATCH
         gp_log("[Ghostpad] PATH 2: patching libScePad VDA in SceShellCore (dry run first)...\n");
         int pdry = shellui_pad_patch_vda(1);
         gp_log("[Ghostpad] patch_vda dry: matches=%d\n", pdry);
@@ -931,10 +1298,10 @@ int main(void) {
             gp_log("[Ghostpad] patch_vda applied: patches=%d\n", p);
             notify("Ghostpad: VDA patch applied %d", p);
         }
+#else
+        gp_log("[Ghostpad] PATH 2: runtime VDA patch disabled (safe baseline)\n");
+#endif
 
-        gp_log("[Ghostpad] Attempting process injection...\n");
-        gp_log("[Ghostpad] Injection mode: force_virtual_vda=1 type=%d\n",
-               virtual_device_type);
         if (shellui_pad_inject(injectUserId, 1, virtual_device_type,
                                &shellui_pid, &shellui_args) == 0) {
             gp_log("[Ghostpad] Injection OK  pid=%d args=0x%lx\n",

@@ -7,6 +7,7 @@
 #include "cJSON.h"
 #include "hid_gamepad.h"
 #include "ble_hid_host.h"
+#include "wifi_ap.h"
 #include <string.h>
 #include <stdlib.h>
 #include "esp_wifi_ap_get_sta_list.h"
@@ -17,6 +18,22 @@
 #include <fcntl.h>
 
 static const char *TAG = "ghostpad_web";
+
+/* Forward declarations */
+static int check_port_open(const char *ip, int port, int timeout_ms);
+
+/* Background subnet scan state */
+static SemaphoreHandle_t s_scan_lock = NULL;
+static volatile bool     s_scan_running = false;
+static char             *s_scan_cache_json = NULL;
+
+static void ms_to_timeval(int timeout_ms, struct timeval *tv) {
+    if (timeout_ms < 0) {
+        timeout_ms = 0;
+    }
+    tv->tv_sec = timeout_ms / 1000;
+    tv->tv_usec = (timeout_ms % 1000) * 1000;
+}
 
 typedef struct __attribute__((packed)) {
     char     magic[4];   /* Must be "GPAD" */
@@ -29,6 +46,13 @@ typedef struct __attribute__((packed)) {
     uint8_t  r2;         /* R2 analog (0-255) */
     uint8_t  _pad[2];    /* Reserved, must be 0 */
 } GhostpadPacket;
+
+typedef struct __attribute__((packed)) {
+    char     magic[4];
+    uint32_t userId;
+    uint64_t virtualDevId;
+    uint64_t physicalDevId;
+} GhostpadBindPacket;
 
 static int console_tcp_socket = -1;
 static char current_console_ip[16] = "";
@@ -65,7 +89,8 @@ static int connect_to_console(const char *ip, int port, int timeout_ms) {
     FD_ZERO(&fdset);
     FD_SET(sock, &fdset);
 
-    struct timeval timeout = { .tv_sec = 0, .tv_usec = timeout_ms * 1000 };
+    struct timeval timeout;
+    ms_to_timeval(timeout_ms, &timeout);
     if (select(sock + 1, NULL, &fdset, NULL, &timeout) == 1) {
         int so_error;
         socklen_t len = sizeof(so_error);
@@ -82,6 +107,63 @@ static int connect_to_console(const char *ip, int port, int timeout_ms) {
 volatile gamepad_state_t g_gamepad = {0};
 
 static char local_ip[16] = "192.168.4.1";
+
+static void scan_subnet_background(void *arg) {
+    (void)arg;
+    char base[16];
+    strlcpy(base, local_ip, sizeof(base));
+    char *dot = strrchr(base, '.');
+    if (!dot) { s_scan_running = false; return; }
+    *dot = '\0';
+
+    cJSON *devices = cJSON_CreateArray();
+    for (int i = 1; i < 255; i++) {
+        /* Check if the server is still alive — yield every 16 IPs */
+        if (i % 16 == 0) vTaskDelay(pdMS_TO_TICKS(10));
+
+        char ip[20];
+        snprintf(ip, sizeof(ip), "%s.%d", base, i);
+
+        int is_elf  = check_port_open(ip, 9021, 20);
+        int is_klog = check_port_open(ip, 3232, 20);
+        int is_9090 = check_port_open(ip, 9090, 20);
+        int is_gpad = check_port_open(ip, 6967, 20);
+        int is_ctrl = check_port_open(ip, 6970, 20);
+
+        if (is_elf || is_klog || is_9090 || is_gpad || is_ctrl) {
+            cJSON *dev = cJSON_CreateObject();
+            cJSON_AddStringToObject(dev, "name", "PlayStation (Wi-Fi)");
+            cJSON_AddStringToObject(dev, "icon", "\xF0\x9F\x8E\xAE");
+            char desc[96];
+            snprintf(desc, sizeof(desc), "%s  |  ELF:%s  KLOG:%s  9090:%s  GPAD:%s  CTRL:%s",
+                     ip,
+                     is_elf ? "\xE2\x9C\x93" : "\xE2\x9C\x97",
+                     is_klog ? "\xE2\x9C\x93" : "\xE2\x9C\x97",
+                     is_9090 ? "\xE2\x9C\x93" : "\xE2\x9C\x97",
+                     is_gpad ? "\xE2\x9C\x93" : "\xE2\x9C\x97",
+                     is_ctrl ? "\xE2\x9C\x93" : "\xE2\x9C\x97");
+            cJSON_AddStringToObject(dev, "desc", desc);
+            cJSON_AddStringToObject(dev, "ip", ip);
+            cJSON_AddStringToObject(dev, "status", (is_gpad || is_ctrl) ? "online" : "pairing");
+            cJSON_AddItemToArray(devices, dev);
+        }
+    }
+
+    /* Serialize and cache */
+    char *json = cJSON_Print(devices);
+    cJSON_Delete(devices);
+
+    if (s_scan_lock) xSemaphoreTake(s_scan_lock, portMAX_DELAY);
+    if (s_scan_cache_json) free(s_scan_cache_json);
+    s_scan_cache_json = json;
+    s_scan_running = false;
+    if (s_scan_lock) xSemaphoreGive(s_scan_lock);
+
+    ESP_LOGI(TAG, "Subnet scan complete");
+    vTaskDelete(NULL);
+}
+
+
 static uint32_t uptime_sec = 0;
 
 static void reset_gamepad(void) {
@@ -121,7 +203,8 @@ static int check_port_open(const char *ip, int port, int timeout_ms) {
     FD_ZERO(&fdset);
     FD_SET(sock, &fdset);
 
-    struct timeval timeout = { .tv_sec = 0, .tv_usec = timeout_ms * 1000 };
+    struct timeval timeout;
+    ms_to_timeval(timeout_ms, &timeout);
     if (select(sock + 1, NULL, &fdset, NULL, &timeout) == 1) {
         int so_error;
         socklen_t len = sizeof(so_error);
@@ -135,6 +218,10 @@ static int check_port_open(const char *ip, int port, int timeout_ms) {
 }
 
 static void scan_connected_stations(cJSON *devices) {
+    if (!ghostpad_wifi_is_ap_started()) {
+        return;
+    }
+
     wifi_sta_list_t wifi_sta_list;
     wifi_sta_mac_ip_list_t netif_sta_list;
 
@@ -177,52 +264,13 @@ static void scan_connected_stations(cJSON *devices) {
     }
 }
 
-static void scan_subnet(cJSON *devices) {
-    char base[16];
-    strlcpy(base, local_ip, sizeof(base));
-
-    char *dot = strrchr(base, '.');
-    if (!dot) return;
-    *dot = '\0';
-
-    for (int i = 1; i < 255; i++) {
-        char ip[20];
-        snprintf(ip, sizeof(ip), "%s.%d", base, i);
-
-        int is_elf  = check_port_open(ip, 9021, 50);
-        int is_klog = check_port_open(ip, 3232, 50);
-        int is_9090 = check_port_open(ip, 9090, 50);
-        int is_gpad = check_port_open(ip, 6967, 50);
-        int is_ctrl = check_port_open(ip, 6970, 50);
-
-        if (is_elf || is_klog || is_9090 || is_gpad || is_ctrl) {
-            cJSON *dev = cJSON_CreateObject();
-            cJSON_AddStringToObject(dev, "name", "PlayStation (Wi-Fi)");
-            cJSON_AddStringToObject(dev, "icon", "🎮");
-
-            char desc[96];
-            snprintf(desc, sizeof(desc), "%s  |  ELF:%s  KLOG:%s  9090:%s  GPAD:%s  CTRL:%s",
-                     ip,
-                     is_elf ? "✓" : "✗",
-                     is_klog ? "✓" : "✗",
-                     is_9090 ? "✓" : "✗",
-                     is_gpad ? "✓" : "✗",
-                     is_ctrl ? "✓" : "✗");
-            cJSON_AddStringToObject(dev, "desc", desc);
-            cJSON_AddStringToObject(dev, "ip", ip);
-            cJSON_AddStringToObject(dev, "status", (is_gpad || is_ctrl) ? "online" : "pairing");
-            cJSON_AddItemToArray(devices, dev);
-        }
-    }
-}
-
 static esp_err_t scan_handler(httpd_req_t *req) {
     cJSON *root = cJSON_CreateObject();
     cJSON *devices = cJSON_AddArrayToObject(root, "devices");
 
     cJSON *usb = cJSON_CreateObject();
     cJSON_AddStringToObject(usb, "name", "PS5 (USB)");
-    cJSON_AddStringToObject(usb, "icon", "🔗");
+    cJSON_AddStringToObject(usb, "icon", "\xF0\x9F\x94\x97");
     cJSON_AddStringToObject(usb, "desc", "Connected via USB HID");
     cJSON_AddStringToObject(usb, "ip", "usb:0");
     cJSON_AddStringToObject(usb, "status", "online");
@@ -230,10 +278,34 @@ static esp_err_t scan_handler(httpd_req_t *req) {
 
     scan_connected_stations(devices);
 
-    // Fall back to subnet scan only if not already connected to a console
-    if (cJSON_GetArraySize(devices) <= 1 && console_tcp_socket < 0) {
-        scan_subnet(devices);
+    bool have_console = cJSON_GetArraySize(devices) > 1 || console_tcp_socket >= 0;
+
+    /* Use cached scan results when available */
+    if (s_scan_lock) xSemaphoreTake(s_scan_lock, portMAX_DELAY);
+
+    if (!have_console && s_scan_cache_json) {
+        cJSON *cached = cJSON_Parse(s_scan_cache_json);
+        if (cached) {
+            int n = cJSON_GetArraySize(cached);
+            for (int i = 0; i < n; i++) {
+                cJSON *item = cJSON_DetachItemFromArray(cached, 0);
+                cJSON_AddItemToArray(devices, item);
+            }
+            cJSON_Delete(cached);
+        }
     }
+
+    /* Start background scan if needed and not already running */
+    if (!have_console && !s_scan_running) {
+        s_scan_running = true;
+        if (s_scan_cache_json) { free(s_scan_cache_json); s_scan_cache_json = NULL; }
+        xSemaphoreGive(s_scan_lock);
+        xTaskCreate(scan_subnet_background, "scan_subnet", 4096, NULL, 2, NULL);
+    } else {
+        if (s_scan_lock) xSemaphoreGive(s_scan_lock);
+    }
+
+    cJSON_AddBoolToObject(root, "scan_running", s_scan_running);
 
     const char *json = cJSON_Print(root);
     httpd_resp_set_type(req, "application/json");
@@ -245,12 +317,15 @@ static esp_err_t scan_handler(httpd_req_t *req) {
 
 static esp_err_t status_handler(httpd_req_t *req) {
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "wifi_ssid", "Ghostpad-ESP32");
+    cJSON_AddStringToObject(root, "wifi_ssid", ghostpad_wifi_active_ssid());
+    cJSON_AddStringToObject(root, "wifi_mode", ghostpad_wifi_mode_name());
     cJSON_AddStringToObject(root, "ip", local_ip);
-
-    wifi_sta_list_t sta_list;
-    esp_err_t err = esp_wifi_ap_get_sta_list(&sta_list);
-    cJSON_AddNumberToObject(root, "clients", (err == ESP_OK) ? sta_list.num : 0);
+#if CONFIG_GHOSTPAD_ENABLE_MDNS
+    cJSON_AddStringToObject(root, "mdns", CONFIG_GHOSTPAD_WIFI_HOSTNAME ".local");
+#else
+    cJSON_AddStringToObject(root, "mdns", "");
+#endif
+    cJSON_AddNumberToObject(root, "clients", ghostpad_wifi_get_ap_client_count());
 
     uptime_sec++;
     cJSON_AddNumberToObject(root, "uptime", uptime_sec);
@@ -469,8 +544,9 @@ static esp_err_t ble_scan_handler(httpd_req_t *req) {
         return ESP_OK;
     }
 
-    /* Short busy-wait so the first few advertisements are caught */
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    /* Pairing controllers may advertise sparsely; wait long enough to catch
+     * the active scan response/name before returning results to the dashboard. */
+    vTaskDelay(pdMS_TO_TICKS(6500));
     ble_hid_host_stop_scan();
 
     char *results_json = ble_hid_host_get_scan_results_json();
@@ -495,6 +571,11 @@ static esp_err_t ble_status_handler(httpd_req_t *req) {
     cJSON_AddBoolToObject(root, "connected",   ble_hid_host_is_connected());
     cJSON_AddStringToObject(root, "device_name", ble_hid_host_device_name());
     cJSON_AddStringToObject(root, "device_addr", ble_hid_host_device_addr());
+    char *debug_json = ble_hid_host_get_debug_json();
+    if (debug_json) {
+        cJSON_AddRawToObject(root, "debug", debug_json);
+        free(debug_json);
+    }
 
     const char *json = cJSON_Print(root);
     httpd_resp_set_type(req, "application/json");
@@ -790,6 +871,11 @@ static TaskHandle_t s_klog_task = NULL;
 static httpd_handle_t s_klog_hd = NULL;
 static int s_klog_client_fd = -1;
 static bool s_klog_running = false;
+static char s_klog_console_ip[16] = "";
+static uint32_t s_klog_user_id = 0;
+static uint64_t s_klog_last_virtual_dev_id = 0;
+static char s_klog_line[1024];
+static size_t s_klog_line_len = 0;
 
 /* Work item queued to HTTPD worker to send data over the WS */
 struct klog_work_msg {
@@ -811,6 +897,113 @@ static void klog_work_cb(void *arg) {
     free(m);
 }
 
+static const char *gp_strcasestr_local(const char *haystack, const char *needle) {
+    if (!haystack || !needle) return NULL;
+    size_t nlen = strlen(needle);
+    if (nlen == 0) return haystack;
+    for (; *haystack; haystack++) {
+        size_t i;
+        for (i = 0; i < nlen; i++) {
+            char h = haystack[i];
+            char n = needle[i];
+            if (h >= 'A' && h <= 'Z') h += 32;
+            if (n >= 'A' && n <= 'Z') n += 32;
+            if (h != n) break;
+        }
+        if (i == nlen) return haystack;
+    }
+    return NULL;
+}
+
+static uint64_t parse_hex64_local(const char *p) {
+    uint64_t v = 0;
+    if (!p) return 0;
+    while (*p) {
+        char c = *p;
+        if (c >= '0' && c <= '9') v = (v << 4) | (uint64_t)(c - '0');
+        else if (c >= 'a' && c <= 'f') v = (v << 4) | (uint64_t)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') v = (v << 4) | (uint64_t)(c - 'A' + 10);
+        else break;
+        p++;
+    }
+    return v;
+}
+
+static int send_gbnd_to_payload(uint64_t virt_id, uint64_t phys_id) {
+    if (s_klog_console_ip[0] == '\0' || virt_id == 0) return -1;
+    int sock = connect_to_console(s_klog_console_ip, 6970, 1000);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "GBND connect to %s:6970 failed", s_klog_console_ip);
+        return -1;
+    }
+
+    GhostpadBindPacket pkt;
+    memset(&pkt, 0, sizeof(pkt));
+    memcpy(pkt.magic, "GBND", 4);
+    pkt.userId = s_klog_user_id;
+    pkt.virtualDevId = virt_id;
+    pkt.physicalDevId = phys_id;
+
+    ssize_t n = send(sock, &pkt, sizeof(pkt), 0);
+    close(sock);
+    ESP_LOGI(TAG, "GBND sent virt=0x%llx phys=0x%llx user=0x%08x bytes=%d",
+             (unsigned long long)virt_id,
+             (unsigned long long)phys_id,
+             (unsigned)s_klog_user_id,
+             (int)n);
+    return (n == (ssize_t)sizeof(pkt)) ? 0 : -1;
+}
+
+static void parse_klog_line_for_gbnd(const char *line) {
+    if (!line || !*line) return;
+
+    const char *uid = gp_strcasestr_local(line, "using userId = 0x");
+    if (uid) {
+        s_klog_user_id = (uint32_t)parse_hex64_local(uid + strlen("using userId = 0x"));
+        ESP_LOGI(TAG, "klog learned userId=0x%08x", (unsigned)s_klog_user_id);
+        return;
+    }
+
+    if (!gp_strcasestr_local(line, "DEVICE_ADDED") &&
+        !gp_strcasestr_local(line, "SCE_MBUS_EVENT_DEVICE_ADDED")) {
+        return;
+    }
+
+    const char *idp = gp_strcasestr_local(line, "DeviceId:0x");
+    size_t skip = strlen("DeviceId:0x");
+    if (!idp) {
+        idp = gp_strcasestr_local(line, "deviceId=0x");
+        skip = strlen("deviceId=0x");
+    }
+    if (!idp) return;
+
+    uint64_t dev_id = parse_hex64_local(idp + skip);
+    if (dev_id == 0 || dev_id == s_klog_last_virtual_dev_id) return;
+
+    if (gp_strcasestr_local(line, "type:4") ||
+        gp_strcasestr_local(line, "REMOTEPLAY") ||
+        gp_strcasestr_local(line, "userId=0xffffffff")) {
+        s_klog_last_virtual_dev_id = dev_id;
+        ESP_LOGI(TAG, "klog detected virtual deviceId=0x%llx; sending GBND",
+                 (unsigned long long)dev_id);
+        send_gbnd_to_payload(dev_id, 0);
+    }
+}
+
+static void parse_klog_chunk_for_gbnd(const uint8_t *buf, int len) {
+    if (!buf || len <= 0) return;
+    for (int i = 0; i < len; i++) {
+        char c = (char)buf[i];
+        if (c == '\n' || s_klog_line_len >= sizeof(s_klog_line) - 1) {
+            s_klog_line[s_klog_line_len] = '\0';
+            parse_klog_line_for_gbnd(s_klog_line);
+            s_klog_line_len = 0;
+        } else if (c != '\r') {
+            s_klog_line[s_klog_line_len++] = c;
+        }
+    }
+}
+
 static void klog_reader_task(void *arg) {
     uint8_t buf[512];
     ESP_LOGI(TAG, "klog reader task started (fd=%d)", s_klog_tcp_fd);
@@ -824,6 +1017,7 @@ static void klog_reader_task(void *arg) {
         if (s == 0) continue;
         int n = read(s_klog_tcp_fd, buf, sizeof(buf));
         if (n <= 0) break;
+        parse_klog_chunk_for_gbnd(buf, n);
         ESP_LOGI(TAG, "klog read %d bytes from TCP", n);
         struct klog_work_msg *m = malloc(sizeof(*m) + n);
         if (!m) continue;
@@ -885,8 +1079,12 @@ static esp_err_t klog_ws_handler(httpd_req_t *req) {
             cJSON *ip = cJSON_GetObjectItem(json, "ip");
             if (ip && cJSON_IsString(ip) && strlen(ip->valuestring) > 0) {
                 klog_stop();
-                ESP_LOGI(TAG, "klog connecting to %s:3232", ip->valuestring);
-                int sock = connect_to_console(ip->valuestring, 3232, 3000);
+                strlcpy(s_klog_console_ip, ip->valuestring, sizeof(s_klog_console_ip));
+                s_klog_user_id = 0;
+                s_klog_last_virtual_dev_id = 0;
+                s_klog_line_len = 0;
+                ESP_LOGI(TAG, "klog connecting to %s:3434", ip->valuestring);
+                int sock = connect_to_console(ip->valuestring, 3434, 3000);
                 if (sock < 0) {
                     ESP_LOGE(TAG, "klog connection failed");
                     httpd_ws_frame_t err = {
@@ -896,7 +1094,7 @@ static esp_err_t klog_ws_handler(httpd_req_t *req) {
                     };
                     httpd_ws_send_frame(req, &err);
                 } else {
-                    ESP_LOGI(TAG, "klog connected to %s:3232", ip->valuestring);
+                    ESP_LOGI(TAG, "klog connected to %s:3434", ip->valuestring);
                     s_klog_tcp_fd = sock;
                     s_klog_hd = req->handle;
                     s_klog_client_fd = httpd_req_to_sockfd(req);
@@ -934,10 +1132,10 @@ static const httpd_uri_t klog_ws_uri = {
 esp_err_t web_server_start(void) {
     reset_gamepad();
 
-    esp_netif_ip_info_t ip_info;
-    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-    if (netif && esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
-        inet_ntop(AF_INET, &ip_info.ip, local_ip, sizeof(local_ip));
+    s_scan_lock = xSemaphoreCreateMutex();
+
+    if (ghostpad_wifi_get_primary_ip(local_ip, sizeof(local_ip)) != ESP_OK) {
+        strlcpy(local_ip, "0.0.0.0", sizeof(local_ip));
     }
 
     httpd_handle_t server = NULL;
