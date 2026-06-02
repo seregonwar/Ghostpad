@@ -1,29 +1,29 @@
 # Ghostpad Bridge - ESP32-P4-WIFI6
 
-Trasforma il Waveshare ESP32-P4-WIFI6 in un bridge per il controllo remoto della PS5.
+Turns the Waveshare ESP32-P4-WIFI6 into a bridge for PS5 remote control.
 
-## Architettura
+## Architecture
 
 ```
-Telefono (Browser) ---WiFi---> ESP32-P4 ---USB HID---> PS5
+Phone (Browser) ---WiFi---> ESP32-P4 ---USB HID---> PS5
                                     |
-                          Ghostpad Payload (modificato)
-                          legge /dev/klog direttamente
+                          Ghostpad Payload (modified)
+                          reads /dev/klog directly
 ```
 
-- **ESP32-P4**: Crea un AP WiFi, serve un'interfaccia web con joystick virtuali, traduce l'input in report HID DualSense via USB TinyUSB
-- **PS5**: Il Ghostpad payload modificato legge /dev/klog direttamente (senza klog server TCP separato) usando la logica estratta da `klog_reader.c`
+- **ESP32-P4**: Creates a WiFi AP, serves a web interface with virtual joysticks, translates input into DualSense HID reports via USB TinyUSB
+- **PS5**: The modified Ghostpad payload reads /dev/klog directly (without a separate klog TCP server) using logic extracted from `klog_reader.c`
 
-## Requisiti
+## Requirements
 
 - [ESP-IDF v5.3+](https://docs.espressif.com/projects/esp-idf/en/latest/esp32p4/get-started/)
 - Waveshare ESP32-P4-WIFI6 board
-- USB-C <=> USB-A per collegamento alla PS5
+- USB-C <=> USB-A cable for connecting to the PS5
 
 ## Setup
 
 ```bash
-# Clona ESP-IDF (se non già presente)
+# Clone ESP-IDF (if not already present)
 mkdir -p ~/esp
 cd ~/esp
 git clone --recursive https://github.com/espressif/esp-idf.git
@@ -31,60 +31,60 @@ cd esp-idf
 ./install.sh esp32p4
 source export.sh
 
-# Build del firmware
+# Build firmware
 cd /path/to/esp32-ghostpad
 idf.py set-target esp32p4
-idf.py menuconfig  # configurazioni opzionali
+idf.py menuconfig  # optional configuration
 idf.py build
 
 # Flash
 idf.py -p /dev/ttyACM0 flash monitor
 ```
 
-## Connessione
+## Connection
 
-1. La scheda crea l'AP WiFi: **Ghostpad-ESP32** / **ghostpad123**
-2. Collega il telefono all'AP
-3. Apri http://192.168.4.1 nel browser
-4. Collega ESP32 alla PS5 via USB
-5. Usa l'interfaccia web per controllare la PS5
+1. The board creates the WiFi AP: **Ghostpad-ESP32** / **ghostpad123**
+2. Connect your phone to the AP
+3. Open http://192.168.4.1 in the browser
+4. Connect ESP32 to PS5 via USB
+5. Use the web interface to control the PS5
 
-### Connessione PS4/PS5 alla rete ESP32
+### Connecting PS4/PS5 to the ESP32 network
 
-Se colleghi direttamente la console all'AP **Ghostpad-ESP32**, nella procedura rete della PlayStation lascia il proxy su **Non usare**.
+If you connect the console directly to the **Ghostpad-ESP32** AP, leave the proxy set to **Do Not Use** in the PlayStation network setup.
 
-L'ESP32 pubblica `192.168.4.1` come gateway/DNS locale per rendere stabile la rete privata, ma non fornisce accesso Internet e non e' un server proxy HTTP. Inserire `192.168.4.1` nel campo proxy fa comparire la console nella lista dei client WiFi, ma il test della PlayStation fallisce e puo' riportarti alla schermata del proxy.
+The ESP32 advertises `192.168.4.1` as the gateway/local DNS to make the private network stable, but it does not provide Internet access and is not an HTTP proxy server. Entering `192.168.4.1` in the proxy field makes the console appear in the WiFi client list, but the PlayStation connectivity test fails and may send you back to the proxy screen.
 
-Configurazione consigliata:
+Recommended configuration:
 
-1. IP: automatico
-2. DHCP Host Name: non specificare
-3. DNS: automatico
-4. MTU: automatico
-5. Proxy: **Non usare**
+1. IP: automatic
+2. DHCP Host Name: do not specify
+3. DNS: automatic
+4. MTU: automatic
+5. Proxy: **Do Not Use**
 
-Il test Internet puo' risultare non riuscito se l'ESP32 non ha upstream, ma la rete locale resta valida per Ghostpad.
+The Internet test may fail if the ESP32 has no upstream, but the local network remains valid for Ghostpad.
 
-## Modifica Ghostpad Payload (PS5)
+## Modifying the Ghostpad Payload (PS5)
 
-Per integrare la lettura diretta di `/dev/klog` nel payload Ghostpad:
+To integrate direct `/dev/klog` reading into the Ghostpad payload:
 
-1. Copia `klog_reader.h` e `klog_reader.c` nella directory `payload/`
-2. Aggiungi `klog_reader.c` nel `Makefile` (riga `SRC`)
-3. Avvia un thread con `klog_reader_start("/dev/klog", 3232)`
-4. Il payload ora serve i log internamente senza necessità di `klogsrv.elf`
+1. Copy `klog_reader.h` and `klog_reader.c` into the `payload/` directory
+2. Add `klog_reader.c` to the `Makefile` (`SRC` line)
+3. Start a thread with `klog_reader_start("/dev/klog", 3232)`
+4. The payload now serves logs internally without needing `klogsrv.elf`
 
-## Struttura file
+## File structure
 
 ```
 main/
 ├── CMakeLists.txt
 ├── main.c            # Entry point: init WiFi, web, USB HID
-├── wifi_ap.c/h       # Configurazione WiFi Access Point
-├── web_server.c/h    # HTTP server + WebSocket per GUI
-├── web_gui.h         # Interfaccia controller (HTML/JS embedded)
-├── hid_gamepad.c/h   # Emulazione USB HID DualSense via TinyUSB
-├── klog_reader.c/h   # Logica lettura /dev/klog (per PS5)
+├── wifi_ap.c/h       # WiFi Access Point configuration
+├── web_server.c/h    # HTTP server + WebSocket for GUI
+├── web_gui.h         # Controller interface (HTML/JS embedded)
+├── hid_gamepad.c/h   # DualSense USB HID emulation via TinyUSB
+├── klog_reader.c/h   # /dev/klog reading logic (for PS5)
 CMakeLists.txt
 sdkconfig
 ```
