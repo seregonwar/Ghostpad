@@ -1,0 +1,5 @@
+# Copy this file to sdkconfig.private.defaults and fill in your credentials.
+# This file is NOT tracked by git (see .gitignore).
+
+CONFIG_GHOSTPAD_STA_SSID="YOUR_WIFI_SSID"
+CONFIG_GHOSTPAD_STA_PASSWORD="YOUR_WIFI_PASSWORD"
