@@ -54,6 +54,7 @@
 #define REPORT_CAP      (192u * 1024u)
 #define READ_SMALL      256u
 #define READ_WINDOW     4096u
+#define HID_WINDOW      1024u
 #define MAX_PIDS        8u
 #define MAX_SYMBOL_NAME 64u
 
@@ -511,6 +512,52 @@ static const ProbeSymbol g_mbus_symbols[] = {
     {"sceMbusClose", 0},
 };
 
+static const ProbeSymbol g_bt_symbols[] = {
+    /* Resolve-only sweep. These names intentionally cover multiple possible
+     * Sony naming layers because PSDevWiki documents Bluetooth/DS4 behavior,
+     * but not public exports for the pairing stack.  Do not call any of these
+     * until a later probe confirms prototype/side effects. */
+    {"sceBtInit", 0},
+    {"sceBtTerm", 0},
+    {"sceBtStartInquiry", 0},
+    {"sceBtCancelInquiry", 0},
+    {"sceBtGetInquiryResult", 0},
+    {"sceBtRegisterEventCallback", 0},
+    {"sceBtUnregisterEventCallback", 0},
+    {"sceBtGetLocalBdAddress", 0},
+    {"sceBtGetLocalDeviceAddress", 0},
+    {"sceBtGetDeviceInfo", 0},
+    {"sceBtGetDeviceList", 0},
+    {"sceBtGetPairedDeviceList", 0},
+    {"sceBtGetConnectedDeviceList", 0},
+    {"sceBtPairing", 0},
+    {"sceBtPairDevice", 0},
+    {"sceBtUnpairDevice", 0},
+    {"sceBtConnectDevice", 0},
+    {"sceBtDisconnectDevice", 0},
+    {"sceBtSetPairingMode", 0},
+    {"sceBtSetDiscoverable", 0},
+    {"sceBtSetConnectable", 0},
+    {"sceBtSetVisibility", 0},
+    {"sceBluetoothInit", 0},
+    {"sceBluetoothTerm", 0},
+    {"sceBluetoothStartInquiry", 0},
+    {"sceBluetoothCancelInquiry", 0},
+    {"sceBluetoothGetDeviceInfo", 0},
+    {"sceBluetoothGetDeviceList", 0},
+    {"sceBluetoothPairDevice", 0},
+    {"sceBluetoothConnectDevice", 0},
+    {"sceBluetoothDisconnectDevice", 0},
+    {"sceHidControlInit", 0},
+    {"sceHidControlTerm", 0},
+    {"sceHidControlGetDeviceInfo", 0},
+    {"sceHidControlGetDeviceList", 0},
+    {"sceHidControlConnect", 0},
+    {"sceHidControlDisconnect", 0},
+    {"sceHidControlRegisterCallback", 0},
+    {"sceHidControlUnregisterCallback", 0},
+};
+
 static const ProbeSymbol g_kernel_symbols[] = {
     {"pthread_create", 0},
     {"usleep", 0},
@@ -520,6 +567,20 @@ static const ProbeSymbol g_kernel_symbols[] = {
 static const ProbeLibrary g_libraries[] = {
     {"libScePad",    g_pad_symbols,    sizeof(g_pad_symbols) / sizeof(g_pad_symbols[0])},
     {"libSceMbus",   g_mbus_symbols,   sizeof(g_mbus_symbols) / sizeof(g_mbus_symbols[0])},
+
+    /* Bluetooth/HID stack candidates.  PSDevWiki documents DS4-BT behavior and
+     * the internal libSceHidControl sysmodule, but names/exports vary by FW;
+     * keep this resolve-only and report missing libraries explicitly. */
+    {"libSceHidControl", g_bt_symbols, sizeof(g_bt_symbols) / sizeof(g_bt_symbols[0])},
+    {"libSceBluetooth",  g_bt_symbols, sizeof(g_bt_symbols) / sizeof(g_bt_symbols[0])},
+    {"libSceBt",         g_bt_symbols, sizeof(g_bt_symbols) / sizeof(g_bt_symbols[0])},
+    {"libSceBtHid",      g_bt_symbols, sizeof(g_bt_symbols) / sizeof(g_bt_symbols[0])},
+    {"libSceHid",        g_bt_symbols, sizeof(g_bt_symbols) / sizeof(g_bt_symbols[0])},
+    {"libSceMove",       g_bt_symbols, sizeof(g_bt_symbols) / sizeof(g_bt_symbols[0])},
+    {"libScePadTracker", g_bt_symbols, sizeof(g_bt_symbols) / sizeof(g_bt_symbols[0])},
+    {"libSceUsbd",       g_bt_symbols, sizeof(g_bt_symbols) / sizeof(g_bt_symbols[0])},
+    {"libSceRemoteplay", g_bt_symbols, sizeof(g_bt_symbols) / sizeof(g_bt_symbols[0])},
+
     {"libkernel",   g_kernel_symbols, sizeof(g_kernel_symbols) / sizeof(g_kernel_symbols[0])},
 };
 
@@ -582,12 +643,45 @@ scan_vda_candidates(const uint8_t *buf, size_t len)
 }
 
 static void
+scan_hidcontrol_get_device_info(const uint8_t *buf, size_t len)
+{
+    if (!buf || len == 0) return;
+    reportf("  HIDCONTROL_SCAN len=%zu note=read_only_no_calls\n", len);
+
+    for (size_t off = 0; off < len; off += 16) {
+        char hex[3 * 16 + 1];
+        size_t take = len - off;
+        if (take > 16) take = 16;
+        hex_bytes(hex, sizeof(hex), buf + off, take);
+        reportf("  HIDCONTROL_HEX +0x%03zx %s\n", off, hex);
+    }
+
+    for (size_t i = 0; i + 8 < len; i++) {
+        if (buf[i] == 0xE8) {
+            int32_t rel = (int32_t)((uint32_t)buf[i + 1] |
+                                     ((uint32_t)buf[i + 2] << 8) |
+                                     ((uint32_t)buf[i + 3] << 16) |
+                                     ((uint32_t)buf[i + 4] << 24));
+            reportf("  HIDCONTROL_CALL_CANDIDATE off=0x%zx rel32=0x%08x target_off=0x%zx\n",
+                    i, (uint32_t)rel, (size_t)(i + 5 + rel));
+        }
+        if ((buf[i] == 0x74 || buf[i] == 0x75 || buf[i] == 0x7c || buf[i] == 0x7d ||
+             buf[i] == 0x7e || buf[i] == 0x7f) && i + 1 < len) {
+            int8_t rel8 = (int8_t)buf[i + 1];
+            reportf("  HIDCONTROL_BRANCH8_CANDIDATE off=0x%zx op=0x%02x rel8=%d target_off=0x%zx\n",
+                    i, buf[i], (int)rel8, (size_t)(i + 2 + rel8));
+        }
+    }
+}
+
+static void
 probe_symbol(pid_t pid, const char *proc_name, const char *lib_name,
              const ProbeSymbol *sym, uint32_t lib_handle)
 {
     intptr_t addr = resolve_sym(pid, lib_handle, sym->name);
     uint8_t small[READ_SMALL];
     uint8_t window[READ_WINDOW];
+    uint8_t hid_window[HID_WINDOW];
     char hex[3 * 32 + 1];
     int got_small = -1;
     int got_window = -1;
@@ -621,6 +715,19 @@ probe_symbol(pid_t pid, const char *proc_name, const char *lib_name,
             scan_vda_candidates(window, sizeof(window));
         } else {
             reportf("  READ4K failed errno=%d\n", errno);
+        }
+    }
+
+    if (strcmp(lib_name, "libSceHidControl") == 0 &&
+        strcmp(sym->name, "sceHidControlGetDeviceInfo") == 0) {
+        memset(hid_window, 0, sizeof(hid_window));
+        int got_hid = read_remote(pid, addr, hid_window, sizeof(hid_window));
+        if (got_hid == 0) {
+            reportf("  HASH1K fnv1a64=0x%016llx\n",
+                    (unsigned long long)fnv1a64(hid_window, sizeof(hid_window)));
+            scan_hidcontrol_get_device_info(hid_window, sizeof(hid_window));
+        } else {
+            reportf("  HIDCONTROL_READ1K failed errno=%d\n", errno);
         }
     }
 }
@@ -757,9 +864,21 @@ main(void)
     reportf("SAFETY read_only=1 writes_target_memory=0 installs_hooks=0\n");
     reportf("MBUS_SYMBOL_SWEEP resolve_only=1 candidate_count=%u\n",
             (unsigned)(sizeof(g_mbus_symbols) / sizeof(g_mbus_symbols[0])));
+    reportf("BT_SYMBOL_SWEEP resolve_only=1 candidate_count=%u note=no_calls_no_patches\n",
+            (unsigned)(sizeof(g_bt_symbols) / sizeof(g_bt_symbols[0])));
 
     probe_process("SceShellCore");
     probe_process("SceShellUI");
+
+    /* Extra process names are best-effort.  Most retail builds appear to route
+     * controller events through ShellCore/ShellUI and MBus, but probing these
+     * thread names helps confirm whether a separate BT/HID service is visible. */
+    probe_process("SceSysCore");
+    probe_process("SceHidControl");
+    probe_process("SceBt");
+    probe_process("SceBluetooth");
+    probe_process("SceBtStack");
+    probe_process("SceBluetoothService");
 
     save_report_files();
     notify_user("Ghostpad VDA Probe: report ready on TCP 6975 and /data/ghostpad");
