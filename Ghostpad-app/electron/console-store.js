@@ -25,13 +25,14 @@ function listConsoles(userDataPath) {
   return readConsoles(userDataPath);
 }
 
-function addConsole(userDataPath, { name, ip, port = 6967 }) {
+function addConsole(userDataPath, { name, ip, port = 6967, elfLoaderPort }) {
   const consoles = readConsoles(userDataPath);
   const entry = {
     id: randomUUID(),
     name: name || `PS5 (${ip})`,
     ip,
     port,
+    elfLoaderPort: elfLoaderPort || undefined,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };

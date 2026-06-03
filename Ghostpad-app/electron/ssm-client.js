@@ -41,7 +41,7 @@ function shutdown(ip) { return sendSsmCommand(ip, "SHUTDOWN", 8000); }
 function restMode(ip) { return sendSsmCommand(ip, "RESTMODE", 8000); }
 function ejectDisc(ip) { return sendSsmCommand(ip, "EJECT"); }
 
-function deploySsmElf(ip, elfPath) {
+function deploySsmElf(ip, elfPath, elfLoaderPort) {
   return new Promise((resolve) => {
     let data;
     try {
@@ -50,6 +50,8 @@ function deploySsmElf(ip, elfPath) {
       resolve({ ok: false, message: `Cannot read ELF: ${err.message}` });
       return;
     }
+
+    const port = elfLoaderPort || ELFLDR_PORT;
 
     const socket = new net.Socket();
     let settled = false;
@@ -64,7 +66,7 @@ function deploySsmElf(ip, elfPath) {
     socket.once("timeout", () => finish({ ok: false, message: "Deploy timeout" }));
     socket.once("error", (err) => finish({ ok: false, message: err.message }));
 
-    socket.connect(ELFLDR_PORT, ip, () => {
+    socket.connect(port, ip, () => {
       socket.write(data, () => {
         socket.end();
         finish({ ok: true, message: `Deployed ${data.length} bytes` });

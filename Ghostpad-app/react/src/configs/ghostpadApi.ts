@@ -5,6 +5,7 @@ export interface SavedConsole {
   name: string;
   ip: string;
   port: number;
+  elfLoaderPort?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -51,6 +52,7 @@ export interface ConnectOptions {
   port?: number;
   deployIfNeeded?: boolean;
   forceDeploy?: boolean;
+  elfLoaderPort?: number;
 }
 
 export interface GhostpadApi {
@@ -72,10 +74,11 @@ export interface GhostpadApi {
     name: string;
     ip: string;
     port?: number;
+    elfLoaderPort?: number;
   }) => Promise<SavedConsole>;
   updateConsole: (
     id: string,
-    patch: Partial<Pick<SavedConsole, "name" | "ip" | "port">>
+    patch: Partial<Pick<SavedConsole, "name" | "ip" | "port" | "elfLoaderPort">>
   ) => Promise<SavedConsole | null>;
   deleteConsole: (id: string) => Promise<{ ok: boolean }>;
   openCaptureWindow: (payload: {
@@ -89,6 +92,7 @@ export interface GhostpadApi {
   deployPayload: (payload: {
     ip: string;
     forceDeploy?: boolean;
+    elfLoaderPort?: number;
   }) => Promise<DeployResult>;
   getDeployStatus: () => Promise<DeployStatus>;
   sendType: (ip: string, deviceType?: number) => Promise<{ ok: boolean }>;

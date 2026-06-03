@@ -4,17 +4,16 @@ const fs = require("fs");
 const GPAD_PORT = 6967;
 const ELF_LOAD_PORT = 9021;
 const CTRL_PORT = 6970;
-const KLOG_PORT = 3232;
+const KLOG_PORT = 3434;
 
 const RE_DEV_PHYS =
-  /DEVICE_ADDED.*?deviceId=0x([0-9a-f]+).*?capabilityBattery:1/i;
+  /DEVICE_ADDED|DeviceAdded.*?(?:DeviceId|DeviceID|deviceId|deviceID|device id)[:=]\s*0x([0-9a-f]+)/i;
 const RE_DEV_VIRT =
-  /DEVICE_ADDED.*?deviceId=0x([0-9a-f]+).*?capabilityBattery:0/i;
-const RE_DEV_VIRT2 =
-  /DeviceAdded.*?deviceId=0x([0-9a-f]+).*?userId=0xffffffff/i;
+  /DEVICE_ADDED|DeviceAdded|GetUnassignedDeviceInfo.*?(?:DeviceId|DeviceID|deviceId|deviceID|device id)[:=]\s*0x([0-9a-f]+)/i;
 const RE_OWNER =
   /DEVICE_OWNER_CHANGED.*?deviceId=0x([0-9a-f]+).*?userId=0x([0-9a-f]+)/i;
-const RE_ADOPTED = /adopted deviceId for direct/i;
+const RE_ADOPTED = /VDI active|padHandle/i;
+const RE_BIND_OK = /force_bind.*ret=0|MBusBindDeviceWithUserId.*ret=0/i;
 
 let activeWatcher = null;
 let lastDeployStatus = {
@@ -71,10 +70,12 @@ async function waitPort(host, port, deadlineMs) {
   return false;
 }
 
-async function deployElf(host, elfPath) {
+async function deployElf(host, elfPath, elfLoaderPort) {
   if (!elfPath || !fs.existsSync(elfPath)) {
     return { ok: false, message: `ELF missing at ${elfPath || "(not set)"}` };
   }
+
+  const port = elfLoaderPort || ELF_LOAD_PORT;
 
   let data;
   try {
@@ -89,10 +90,10 @@ async function deployElf(host, elfPath) {
     socket.once("error", (err) =>
       resolve({
         ok: false,
-        message: `Send to ${host}:${ELF_LOAD_PORT}: ${err.message}`,
+        message: `Send to ${host}:${port}: ${err.message}`,
       })
     );
-    socket.connect(ELF_LOAD_PORT, host, () => {
+    socket.connect(port, host, () => {
       socket.write(data, (err) => {
         socket.end();
         if (err) {
@@ -110,8 +111,8 @@ function sendGbnd(host, virt, phys, user = 0) {
   const buf = Buffer.alloc(24);
   buf.write("GBND", 0);
   buf.writeUInt32LE(user >>> 0, 4);
-  buf.writeBigUInt64LE(BigInt(virt >>> 0), 8);
-  buf.writeBigUInt64LE(BigInt(phys >>> 0), 16);
+  buf.writeBigUInt64LE(BigInt(virt), 8);
+  buf.writeBigUInt64LE(BigInt(phys), 16);
 
   return new Promise((resolve) => {
     const socket = new net.Socket();
@@ -169,23 +170,38 @@ class KlogWatcher {
   processLine(line) {
     let match = RE_DEV_PHYS.exec(line);
     if (match) {
-      this.autoPhys = parseInt(match[1], 16);
+      const dev = parseInt(match[1], 16);
+      if (dev && (line.includes("capabilityBattery:1") || line.includes("Physical"))) {
+        this.autoPhys = dev;
+        this.onStatus(`Physical controller: 0x${dev.toString(16)}`);
+      }
     }
 
-    match = RE_DEV_VIRT.exec(line) || RE_DEV_VIRT2.exec(line);
+    match = RE_DEV_VIRT.exec(line);
     if (match && !this.autoSentGbnd) {
-      this.autoVirt = parseInt(match[1], 16);
-      this.autoSentGbnd = true;
-      this.onStatus(
-        `Virtual device 0x${this.autoVirt.toString(16)} detected — sending GBND`
-      );
-      setTimeout(() => {
-        try {
-          sendGbnd(this.host, this.autoVirt, this.autoPhys, 0).catch(() => {});
-        } catch (e) {
-          console.error("sendGbnd threw:", e);
-        }
-      }, 400);
+      const dev = parseInt(match[1], 16);
+      const isVirtual =
+        line.includes("capabilityBattery:0") ||
+        line.includes("userId=0xffffffff") ||
+        line.includes("UserId:0xffffffff") ||
+        line.includes("remoteplay") ||
+        line.includes("RemotePlay") ||
+        line.includes("type:4") ||
+        line.includes("VDA candidate");
+      if (isVirtual && dev) {
+        this.autoVirt = dev;
+        this.autoSentGbnd = true;
+        this.onStatus(
+          `Virtual device 0x${this.autoVirt.toString(16)} detected — sending GBND`
+        );
+        setTimeout(() => {
+          try {
+            sendGbnd(this.host, this.autoVirt, this.autoPhys, 0).catch(() => {});
+          } catch (e) {
+            console.error("sendGbnd threw:", e);
+          }
+        }, 400);
+      }
     }
 
     match = RE_OWNER.exec(line);
@@ -198,7 +214,11 @@ class KlogWatcher {
 
     if (RE_ADOPTED.test(line)) {
       this.autoAdopted = true;
-      this.onStatus("Direct VDI adopted — GPAD input should work");
+      this.onStatus("VDI active — GPAD input should work");
+    }
+    if (RE_BIND_OK.test(line)) {
+      this.autoBound = true;
+      this.onStatus("MBus bind OK");
     }
   }
 
@@ -227,7 +247,10 @@ async function ensurePayloadRunning(host, options = {}) {
     forceDeploy = false,
     autoBindViaKlog = true,
     onStatus,
+    elfLoaderPort,
   } = options;
+
+  const port = elfLoaderPort || ELF_LOAD_PORT;
 
   const emit = (phase, message) => {
     const status = setDeployStatus(phase, message, host);
@@ -253,14 +276,24 @@ async function ensurePayloadRunning(host, options = {}) {
   const gpAlready = await portOpen(host, GPAD_PORT, 1000);
 
   if (forceDeploy || !gpAlready) {
-    if (!(await portOpen(host, ELF_LOAD_PORT, 1000))) {
-      if (watcher) watcher.stop();
-      activeWatcher = null;
+    if (!(await portOpen(host, port, 1000))) {
       emit(
-        "error",
-        `ELF loader port ${ELF_LOAD_PORT} is closed — launch the ELF loader on your PS5 first`
+        "warn",
+        `ELF loader port ${port} is closed — skipping deploy (payload may already be running)`
       );
-      return { ok: false, message: lastDeployStatus.message };
+      if (watcher) {
+        emit("waiting", "Waiting for direct-VDI adopt (auto-bind)...");
+        const end = Date.now() + 12000;
+        while (Date.now() < end && !watcher.autoAdopted) {
+          await sleep(150);
+        }
+      }
+      emit("ready", `Ghostpad ready on ${host}:${GPAD_PORT}`);
+      return {
+        ok: true,
+        skipped: true,
+        message: `ELF loader port ${port} closed — deploy skipped`,
+      };
     }
 
     if (!elfPath) {
@@ -273,8 +306,8 @@ async function ensurePayloadRunning(host, options = {}) {
       return { ok: false, message: lastDeployStatus.message };
     }
 
-    emit("deploying", `Deploying payload to ${host}:${ELF_LOAD_PORT}...`);
-    const deployResult = await deployElf(host, elfPath);
+    emit("deploying", `Deploying payload to ${host}:${port}...`);
+    const deployResult = await deployElf(host, elfPath, port);
     if (!deployResult.ok) {
       if (watcher) watcher.stop();
       activeWatcher = null;

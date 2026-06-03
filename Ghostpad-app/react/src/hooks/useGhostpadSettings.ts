@@ -29,9 +29,9 @@ export const useGhostpadSettings = () => {
   }, [api]);
 
   const deployPayload = React.useCallback(
-    async (ip: string, forceDeploy = false): Promise<DeployResult | null> => {
+    async (ip: string, forceDeploy = false, elfLoaderPort?: number): Promise<DeployResult | null> => {
       if (!api) return null;
-      return api.deployPayload({ ip, forceDeploy });
+      return api.deployPayload({ ip, forceDeploy, elfLoaderPort });
     },
     [api]
   );

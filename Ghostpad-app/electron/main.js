@@ -21,7 +21,7 @@ function findBeeperElf() {
   return BEEPER_ELF_CANDIDATES.find((p) => fs.existsSync(p)) ?? null;
 }
 
-async function deployBeeperIfNeeded(ip) {
+async function deployBeeperIfNeeded(ip, elfLoaderPort) {
   // Already running — nothing to do
   if (await payloadDeploy.portOpen(ip, beeper.BEEPER_PORT, 600)) {
     return { ok: true, skipped: true };
@@ -34,7 +34,7 @@ async function deployBeeperIfNeeded(ip) {
   }
 
   console.log(`[beeper] deploying ${elfPath} to ${ip}`);
-  const result = await beeper.deployBeeperElf(ip, elfPath).catch((e) => ({
+  const result = await beeper.deployBeeperElf(ip, elfPath, elfLoaderPort).catch((e) => ({
     ok: false,
     message: e.message,
   }));
@@ -84,7 +84,7 @@ function pushDeployStatus(status) {
   }
 }
 
-async function maybeDeployPayload(ip, { forceDeploy = false, deployIfNeeded = false } = {}) {
+async function maybeDeployPayload(ip, { forceDeploy = false, deployIfNeeded = false, elfLoaderPort } = {}) {
   const { settings, resolvedPayloadPath } = settingsStore.getSettingsPayloadInfo(
     userData()
   );
@@ -97,6 +97,7 @@ async function maybeDeployPayload(ip, { forceDeploy = false, deployIfNeeded = fa
     elfPath: resolvedPayloadPath,
     forceDeploy,
     autoBindViaKlog: settings.autoBindViaKlog,
+    elfLoaderPort: elfLoaderPort ?? settings.elfLoaderPort,
     onStatus: pushDeployStatus,
   });
 }
@@ -104,11 +105,11 @@ async function maybeDeployPayload(ip, { forceDeploy = false, deployIfNeeded = fa
 function registerIpc() {
   ipcMain.handle(
     "ghostpad:connect",
-    async (_e, { ip, port, deployIfNeeded, forceDeploy }) => {
+    async (_e, { ip, port, deployIfNeeded, forceDeploy, elfLoaderPort }) => {
       // Deploy beeper_server.elf first (best-effort — never blocks ghostpad connect)
-      deployBeeperIfNeeded(ip).catch(() => {});
+      deployBeeperIfNeeded(ip, elfLoaderPort).catch(() => {});
 
-      const deploy = await maybeDeployPayload(ip, { forceDeploy, deployIfNeeded });
+      const deploy = await maybeDeployPayload(ip, { forceDeploy, deployIfNeeded, elfLoaderPort });
       if (!deploy.ok) {
         throw new Error(deploy.message || "Payload deploy failed");
       }
@@ -186,7 +187,7 @@ function registerIpc() {
     return result.filePaths[0];
   });
 
-  ipcMain.handle("ghostpad:deployPayload", async (_e, { ip, forceDeploy }) => {
+  ipcMain.handle("ghostpad:deployPayload", async (_e, { ip, forceDeploy, elfLoaderPort }) => {
     const { settings, resolvedPayloadPath } = settingsStore.getSettingsPayloadInfo(
       userData()
     );
@@ -194,6 +195,7 @@ function registerIpc() {
       elfPath: resolvedPayloadPath,
       forceDeploy: Boolean(forceDeploy),
       autoBindViaKlog: settings.autoBindViaKlog,
+      elfLoaderPort: elfLoaderPort,
       onStatus: pushDeployStatus,
     });
   });

@@ -81,7 +81,7 @@ function ping(ip) {
   return sendBeeperCommand(ip, "BUZZ 1");
 }
 
-function deployBeeperElf(ip, elfPath) {
+function deployBeeperElf(ip, elfPath, elfLoaderPort) {
   return new Promise((resolve) => {
     let data;
     try {
@@ -91,7 +91,9 @@ function deployBeeperElf(ip, elfPath) {
       return;
     }
 
-    const sock = net.createConnection({ host: ip, port: ELFLDR_PORT });
+    const port = elfLoaderPort || ELFLDR_PORT;
+
+    const sock = net.createConnection({ host: ip, port });
     let done = false;
 
     const finish = (result) => {

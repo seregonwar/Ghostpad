@@ -29,6 +29,8 @@ export const Consoles = () => {
   const [editingId, setEditingId] = React.useState<string | null>(null);
   const [editName, setEditName] = React.useState("");
   const [editIp, setEditIp] = React.useState("");
+  const [editElfPort, setEditElfPort] = React.useState("");
+  const [elfLoaderPort, setElfLoaderPort] = React.useState("");
 
   const reload = React.useCallback(async () => {
     setConsoles(await listConsoles());
@@ -40,19 +42,26 @@ export const Consoles = () => {
 
   const handleAdd = async () => {
     if (!ip.trim()) return;
+    const elfPort = elfLoaderPort.trim() ? parseInt(elfLoaderPort.trim(), 10) : undefined;
+    if (elfLoaderPort.trim() && (isNaN(elfPort!) || elfPort! < 1 || elfPort! > 65535)) {
+      window.alert("ELF loader port must be a number between 1 and 65535.");
+      return;
+    }
     const probe = await probeHost(ip.trim(), 6967);
     if (!probe.reachable) {
-      const elf = await probeHost(ip.trim(), 9021);
+      const probeElfPort = elfPort || 9021;
+      const elf = await probeHost(ip.trim(), probeElfPort);
       if (!elf.reachable) {
         const ok = window.confirm(
-          `Could not reach Ghostpad on ${ip} (ports 6967/9021).\nSave anyway?`
+          `Could not reach Ghostpad on ${ip} (ports 6967/${probeElfPort}).\nSave anyway?`
         );
         if (!ok) return;
       }
     }
-    await addConsole(name.trim() || `PS5 (${ip.trim()})`, ip.trim());
+    await addConsole(name.trim() || `PS5 (${ip.trim()})`, ip.trim(), 6967, elfPort);
     setName("");
     setIp("");
+    setElfLoaderPort("");
     reload();
   };
 
@@ -67,9 +76,15 @@ export const Consoles = () => {
   };
 
   const saveEdit = async (id: string) => {
+    const elfPort = editElfPort.trim() ? parseInt(editElfPort.trim(), 10) : undefined;
+    if (editElfPort.trim() && (isNaN(elfPort!) || elfPort! < 1 || elfPort! > 65535)) {
+      window.alert("ELF loader port must be a number between 1 and 65535.");
+      return;
+    }
     await updateConsole(id, {
       name: editName.trim(),
       ip: editIp.trim(),
+      elfLoaderPort: elfPort,
     });
     setEditingId(null);
     reload();
@@ -104,6 +119,12 @@ export const Consoles = () => {
                       onChange={(e) => setEditIp(e.target.value)}
                       placeholder="IP address"
                     />
+                    <input
+                      value={editElfPort}
+                      onChange={(e) => setEditElfPort(e.target.value)}
+                      placeholder="ELF loader port (blank = 9021)"
+                      type="number"
+                    />
                     <Row>
                       <Button
                         color="primary"
@@ -124,14 +145,14 @@ export const Consoles = () => {
                 ) : (
                   <>
                     <strong>{c.name}</strong>
-                    <span>{c.ip}:{c.port}</span>
+                    <span>{c.ip}:{c.port}{c.elfLoaderPort ? ` (ELF:${c.elfLoaderPort})` : ""}</span>
                     <Row>
                       <Button
                         color="primary"
                         text="Connect"
                         icon="none"
                         size="s"
-                        onClick={() => connect(c.ip, c.port, c.id)}
+                        onClick={() => connect(c.ip, c.port, c.id, { elfLoaderPort: c.elfLoaderPort })}
                       />
                       <Button
                         color="outline"
@@ -142,6 +163,7 @@ export const Consoles = () => {
                           setEditingId(c.id);
                           setEditName(c.name);
                           setEditIp(c.ip);
+                          setEditElfPort(c.elfLoaderPort ? String(c.elfLoaderPort) : "");
                         }}
                       />
                       <Button
@@ -174,6 +196,13 @@ export const Consoles = () => {
               value={ip}
               onChange={(e) => setIp(e.target.value)}
               placeholder="PS5 IP address"
+            />
+            <input
+              value={elfLoaderPort}
+              onChange={(e) => setElfLoaderPort(e.target.value)}
+              placeholder="ELF port (blank=9021)"
+              type="number"
+              style={{ minWidth: 100, maxWidth: 140 }}
             />
             <Button
               color="primary"
@@ -227,7 +256,8 @@ export const Consoles = () => {
                     icon="none"
                     size="s"
                     onClick={async () => {
-                      await addConsole(`PS5 (${r.ip})`, r.ip);
+                      const elfPort = r.hasElfldr ? r.ports.find(p => p !== 6967) : undefined;
+                      await addConsole(`PS5 (${r.ip})`, r.ip, 6967, elfPort);
                       reload();
                     }}
                   />

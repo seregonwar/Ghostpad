@@ -130,7 +130,7 @@ export const Settings = () => {
   const selectedConsole =
     consoles.find((c) => c.id === targetConsoleId) ||
     (context.network.ip
-      ? { id: "", name: "Connected console", ip: context.network.ip, port: 6967 }
+      ? { id: "", name: "Connected console", ip: context.network.ip, port: 6967, elfLoaderPort: undefined }
       : null);
 
   const targetIp = selectedConsole?.ip || context.network.ip || "";
@@ -162,7 +162,7 @@ export const Settings = () => {
     setStatusLog([]);
     setStatusMessage(force ? "Force redeploying payload..." : "Deploying payload...");
     try {
-      const result = await deployPayload(targetIp, force);
+      const result = await deployPayload(targetIp, force, selectedConsole?.elfLoaderPort);
       if (result?.ok) {
         setStatusMessage(result.message || "Payload deployed.");
       } else {
@@ -185,6 +185,7 @@ export const Settings = () => {
     try {
       const ok = await connect(targetIp, 6967, targetConsoleId || undefined, {
         forceDeploy: false,
+        elfLoaderPort: selectedConsole?.elfLoaderPort,
       });
       setStatusMessage(
         ok ? `Connected to ${targetIp}` : `Failed to connect to ${targetIp}`
@@ -249,8 +250,8 @@ export const Settings = () => {
           <h2>Ghostpad Settings</h2>
           <p>
             Choose your Ghostpad payload ELF and deploy it to the PS5 you are
-            using. Deploy sends <code>ghostpad.elf</code> to the ELF loader on
-            port 9021, waits for GPAD on 6967, and auto-binds the virtual
+            using. Deploy sends <code>ghostpad.elf</code> to the ELF loader,
+            waits for GPAD on 6967, and auto-binds the virtual
             controller when klog is available.
           </p>
           {!isAvailable && (

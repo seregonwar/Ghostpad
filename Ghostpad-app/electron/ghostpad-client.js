@@ -1,7 +1,7 @@
 const net = require("net");
 
 const GPAD_PORT = 6967;
-const PROBE_PORTS = [6967, 9021];
+const PROBE_PORTS = [6967, 9021, 9090];
 
 let socket = null;
 let connectedIp = null;
@@ -171,7 +171,7 @@ async function scanNetwork(options = {}) {
       existing.ports.push(hit.port);
     }
     if (hit.port === 6967) existing.hasGhostpad = true;
-    if (hit.port === 9021) existing.hasElfldr = true;
+    if (hit.port === 9021 || hit.port === 9090) existing.hasElfldr = true;
     byIp.set(hit.ip, existing);
   }
 

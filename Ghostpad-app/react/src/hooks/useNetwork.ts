@@ -58,7 +58,7 @@ export const useNetwork = () => {
       ip: string,
       port = 6967,
       consoleId?: string,
-      options?: { forceDeploy?: boolean }
+      options?: { forceDeploy?: boolean; elfLoaderPort?: number }
     ) => {
       if (!api) {
         window.alert("Ghostpad network API unavailable. Run via Electron.");
@@ -78,6 +78,7 @@ export const useNetwork = () => {
           port,
           deployIfNeeded: options?.forceDeploy ? true : autoDeploy,
           forceDeploy: options?.forceDeploy,
+          elfLoaderPort: options?.elfLoaderPort,
         });
 
         setContext((c) => ({
@@ -132,9 +133,9 @@ export const useNetwork = () => {
   }, [api]);
 
   const addConsole = React.useCallback(
-    async (name: string, ip: string, port = 6967) => {
+    async (name: string, ip: string, port = 6967, elfLoaderPort?: number) => {
       if (!api) return null;
-      return api.addConsole({ name, ip, port });
+      return api.addConsole({ name, ip, port, elfLoaderPort });
     },
     [api]
   );
@@ -142,7 +143,7 @@ export const useNetwork = () => {
   const updateConsole = React.useCallback(
     async (
       id: string,
-      patch: Partial<Pick<SavedConsole, "name" | "ip" | "port">>
+      patch: Partial<Pick<SavedConsole, "name" | "ip" | "port" | "elfLoaderPort">>
     ) => {
       if (!api) return null;
       return api.updateConsole(id, patch);
