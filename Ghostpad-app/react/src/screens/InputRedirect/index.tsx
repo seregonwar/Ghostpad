@@ -1,6 +1,5 @@
 import React from "react";
 import { Link } from "react-router-dom";
-import Gamepad from "react-gamepad";
 import styled, { keyframes, css } from "styled-components";
 import { Context } from "../../hooks/Provider";
 import { useGamePad } from "../../hooks/useGamePad";
@@ -21,6 +20,36 @@ type ListeningFor =
   | { type: "button"; id: number }
   | { type: "stick"; dir: keyof StickKeyBindings }
   | null;
+
+type PadAxis = "LeftStickX" | "LeftStickY" | "RightStickX" | "RightStickY" | "LeftTrigger" | "RightTrigger";
+
+const POLL_AXIS_NAMES: Record<number, PadAxis> = {
+  0: "LeftStickX",
+  1: "LeftStickY",
+  2: "RightStickX",
+  3: "RightStickY",
+};
+
+const POLL_BUTTON_NAMES: Record<number, string> = {
+  0: "A",
+  1: "B",
+  2: "X",
+  3: "Y",
+  4: "LB",
+  5: "RB",
+  8: "Back",
+  9: "Start",
+  10: "LS",
+  11: "RS",
+  12: "DPadUp",
+  13: "DPadDown",
+  14: "DPadLeft",
+  15: "DPadRight",
+  16: "PS",
+  17: "Touchpad",
+};
+
+const GAMEPAD_AXIS_DEADZONE = 0.12;
 
 const BUTTON_IDS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] as const;
 
@@ -162,6 +191,102 @@ export const InputRedirect = () => {
     axisChangeHandler,
     listeningFor !== null || listeningForGamepadBtn !== null
   );
+
+  const gamepadPollHandlersRef = React.useRef({
+    connectHandler,
+    disconnectHandler,
+    axisChangeHandler,
+    buttonChangeHandler: remappedButtonChangeHandler,
+  });
+
+  React.useEffect(() => {
+    gamepadPollHandlersRef.current = {
+      connectHandler,
+      disconnectHandler,
+      axisChangeHandler,
+      buttonChangeHandler: remappedButtonChangeHandler,
+    };
+  }, [connectHandler, disconnectHandler, axisChangeHandler, remappedButtonChangeHandler]);
+
+  // Native Gamepad polling, matching the ESP32 web GUI's requestAnimationFrame loop.
+  // This avoids react-gamepad getting stuck after digital inputs and also restores
+  // an active analog stick if a keyboard/D-pad action briefly overwrites it.
+  React.useEffect(() => {
+    let rafId = 0;
+    let prevConnected = false;
+    let prevAxes: number[] = [];
+    let axisWasActive: boolean[] = [];
+    let prevButtons: { pressed: boolean; value: number }[] = [];
+
+    const poll = () => {
+      try {
+        const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+        const gp = pads[xinputIndex] || null;
+
+        if (gp) {
+          if (!prevConnected) {
+            prevConnected = true;
+            gamepadPollHandlersRef.current.connectHandler(gp.index);
+          }
+
+          for (let i = 0; i < Math.min(gp.axes.length, 4); i++) {
+            const axisName = POLL_AXIS_NAMES[i];
+            if (!axisName) continue;
+
+            const value = gp.axes[i] || 0;
+            const wasActive = axisWasActive[i] || false;
+            const isActive = Math.abs(value) > GAMEPAD_AXIS_DEADZONE;
+            const changed = prevAxes[i] === undefined || Math.abs(value - prevAxes[i]) > 0.002;
+
+            if (changed || isActive || wasActive) {
+              gamepadPollHandlersRef.current.axisChangeHandler(axisName, value);
+            }
+
+            prevAxes[i] = value;
+            axisWasActive[i] = isActive;
+          }
+
+          for (let i = 0; i < Math.min(gp.buttons.length, 18); i++) {
+            const btn = gp.buttons[i];
+            const prev = prevButtons[i] ?? { pressed: false, value: 0 };
+
+            if (i === 6 || i === 7) {
+              const axisName: PadAxis = i === 6 ? "LeftTrigger" : "RightTrigger";
+              const value = Math.round((btn.value || 0) * 255) / 255;
+              if (Math.abs(value - prev.value) > 0.002) {
+                gamepadPollHandlersRef.current.axisChangeHandler(axisName, value);
+              }
+              continue;
+            }
+
+            const buttonName = POLL_BUTTON_NAMES[i];
+            if (buttonName && btn.pressed !== prev.pressed) {
+              gamepadPollHandlersRef.current.buttonChangeHandler(buttonName, btn.pressed);
+            }
+          }
+
+          prevButtons = Array.from(gp.buttons)
+            .slice(0, 18)
+            .map((button) => ({ pressed: button.pressed, value: button.value }));
+        } else {
+          if (prevConnected) {
+            prevConnected = false;
+            gamepadPollHandlersRef.current.disconnectHandler(xinputIndex);
+          }
+          prevAxes = [];
+          axisWasActive = [];
+          prevButtons = [];
+        }
+      } catch (error) {
+        console.error("Gamepad poll error:", error);
+      }
+
+      rafId = requestAnimationFrame(poll);
+    };
+
+    rafId = requestAnimationFrame(poll);
+    return () => cancelAnimationFrame(rafId);
+  }, [xinputIndex]);
 
   React.useEffect(() => {
     listConsoles().then(setConsoles);
@@ -467,15 +592,7 @@ export const InputRedirect = () => {
               onTilt={axisChangeHandler}
               showSmall={false}
             />
-            <Gamepad
-              gamepadIndex={xinputIndex}
-              onConnect={connectHandler}
-              onDisconnect={disconnectHandler}
-              onButtonChange={remappedButtonChangeHandler}
-              onAxisChange={axisChangeHandler}
-            >
-              <React.Fragment />
-            </Gamepad>
+            {/* Physical controller input is polled above with requestAnimationFrame. */}
           </PadWrap>
 
           {/* Inline Bindings accordion */}

@@ -141,11 +141,14 @@ export function useInputRedirect(
       // Stick direction bindings
       const sk = b.stickKeys;
       const stickKeySet = new Set([sk.lUp, sk.lDown, sk.lLeft, sk.lRight, sk.rUp, sk.rDown, sk.rLeft, sk.rRight].filter(Boolean));
-      if (stickKeySet.has(key)) consumed = true;
+      const isStickKey = stickKeySet.has(key);
+      if (isStickKey) consumed = true;
 
       if (consumed) {
-        heldRef.current.add(key);
-        sendSticks();
+        if (isStickKey) {
+          heldRef.current.add(key);
+          sendSticks();
+        }
         e.preventDefault();
       }
     };
@@ -160,8 +163,14 @@ export function useInputRedirect(
         }
       }
 
-      heldRef.current.delete(key);
-      sendSticks();
+      const sk = b.stickKeys;
+      const stickKeySet = new Set([sk.lUp, sk.lDown, sk.lLeft, sk.lRight, sk.rUp, sk.rDown, sk.rLeft, sk.rRight].filter(Boolean));
+      const wasStickKey = stickKeySet.has(key);
+
+      if (wasStickKey) {
+        heldRef.current.delete(key);
+        sendSticks();
+      }
     };
 
     document.addEventListener("keydown", onKeyDown);

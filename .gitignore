@@ -13,3 +13,4 @@ esp32-ghostpad/sdkconfig.defaults
 /Ghostpad-app/node_modules
 /Ghostpad-app/react
 Ghostpad-app/pnpm-lock.yaml
+Ghostpad-app/react/src/.DS_Store
