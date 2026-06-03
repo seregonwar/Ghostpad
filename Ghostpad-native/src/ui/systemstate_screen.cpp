@@ -1,103 +1,93 @@
 // Ghostpad Native - PS5 Remote Controller
-// Copyright (c) 2024  seregonwar
+// Copyright (c) 2026  seregowar
 // Based on original Ghostpad by stonedmodder  
 // Licensed under the GNU General Public License v3.0. See LICENSE file for details.
 
 #include "ui/app.h"
+#include "ui/native_theme.h"
 #include "imgui.h"
 
 namespace ghostpad {
 
+static void confirmSSM(App& app, const char* icon, const char* label, const char* action,
+                       std::function<SsmResult(const std::string&)> fn) {
+    const auto& p = ui::colors();
+    
+    // Create button label with icon
+    std::string btn_label = std::string(icon) + "  " + label;
+    
+    if (ui::dangerButton(btn_label.c_str(), ImVec2(ImGui::GetContentRegionAvail().x - 36, 44)))
+        ImGui::OpenPopup(action);
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24, 20));
+    if (ImGui::BeginPopupModal(action, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextColored(p.warning, "%s  System Control Warning", ICON_FA_TRIANGLE_EXCLAMATION);
+        ImGui::Separator();
+        ImGui::Spacing();
+        
+        ImGui::Text("Are you sure you want to: %s?", label);
+        ImGui::TextColored(p.muted, "This will immediately interrupt the PS5 console state.");
+        ImGui::Spacing();
+        ImGui::Spacing();
+
+        if (ui::dangerButton(ICON_FA_CHECK "  Yes, Confirm", ImVec2(120, 32))) {
+            auto r = fn(app.selected_console_ip);
+            app.addStatus(r.response, !r.ok);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ui::softButton(ICON_FA_XMARK "  No, Cancel", ImVec2(120, 32))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar();
+}
+
 void renderSystemStateScreen(App& app) {
-    ImGui::TextColored(ImVec4(0.39f, 0.78f, 0.55f, 1.0f), "SYSTEM STATE");
-    ImGui::SameLine();
-    ImGui::TextUnformatted("- PS5 Power Control");
-    ImGui::Separator();
-    ImGui::Spacing();
+    const auto& p = ui::colors();
+    float avail_w = ImGui::GetContentRegionAvail().x;
 
     if (app.selected_console_ip.empty()) {
-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f),
-                          "Not connected. Connect to a PS5 first.");
+        ImGui::TextColored(p.warning, "%s  Not connected. Connect to a PS5 first.", ICON_FA_TRIANGLE_EXCLAMATION);
         return;
     }
 
-    ImGui::Text("Target: %s", app.selected_console_ip.c_str());
-    ImGui::Separator();
+    ImGui::TextColored(p.muted, "%s Target: %s", ICON_FA_SIGNAL, app.selected_console_ip.c_str());
     ImGui::Spacing();
 
-    ImGui::BeginChild("SSMSection", ImVec2(0, 0), true);
+    ui::beginCard("SSMCard", ImVec2(avail_w, 0));
+    ui::sectionLabel("Power Controls", ICON_FA_MICROCHIP);
+    ImGui::Spacing();
 
-    // Status
-    ImGui::TextUnformatted("System Status");
-    ImGui::Separator();
-    if (ImGui::Button("Get Status", ImVec2(200, 40))) {
+    if (ui::softButton(ICON_FA_CIRCLE_INFO "  Get System Status", ImVec2(avail_w - 36, 42))) {
         auto r = SsmClient::status(app.selected_console_ip);
         app.addStatus(r.response, !r.ok);
     }
 
     ImGui::Spacing();
+    ImGui::TextColored(p.warning, "%s  Destructive operations:", ICON_FA_TRIANGLE_EXCLAMATION);
     ImGui::Spacing();
 
-    // Power controls
-    ImGui::TextUnformatted("Power Controls");
+    confirmSSM(app, ICON_FA_ROTATE, "Reboot PS5", "reboot",
+               [](const std::string& ip) { return SsmClient::reboot(ip); });
+    ImGui::Spacing();
+    confirmSSM(app, ICON_FA_POWER_OFF, "Shutdown PS5", "shutdown",
+               [](const std::string& ip) { return SsmClient::shutdown(ip); });
+    ImGui::Spacing();
+    confirmSSM(app, ICON_FA_MOON, "Enter Rest Mode", "restmode",
+               [](const std::string& ip) { return SsmClient::restMode(ip); });
+
+    ImGui::Spacing();
     ImGui::Separator();
-    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "WARNING: These actions cannot be undone!");
-
     ImGui::Spacing();
 
-    if (ImGui::Button("Reboot PS5", ImVec2(200, 45))) {
-        ImGui::OpenPopup("ConfirmReboot");
-    }
-    if (ImGui::Button("Shutdown PS5", ImVec2(200, 45))) {
-        ImGui::OpenPopup("ConfirmShutdown");
-    }
-    if (ImGui::Button("Rest Mode", ImVec2(200, 45))) {
-        ImGui::OpenPopup("ConfirmRestMode");
-    }
-    if (ImGui::Button("Eject Disc", ImVec2(200, 45))) {
+    if (ui::softButton(ICON_FA_EJECT "  Eject Disc", ImVec2(avail_w - 36, 42))) {
         auto r = SsmClient::ejectDisc(app.selected_console_ip);
         app.addStatus(r.response, !r.ok);
     }
 
-    // Confirm popups
-    auto confirmPopup = [&](const char* name, const char* action, auto func) {
-        if (ImGui::BeginPopupModal(name, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::Text("Are you sure you want to %s the PS5?", action);
-            if (ImGui::Button("Yes", ImVec2(100, 0))) {
-                auto r = func(app.selected_console_ip);
-                app.addStatus(r.response, !r.ok);
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("No", ImVec2(100, 0))) {
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndPopup();
-        }
-    };
-
-    confirmPopup("ConfirmReboot", "reboot", [](const std::string& ip) { return SsmClient::reboot(ip); });
-    confirmPopup("ConfirmShutdown", "shutdown", [](const std::string& ip) { return SsmClient::shutdown(ip); });
-    confirmPopup("ConfirmRestMode", "put into rest mode", [](const std::string& ip) { return SsmClient::restMode(ip); });
-
-    ImGui::Spacing();
-    ImGui::Spacing();
-
-    // Deploy SSM ELF
-    ImGui::TextUnformatted("Deploy SSM ELF");
-    ImGui::Separator();
-    static char ssm_elf[1024] = {};
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 120);
-    ImGui::InputText("##SSMELF", ssm_elf, sizeof(ssm_elf));
-    ImGui::SameLine();
-    if (ImGui::Button("Deploy", ImVec2(100, 0))) {
-        if (strlen(ssm_elf) > 0) {
-            auto r = SsmClient::deployElf(app.selected_console_ip, ssm_elf, 9021);
-            app.addStatus(r.response, !r.ok);
-        }
-    }
-
-    ImGui::EndChild();
+    ui::endCard();
 }
 
 } // namespace ghostpad

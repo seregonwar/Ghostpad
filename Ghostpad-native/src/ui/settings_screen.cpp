@@ -1,134 +1,113 @@
 // Ghostpad Native - PS5 Remote Controller
-// Copyright (c) 2024  seregonwar
+// Copyright (c) 2026  seregowar
 // Based on original Ghostpad by stonedmodder  
 // Licensed under the GNU General Public License v3.0. See LICENSE file for details.
 
 #include "ui/app.h"
+#include "ui/native_theme.h"
 #include "imgui.h"
 
 namespace ghostpad {
 
 void renderSettingsScreen(App& app) {
-    ImGui::TextColored(ImVec4(0.39f, 0.78f, 0.55f, 1.0f), "SETTINGS");
+    const auto& p = ui::colors();
+    float avail_w = ImGui::GetContentRegionAvail().x;
+
+    // Payload
+    ui::beginCard("PayloadCard", ImVec2(avail_w, 160));
+    ui::sectionLabel("Payload Configuration");
+
+    static char elf_path[1024] = {};
+    if (elf_path[0] == '\0') {
+        auto s = app.settings.read();
+        if (!s.payload_elf_path.empty())
+            strncpy(elf_path, s.payload_elf_path.c_str(), sizeof(elf_path) - 1);
+    }
+
+    ImGui::SetNextItemWidth(avail_w - 160);
+    ImGui::InputTextWithHint("##ELFPATH", "Path to ghostpad.elf", elf_path, sizeof(elf_path));
     ImGui::SameLine();
-    ImGui::TextUnformatted("- Ghostpad Configuration");
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    auto current = app.settings.read();
-
-    ImGui::BeginChild("SettingsPanel", ImVec2(0, 0), true);
-
-    // Payload ELF path
-    ImGui::TextUnformatted("Payload Configuration");
-    ImGui::Separator();
-
-    static char elf_path_buf[1024] = {};
-    if (elf_path_buf[0] == '\0' && !current.payload_elf_path.empty()) {
-        strncpy(elf_path_buf, current.payload_elf_path.c_str(), sizeof(elf_path_buf) - 1);
-    }
-
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 120);
-    ImGui::InputText("ELF Path", elf_path_buf, sizeof(elf_path_buf));
+    if (ui::softButton("Browse", ImVec2(80, 30)))
+        app.addStatus("File picker not available in this build");
     ImGui::SameLine();
-    if (ImGui::Button("Browse", ImVec2(100, 0))) {
-        // Note: File dialog not implemented in this version
-        // Use TinyFileDialog or platform-native dialog
-        app.addStatus("File dialog not available in this build");
-    }
-
-    std::string resolved = app.settings.resolvePayloadPath();
-    if (!resolved.empty()) {
-        ImGui::TextColored(ImVec4(0.5f, 0.7f, 0.5f, 1.0f), "Resolved: %s", resolved.c_str());
-    } else {
-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "No payload found. Download ghostpad.elf to Ghostpad/payload/");
-    }
-
-    ImGui::Spacing();
-
-    // Auto-deploy
-    ImGui::TextUnformatted("Deployment");
-    ImGui::Separator();
-
-    static bool auto_deploy = current.auto_deploy_on_connect;
-    ImGui::Checkbox("Auto-deploy payload on connect", &auto_deploy);
-
-    static bool auto_bind = current.auto_bind_via_klog;
-    ImGui::Checkbox("Auto-bind via klog monitoring", &auto_bind);
-
-    ImGui::TextUnformatted("(Recommended: leave both enabled)");
-
-    ImGui::Spacing();
-
-    // Connect beep
-    ImGui::TextUnformatted("Connect Beep");
-    ImGui::Separator();
-
-    static bool beep_enabled = current.connect_beep_enabled;
-    ImGui::Checkbox("Beep when virtual controller connects", &beep_enabled);
-
-    static int beep_type = current.connect_beep_type;
-    const char* beep_types[] = {"Silent (0)", "Single Beep (1)", "Error Pattern (2)", "Long Beep (3)"};
-    ImGui::Combo("Beep Type", &beep_type, beep_types, 4);
-    beep_type = beep_type; // 0-3
-
-    ImGui::Spacing();
-
-    // Controller type
-    ImGui::TextUnformatted("Controller Type");
-    ImGui::Separator();
-
-    static bool auto_deploy_2 = current.auto_deploy_on_connect; // placeholder for device type
-    const char* dev_types[] = {"DualShock 4 (0)", "Alternate Pad (1)", "DualSense/PS5 (3)"};
-    static int dev_type = 2; // default DualSense
-    ImGui::Combo("Device Type", &dev_type, dev_types, 3);
-
-    if (ImGui::Button("Send TYPE Command", ImVec2(180, 0))) {
-        if (!app.selected_console_ip.empty()) {
-            int actual_type = (dev_type == 0) ? 0 : (dev_type == 1) ? 1 : 3;
-            auto result = GhostpadClient::sendType(app.selected_console_ip, actual_type);
-            app.addStatus(result.ok ? "Type set" : ("Failed: " + result.error));
-        } else {
-            app.addStatus("Not connected to any console", true);
+    if (ui::primaryButton("Deploy Now", ImVec2(110, 30))) {
+        std::string elf = app.settings.resolvePayloadPath();
+        if (elf.empty())
+            app.addStatus("No payload found", true);
+        else if (app.selected_console_ip.empty())
+            app.addStatus("Not connected", true);
+        else {
+            auto s = app.settings.read();
+            PayloadDeployer::Options opts;
+            opts.elf_path = elf;
+            opts.auto_bind_via_klog = s.auto_bind_via_klog;
+            opts.status_callback = [&app](const DeployStatus& ds) {
+                app.addStatus(ds.message, ds.phase == "error");
+            };
+            app.deployer.ensurePayloadRunning(app.selected_console_ip, opts);
         }
     }
 
-    ImGui::Spacing();
+    std::string resolved = app.settings.resolvePayloadPath();
+    if (!resolved.empty())
+        ImGui::TextColored(p.success, "Resolved: %s", resolved.c_str());
+    else
+        ImGui::TextColored(p.warning, "Place ghostpad.elf in Ghostpad/payload/");
+
+    ui::endCard();
     ImGui::Spacing();
 
-    // Save button
-    if (ImGui::Button("Save Settings", ImVec2(150, 35))) {
+    // Options
+    ui::beginCard("OptionsCard", ImVec2(avail_w, 220));
+    ui::sectionLabel("Behavior");
+
+    static bool auto_deploy = true, auto_bind = true, beep_on = false;
+    static int beep_type = 1;
+    {
+        auto s = app.settings.read();
+        auto_deploy = s.auto_deploy_on_connect;
+        auto_bind = s.auto_bind_via_klog;
+        beep_on = s.connect_beep_enabled;
+        beep_type = s.connect_beep_type;
+    }
+
+    ImGui::Checkbox("Auto-deploy payload on connect", &auto_deploy);
+    ImGui::Checkbox("Auto-bind via klog monitoring", &auto_bind);
+    ImGui::Checkbox("Beep when virtual controller connects", &beep_on);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(160);
+    ImGui::Combo("Beep Type", &beep_type, "Silent\0Single Beep\0Error Pattern\0Long Beep\0");
+
+    ImGui::Spacing();
+    if (ui::primaryButton("Save Settings", ImVec2(140, 34))) {
         AppSettings patch;
-        patch.payload_elf_path = elf_path_buf;
+        patch.payload_elf_path = elf_path;
         patch.auto_deploy_on_connect = auto_deploy;
         patch.auto_bind_via_klog = auto_bind;
-        patch.connect_beep_enabled = beep_enabled;
+        patch.connect_beep_enabled = beep_on;
         patch.connect_beep_type = beep_type;
         app.settings.write(patch);
         app.addStatus("Settings saved");
     }
+    ui::endCard();
+    ImGui::Spacing();
 
+    // Controller type
+    ui::beginCard("TypeCard", ImVec2(avail_w, 90));
+    ui::sectionLabel("Controller Type");
+    static int dev_type = 2;
+    ImGui::Combo("Device", &dev_type, "DualShock 4 (0)\0Alt Pad (1)\0DualSense (3)\0");
     ImGui::SameLine();
-    if (ImGui::Button("Deploy Payload Now", ImVec2(180, 35))) {
-        std::string elf = app.settings.resolvePayloadPath();
-        if (elf.empty()) {
-            app.addStatus("No payload found", true);
-        } else if (app.selected_console_ip.empty()) {
-            app.addStatus("Not connected to any console", true);
+    if (ui::softButton("Send TYPE", ImVec2(120, 30))) {
+        if (!app.selected_console_ip.empty()) {
+            int t = dev_type == 0 ? 0 : dev_type == 1 ? 1 : 3;
+            auto r = GhostpadClient::sendType(app.selected_console_ip, t);
+            app.addStatus(r.ok ? "Type set" : r.error, !r.ok);
         } else {
-            PayloadDeployer::Options opts;
-            opts.elf_path = elf;
-            opts.auto_bind_via_klog = auto_bind;
-            opts.status_callback = [&app](const DeployStatus& s) {
-                app.addStatus(s.phase + ": " + s.message, s.phase == "error");
-            };
-            auto result = app.deployer.ensurePayloadRunning(app.selected_console_ip, opts);
-            app.addStatus(result.ok ? "Payload deployed" : ("Deploy failed: " + result.message),
-                         !result.ok);
+            app.addStatus("Not connected", true);
         }
     }
-
-    ImGui::EndChild();
+    ui::endCard();
 }
 
 } // namespace ghostpad

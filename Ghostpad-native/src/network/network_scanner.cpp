@@ -1,5 +1,5 @@
 // Ghostpad Native - PS5 Remote Controller
-// Copyright (c) 2024  seregonwar
+// Copyright (c) 2026  seregonwar
 // Based on original Ghostpad by stonedmodder  
 // Licensed under the GNU General Public License v3.0. See LICENSE file for details.
 

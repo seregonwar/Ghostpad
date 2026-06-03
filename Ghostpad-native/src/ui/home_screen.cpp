@@ -1,130 +1,106 @@
 // Ghostpad Native - PS5 Remote Controller
-// Copyright (c) 2024  seregonwar
+// Copyright (c) 2026  seregowar
 // Based on original Ghostpad by stonedmodder  
 // Licensed under the GNU General Public License v3.0. See LICENSE file for details.
 
 #include "ui/app.h"
+#include "ui/native_theme.h"
 #include "imgui.h"
 
 namespace ghostpad {
 
 void renderHomeScreen(App& app) {
-    ImGui::TextColored(ImVec4(0.39f, 0.78f, 0.55f, 1.0f), "GHOSTPAD");
-    ImGui::SameLine();
-    ImGui::TextUnformatted(" - PS5 Remote Controller (Native C++)");
-    ImGui::Separator();
+    const auto& p = ui::colors();
+    auto status = app.ghostpad.getStatus();
+
+    float avail_w = ImGui::GetContentRegionAvail().x;
+    float avail_h = ImGui::GetContentRegionAvail().y;
+    float col_w = (avail_w - 16.0f) * 0.5f;
+
+    // Left Column: Connection Info
+    ui::beginCard("StatusCard", ImVec2(col_w, avail_h - 10.0f));
+    ui::sectionLabel("Connection Status", ICON_FA_SIGNAL);
+    ImGui::Spacing();
     ImGui::Spacing();
 
-    // Connection status card
-    auto status = app.ghostpad.getStatus();
-    ImGui::BeginChild("StatusCard", ImVec2(ImGui::GetContentRegionAvail().x * 0.4f, 200), true);
-    ImGui::TextUnformatted("Connection Status");
-    ImGui::Separator();
-
     if (status.is_connected) {
-        ImGui::TextColored(ImVec4(0.39f, 0.78f, 0.55f, 1.0f), "Connected");
-        ImGui::Text("IP: %s", status.ip.c_str());
-        ImGui::Text("Port: %d", status.port);
+        ImGui::TextColored(p.success, "%s  CONNECTED TO PS5", ICON_FA_CIRCLE_CHECK);
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        
+        ImGui::TextColored(p.muted, "Console IP Address:");
+        ImGui::TextColored(p.text, "  %s", status.ip.c_str());
+        ImGui::Spacing();
 
-        if (ImGui::Button("Disconnect", ImVec2(120, 30))) {
+        ImGui::TextColored(p.muted, "Streaming Port:");
+        ImGui::TextColored(p.text, "  %d", status.port);
+        ImGui::Spacing();
+        ImGui::Spacing();
+        
+        if (ui::dangerButton(ICON_FA_LINK_SLASH "  Disconnect Console", ImVec2(180, 38))) {
             app.ghostpad.disconnect();
             app.deployer.stopKlogWatcher();
+            app.selected_console_ip.clear();
             app.addStatus("Disconnected");
         }
     } else {
-        ImGui::TextColored(ImVec4(0.7f, 0.3f, 0.3f, 1.0f), "Not Connected");
-        ImGui::TextUnformatted("Connect to a PS5 in the Consoles panel");
+        ImGui::TextColored(p.danger, "%s  NOT CONNECTED", ICON_FA_CIRCLE_XMARK);
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        
+        ImGui::TextWrapped("No active console stream found. Link a console in the Consoles panel to begin low-latency controller streaming.");
+        ImGui::Spacing();
+        ImGui::Spacing();
+        
+        if (ui::primaryButton(ICON_FA_LINK "  Configure Connections", ImVec2(200, 38)))
+            app.current_screen = Screen::Consoles;
     }
 
-    auto deploy = app.deployer.getStatus();
-    if (!deploy.phase.empty() && deploy.phase != "idle") {
-        ImGui::Text("Deploy: %s - %s", deploy.phase.c_str(), deploy.message.c_str());
+    auto ds = app.deployer.getStatus();
+    if (!ds.phase.empty() && ds.phase != "idle") {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::TextColored(p.warning, "%s  Payload Deployer State:", ICON_FA_DOWNLOAD);
+        ImGui::TextColored(p.muted, "  Phase:   %s", ds.phase.c_str());
+        ImGui::TextColored(p.muted, "  Message: %s", ds.message.c_str());
     }
+    ui::endCard();
 
-    ImGui::EndChild();
-    ImGui::SameLine();
+    ImGui::SameLine(0, 16);
 
-    // Quick actions
-    ImGui::BeginChild("ActionsCard", ImVec2(0, 200), true);
-    ImGui::TextUnformatted("Quick Actions");
-    ImGui::Separator();
+    // Right Column: Launcher / Quick Actions
+    ui::beginCard("ActionsCard", ImVec2(col_w, avail_h - 10.0f));
+    ui::sectionLabel("Quick Actions / Launcher", ICON_FA_BOLT);
+    ImGui::Spacing();
+    ImGui::Spacing();
 
-    if (ImGui::Button("Manage Consoles", ImVec2(200, 35))) {
+    if (ui::softButton(ICON_FA_DESKTOP "  Manage Consoles", ImVec2(col_w - 36, 44)))
         app.current_screen = Screen::Consoles;
-    }
-    if (ImGui::Button("Settings", ImVec2(200, 35))) {
-        app.current_screen = Screen::Settings;
-    }
-    if (ImGui::Button("Input Redirect", ImVec2(200, 35))) {
+    ImGui::Spacing();
+    
+    if (ui::softButton(ICON_FA_GAMEPAD "  Virtual Controller Panel", ImVec2(col_w - 36, 44)))
+        app.current_screen = Screen::Controller;
+    ImGui::Spacing();
+    
+    if (ui::softButton(ICON_FA_KEYBOARD "  Input Redirection Map", ImVec2(col_w - 36, 44)))
         app.current_screen = Screen::InputRedirect;
-    }
-    if (ImGui::Button("Beeper Control", ImVec2(200, 35))) {
+    ImGui::Spacing();
+    
+    if (ui::softButton(ICON_FA_VOLUME_HIGH "  Beeper & LED Diagnostics", ImVec2(col_w - 36, 44)))
         app.current_screen = Screen::Beeper;
-    }
-    if (ImGui::Button("System State", ImVec2(200, 35))) {
+    ImGui::Spacing();
+    
+    if (ui::softButton(ICON_FA_MICROCHIP "  System Power State Controls", ImVec2(col_w - 36, 44)))
         app.current_screen = Screen::SystemState;
-    }
-
-    ImGui::EndChild();
-
     ImGui::Spacing();
 
-    // Info cards
-    ImGui::BeginChild("InfoSection", ImVec2(0, 0), true);
+    if (ui::softButton(ICON_FA_FOLDER_OPEN "  Macro Recording Projects", ImVec2(col_w - 36, 44)))
+        app.current_screen = Screen::Projects;
 
-    ImGui::TextUnformatted("About Ghostpad");
-    ImGui::Separator();
-    ImGui::TextWrapped(
-        "Ghostpad creates a virtual DualSense controller on a jailbroken PS5, "
-        "allowing you to control your console over the local network from your PC "
-        "using keyboard, mouse, or a physical controller.\n\n"
-        "This native C++ version eliminates Electron overhead for maximum performance "
-        "and minimal latency."
-    );
-
-    ImGui::Spacing();
-    ImGui::TextUnformatted("Features");
-    ImGui::Separator();
-
-    ImGui::BulletText("Ultra-low latency input streaming (<1ms per packet)");
-    ImGui::BulletText("Keyboard-to-gamepad mapping with configurable bindings");
-    ImGui::BulletText("Physical controller pass-through (GLFW gamepad API)");
-    ImGui::BulletText("Mouse look with adjustable sensitivity");
-    ImGui::BulletText("Macro recording and playback at 60fps");
-    ImGui::BulletText("Auto-deploy payload via klog auto-bind");
-    ImGui::BulletText("Network scanning to find PS5 on LAN");
-    ImGui::BulletText("Beeper and LED control");
-    ImGui::BulletText("PS5 system state management (reboot, shutdown, etc.)");
-    ImGui::BulletText("Console bookmarking and management");
-
-    ImGui::Spacing();
-    ImGui::TextUnformatted("Wire Protocol");
-    ImGui::Separator();
-    if (ImGui::BeginTable("PortsTable", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
-        ImGui::TableSetupColumn("Port");
-        ImGui::TableSetupColumn("Purpose");
-        ImGui::TableSetupColumn("Protocol");
-        ImGui::TableHeadersRow();
-
-        auto addRow = [](const char* port, const char* purpose, const char* proto) {
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(port);
-            ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(purpose);
-            ImGui::TableSetColumnIndex(2); ImGui::TextUnformatted(proto);
-        };
-
-        addRow("6967", "GPAD Virtual Controller", "16-byte binary");
-        addRow("6970", "Control (TYPE/DISC/GBND)", "Binary command");
-        addRow("9021", "ELF Payload Deployment", "Raw binary");
-        addRow("9090", "Alt ELF Loader", "Raw binary");
-        addRow("3434", "Klog Debug Monitoring", "Text lines");
-        addRow("9111", "Beeper/LED Control", "Text commands");
-        addRow("9112", "System State Manager", "Text commands");
-
-        ImGui::EndTable();
-    }
-
-    ImGui::EndChild();
+    ui::endCard();
 }
 
 } // namespace ghostpad

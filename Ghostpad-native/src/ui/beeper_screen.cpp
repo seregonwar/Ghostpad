@@ -1,121 +1,91 @@
 // Ghostpad Native - PS5 Remote Controller
-// Copyright (c) 2024  seregonwar
+// Copyright (c) 2026  seregowar
 // Based on original Ghostpad by stonedmodder  
 // Licensed under the GNU General Public License v3.0. See LICENSE file for details.
 
 #include "ui/app.h"
+#include "ui/native_theme.h"
 #include "imgui.h"
 
 namespace ghostpad {
 
 void renderBeeperScreen(App& app) {
-    ImGui::TextColored(ImVec4(0.39f, 0.78f, 0.55f, 1.0f), "BEEPER CONTROL");
-    ImGui::SameLine();
-    ImGui::TextUnformatted("- PS5 Beeper & LED");
-    ImGui::Separator();
-    ImGui::Spacing();
+    const auto& p = ui::colors();
+    float avail_w = ImGui::GetContentRegionAvail().x;
 
     if (app.selected_console_ip.empty()) {
-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f),
-                          "Not connected. Connect to a PS5 first.");
+        ImGui::TextColored(p.warning, "%s  Not connected. Connect to a PS5 first.", ICON_FA_TRIANGLE_EXCLAMATION);
         return;
     }
 
-    ImGui::Text("Target: %s", app.selected_console_ip.c_str());
-    ImGui::Separator();
+    ImGui::TextColored(p.muted, "%s Target: %s", ICON_FA_SIGNAL, app.selected_console_ip.c_str());
     ImGui::Spacing();
 
-    // Beeper
-    ImGui::BeginChild("BeeperSection", ImVec2(ImGui::GetContentRegionAvail().x * 0.48f, 0), true);
-    ImGui::TextUnformatted("Beeper");
-    ImGui::Separator();
+    float col_w = (avail_w - 16.0f) * 0.5f;
 
-    if (ImGui::Button("Single Beep", ImVec2(200, 40))) {
+    // Beeper card
+    ui::beginCard("BeeperSection", ImVec2(col_w, 290));
+    ui::sectionLabel("Beeper Commands", ICON_FA_VOLUME_HIGH);
+    ImGui::Spacing();
+
+    if (ui::softButton(ICON_FA_BELL "  Single Beep", ImVec2(col_w - 36, 42))) {
         auto r = BeeperClient::buzz(app.selected_console_ip, 1);
         app.addStatus(r.response, !r.ok);
     }
-    if (ImGui::Button("Long Beep", ImVec2(200, 40))) {
+    if (ui::softButton(ICON_FA_BELL "  Long Beep", ImVec2(col_w - 36, 42))) {
         auto r = BeeperClient::buzz(app.selected_console_ip, 3);
         app.addStatus(r.response, !r.ok);
     }
-    if (ImGui::Button("Error Pattern", ImVec2(200, 40))) {
+    if (ui::softButton(ICON_FA_TRIANGLE_EXCLAMATION "  Error Pattern", ImVec2(col_w - 36, 42))) {
         auto r = BeeperClient::buzz(app.selected_console_ip, 2);
         app.addStatus(r.response, !r.ok);
     }
 
     ImGui::Spacing();
-    ImGui::TextUnformatted("Spam Test");
-    static int spam_count = 10;
-    ImGui::SetNextItemWidth(100);
-    ImGui::InputInt("Beeps", &spam_count);
+    static int spam_n = 5;
+    
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(p.muted, "Count:");
     ImGui::SameLine();
-    if (ImGui::Button("Spam", ImVec2(100, 0))) {
-        for (int i = 0; i < spam_count && i < 50; i++) {
+    ImGui::PushItemWidth(80);
+    ImGui::InputInt("##SpamCount", &spam_n, 0, 0);
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
+    if (ui::softButton(ICON_FA_FIRE "  Spam", ImVec2(80, 32))) {
+        for (int i = 0; i < spam_n && i < 50; i++)
             BeeperClient::buzz(app.selected_console_ip, 1);
-        }
-        app.addStatus("Sent " + std::to_string(spam_count) + " beeps");
+        app.addStatus("Sent " + std::to_string(spam_n) + " beeps");
     }
+    ui::endCard();
 
-    ImGui::EndChild();
-    ImGui::SameLine();
+    ImGui::SameLine(0, 16);
 
-    // Controls
-    ImGui::BeginChild("ControlsSection", ImVec2(0, 0), true);
-
-    // Volume
-    ImGui::TextUnformatted("Volume");
-    ImGui::Separator();
-    static int volume = 0;
-    const char* vol_types[] = {"High (0)", "Medium (1)", "Low (2)"};
-    ImGui::Combo("##Vol", &volume, vol_types, 3);
-    if (ImGui::Button("Set Volume", ImVec2(200, 0))) {
-        auto r = BeeperClient::setVolume(app.selected_console_ip, volume);
-        app.addStatus(r.response, !r.ok);
-    }
-
+    // Controls card
+    ui::beginCard("ControlsSection", ImVec2(col_w, 290));
+    ui::sectionLabel("Controller hardware", ICON_FA_SLIDERS);
     ImGui::Spacing();
 
-    // Mute
-    ImGui::TextUnformatted("Mute");
-    ImGui::Separator();
-    static int mute_state = 0;
-    const char* mute_types[] = {"Unmute (0)", "Mute (1)"};
-    ImGui::Combo("##Mute", &mute_state, mute_types, 2);
-    if (ImGui::Button("Set Mute", ImVec2(200, 0))) {
-        auto r = BeeperClient::setMute(app.selected_console_ip, mute_state);
-        app.addStatus(r.response, !r.ok);
-    }
-
+    static int vol = 0, mute = 0, led = 0;
+    
+    ImGui::TextColored(p.muted, "Beeper Volume:");
+    ImGui::Combo("##Volume", &vol, "High (0)\0Medium (1)\0Low (2)\0");
+    
+    ImGui::TextColored(p.muted, "Beeper Mute:");
+    ImGui::Combo("##Mute", &mute, "Unmute (0)\0Mute (1)\0");
+    
+    ImGui::TextColored(p.muted, "LED Brightness:");
+    ImGui::Combo("##LED", &led, "High (0)\0Medium (1)\0Low (2)\0");
+    
+    ImGui::Spacing();
     ImGui::Spacing();
 
-    // LED
-    ImGui::TextUnformatted("LED Control");
-    ImGui::Separator();
-    static int led = 0;
-    const char* led_types[] = {"High (0)", "Medium (1)", "Low (2)"};
-    ImGui::Combo("##LED", &led, led_types, 3);
-    if (ImGui::Button("Set LED", ImVec2(200, 0))) {
-        auto r = BeeperClient::setLed(app.selected_console_ip, led);
-        app.addStatus(r.response, !r.ok);
+    if (ui::softButton(ICON_FA_CHECK "  Apply All Settings", ImVec2(col_w - 36, 38))) {
+        BeeperClient::setVolume(app.selected_console_ip, vol);
+        BeeperClient::setMute(app.selected_console_ip, mute);
+        BeeperClient::setLed(app.selected_console_ip, led);
+        app.addStatus("Settings applied");
     }
-
-    ImGui::Spacing();
-
-    // Deploy beeper ELF
-    ImGui::TextUnformatted("Deploy Beeper ELF");
-    ImGui::Separator();
-    static char beeper_elf[1024] = {};
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 120);
-    ImGui::InputText("##BeeperELF", beeper_elf, sizeof(beeper_elf));
-    ImGui::SameLine();
-    if (ImGui::Button("Deploy", ImVec2(100, 0))) {
-        if (strlen(beeper_elf) > 0) {
-            auto r = BeeperClient::deployElf(app.selected_console_ip, beeper_elf, 9021);
-            app.addStatus(r.response, !r.ok);
-        }
-    }
-
-    ImGui::EndChild();
+    ui::endCard();
 }
 
 } // namespace ghostpad

@@ -1,31 +1,60 @@
 // Ghostpad Native - PS5 Remote Controller
-// Copyright (c) 2024  seregonwar
+// Copyright (c) 2026  seregonwar
 // Based on original Ghostpad by stonedmodder  
 // Licensed under the GNU General Public License v3.0. See LICENSE file for details.
 
 #include "ui/app.h"
+#include "ui/native_theme.h"
 #include "imgui.h"
 #include "imgui_internal.h"
+#include <algorithm>
 #include <cmath>
+#include <string>
+#include <vector>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+#include "GLFW/glfw3.h"
 
 namespace ghostpad {
 
-static bool pointInCircle(ImVec2 p, ImVec2 c, float r) {
-    float dx = p.x - c.x, dy = p.y - c.y;
-    return dx * dx + dy * dy <= r * r;
-}
+/*
+ *  TEXTURE LOADER AND CONTEXT
+ */
+static GLuint g_controller_texture = 0;
+static int g_tex_w = 0;
+static int g_tex_h = 0;
 
-static bool pointInRect(ImVec2 p, ImVec2 min, ImVec2 max) {
-    return p.x >= min.x && p.x <= max.x && p.y >= min.y && p.y <= max.y;
-}
+static void loadControllerTexture() {
+    if (g_controller_texture != 0) return;
 
-static bool pointInTriangle(ImVec2 p, ImVec2 a, ImVec2 b, ImVec2 c) {
-    float d1 = (p.x - b.x) * (a.y - b.y) - (a.x - b.x) * (p.y - b.y);
-    float d2 = (p.x - c.x) * (b.y - c.y) - (b.x - c.x) * (p.y - c.y);
-    float d3 = (p.x - a.x) * (c.y - a.y) - (c.x - a.x) * (p.y - a.y);
-    bool neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
-    bool pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
-    return !(neg && pos);
+    int width, height, channels;
+    unsigned char* data = stbi_load(CONTROLLER_IMAGE_PATH, &width, &height, &channels, 4);
+    if (!data) {
+        fprintf(stderr, "[Ghostpad] Failed to load controller texture from %s: %s\n", 
+                CONTROLLER_IMAGE_PATH, stbi_failure_reason());
+        return;
+    }
+
+    g_tex_w = width;
+    g_tex_h = height;
+
+    // Convert solid black background to transparency channel using color luminance
+    for (int i = 0; i < width * height; ++i) {
+        unsigned char r = data[i * 4 + 0];
+        unsigned char g = data[i * 4 + 1];
+        unsigned char b = data[i * 4 + 2];
+        unsigned char max_val = std::max({r, g, b});
+        data[i * 4 + 3] = max_val;
+    }
+
+    glGenTextures(1, &g_controller_texture);
+    glBindTexture(GL_TEXTURE_2D, g_controller_texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    
+    stbi_image_free(data);
 }
 
 struct InteractivePadLayout {
@@ -48,49 +77,41 @@ struct InteractivePadLayout {
     // Shoulders
     float shoulder_y;
     float trig_width, trig_height;
-
-    // Buttons by ID
-    struct HitRegion {
-        ImVec2 center; float radius; int btn_id; int alt_btn;
-    };
-    std::vector<HitRegion> circles;
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+//                             LAYOUT COMPUTATION
+// ─────────────────────────────────────────────────────────────────────────────
 static InteractivePadLayout computeLayout(ImVec2 base, float size) {
     InteractivePadLayout l;
     l.base = base;
     l.size = size;
     l.w = size * 2.0f;
-    l.h = size * 1.2f;
-    l.cx = base.x + l.w * 0.5f;
-    l.cy = base.y + l.h * 0.5f;
+    l.h = size * 1.3f;
 
-    // Sticks
-    l.l_stick_c = ImVec2(base.x + l.w * 0.2f, base.y + l.h * 0.55f);
-    l.r_stick_c = ImVec2(base.x + l.w * 0.8f, l.l_stick_c.y);
-    l.stick_radius = size * 0.12f;
+    // Apply alignment shift to coordinate system
+    float shift_x = -size * 0.026f;
+    float shift_y = +size * 0.030f;
 
-    // D-pad
-    l.dpad_center = ImVec2(l.l_stick_c.x - size * 0.25f, base.y + l.h * 0.25f);
+    l.cx = base.x + l.w * 0.5f + shift_x;
+    l.cy = base.y + l.h * 0.45f + shift_y;
+
+    /*
+     *     L_STICK (o)   (o) R_STICK
+     */
+    // Sticks: Centered at 367.0 and 657.0 in pixels (Y=519.5 due to 3D cap perspective)
+    l.l_stick_c = ImVec2(l.cx - size * 0.283f, l.cy + size * 0.015f);
+    l.r_stick_c = ImVec2(l.cx + size * 0.283f, l.cy + size * 0.015f);
+    l.stick_radius = size * 0.11f;
+
+    // D-pad on the left: Centered at 217.18, 390.55 in pixels
+    l.dpad_center = ImVec2(l.cx - size * 0.576f, l.cy - size * 0.237f);
     l.dpad_size = size * 0.06f;
 
-    // Face buttons
-    l.fb_center = ImVec2(l.r_stick_c.x + size * 0.25f, base.y + l.h * 0.22f);
-    l.fb_radius = size * 0.055f;
-    l.fb_dist = size * 0.08f;
-
-    // Shoulders
-    l.shoulder_y = base.y + l.h * 0.05f;
-    l.trig_width = size * 0.12f;
-    l.trig_height = size * 0.12f;
-
-    // Circle hit regions: ID, center, radius
-    l.circles = {
-        {l.fb_center + ImVec2(0, -l.fb_dist), l.fb_radius, 3, -1},   // Triangle
-        {l.fb_center + ImVec2(l.fb_dist, 0), l.fb_radius, 1, -1},    // Circle
-        {l.fb_center + ImVec2(0, l.fb_dist), l.fb_radius, 0, -1},    // Cross
-        {l.fb_center + ImVec2(-l.fb_dist, 0), l.fb_radius, 2, -1},   // Square
-    };
+    // Face buttons on the right: Centered at 815.40, 382.82 in pixels
+    l.fb_center = ImVec2(l.cx + size * 0.593f, l.cy - size * 0.252f);
+    l.fb_radius = size * 0.050f;
+    l.fb_dist = size * 0.092f;
 
     return l;
 }
@@ -98,32 +119,158 @@ static InteractivePadLayout computeLayout(ImVec2 base, float size) {
 void renderInteractivePadVisualizer(PadStateInput& state, float size) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 base = ImGui::GetCursorScreenPos();
-    ImGuiIO& io = ImGui::GetIO();
+    const auto& palette = ui::colors();
 
     auto l = computeLayout(base, size);
+    float cx = l.cx;
+    float cy = l.cy;
 
-    // Background
-    dl->AddRectFilled(base, ImVec2(base.x + l.w, base.y + l.h),
-                      IM_COL32(30, 30, 30, 255), 12.0f);
+    // ─────────────────────────────────────────────────────────────────────────────
+//                        CONTROLLER SILHOUETTE DRAWING
+// ─────────────────────────────────────────────────────────────────────────────
+    if (g_controller_texture == 0) {
+        loadControllerTexture();
+    }
 
-    // Interactive sticks
+    if (g_controller_texture != 0) {
+        // Draw the controller image scaled exactly to size * 2.0f and centered on the shifted coordinates
+        float img_size = size * 2.0f; 
+        
+        ImVec2 p_min(cx - img_size * 0.5f, cy - img_size * 0.5f);
+        ImVec2 p_max(cx + img_size * 0.5f, cy + img_size * 0.5f);
+        
+        dl->AddImage((ImTextureID)(intptr_t)g_controller_texture, p_min, p_max, ImVec2(0,0), ImVec2(1,1), ui::u32(ui::rgba(255, 255, 255, 255)));
+    } else {
+        // Fallback: draw outline body vector representation
+        dl->AddCircleFilled(ImVec2(cx - size * 0.52f, cy + size * 0.22f), size * 0.34f, ui::u32(ui::rgba(20, 18, 25, 230)));
+        dl->AddCircleFilled(ImVec2(cx + size * 0.52f, cy + size * 0.22f), size * 0.34f, ui::u32(ui::rgba(20, 18, 25, 230)));
+        dl->AddRectFilled(ImVec2(cx - size * 0.65f, cy - size * 0.35f), ImVec2(cx + size * 0.65f, cy + size * 0.3f), ui::u32(ui::rgba(20, 18, 25, 230)), 35.0f);
+        dl->AddRectFilled(ImVec2(cx - size * 0.82f, cy + size * 0.1f), ImVec2(cx - size * 0.5f, cy + size * 0.62f), ui::u32(ui::rgba(20, 18, 25, 230)), 28.0f);
+        dl->AddRectFilled(ImVec2(cx + size * 0.5f, cy + size * 0.1f), ImVec2(cx + size * 0.82f, cy + size * 0.62f), ui::u32(ui::rgba(20, 18, 25, 230)), 28.0f);
+
+        std::vector<ImVec2> pts = {
+            ImVec2(cx - size * 0.28f, cy - size * 0.38f),
+            ImVec2(cx - size * 0.52f, cy - size * 0.38f),
+            ImVec2(cx - size * 0.72f, cy - size * 0.26f),
+            ImVec2(cx - size * 0.88f, cy - size * 0.05f),
+            ImVec2(cx - size * 0.95f, cy + size * 0.22f),
+            ImVec2(cx - size * 0.82f, cy + size * 0.62f),
+            ImVec2(cx - size * 0.65f, cy + size * 0.58f),
+            ImVec2(cx - size * 0.40f, cy + size * 0.28f),
+            ImVec2(cx - size * 0.18f, cy + size * 0.24f),
+            ImVec2(cx,                cy + size * 0.28f),
+            ImVec2(cx + size * 0.18f, cy + size * 0.24f),
+            ImVec2(cx + size * 0.40f, cy + size * 0.28f),
+            ImVec2(cx + size * 0.65f, cy + size * 0.58f),
+            ImVec2(cx + size * 0.82f, cy + size * 0.62f),
+            ImVec2(cx + size * 0.95f, cy + size * 0.22f),
+            ImVec2(cx + size * 0.88f, cy - size * 0.05f),
+            ImVec2(cx + size * 0.72f, cy - size * 0.26f),
+            ImVec2(cx + size * 0.52f, cy - size * 0.38f),
+            ImVec2(cx + size * 0.28f, cy - size * 0.38f),
+        };
+        dl->AddPolyline(pts.data(), pts.size(), ui::u32(ui::withAlpha(palette.primary2, 0.8f)), ImDrawFlags_Closed, 3.0f);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    //                           SHOULDER BUTTONS & TRIGGERS
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    auto drawShoulderInteractive = [&](ImVec2 sp, ImVec2 sz, int id, const char* txt) {
+        ImU32 col = state.button_states[id] ? ui::u32(palette.primary2) : ui::u32(ui::rgba(25, 22, 33, 160));
+        dl->AddRectFilled(sp, ImVec2(sp.x + sz.x, sp.y + sz.y), col, 4.0f);
+        dl->AddRect(sp, ImVec2(sp.x + sz.x, sp.y + sz.y), ui::u32(palette.border), 4.0f, 0, 1.0f);
+        ImVec2 ts = ImGui::CalcTextSize(txt);
+        dl->AddText(ImVec2(sp.x + (sz.x - ts.x) * 0.5f, sp.y + (sz.y - ts.y) * 0.5f), ui::u32(palette.text), txt);
+
+        ImGui::SetCursorScreenPos(sp);
+        ImGui::InvisibleButton((std::string("##shldr") + txt).c_str(), sz);
+        if (ImGui::IsItemActive()) state.button_states[id] = true;
+        else if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || !ImGui::IsItemHovered()) state.button_states[id] = false;
+    };
+
+    /*
+     *     L2 [===]   [===] R2
+     *     L1 [---]   [---] R1
+     */
+    ImVec2 sh_sz(size * 0.18f, size * 0.06f);
+    ImVec2 trig_sz(size * 0.18f, size * 0.08f);
+    
+    // Position bumpers and triggers exactly on the top shoulders of the DualSense silhouette
+    ImVec2 l2_top(cx - size * 0.646f, cy - size * 0.61f);
+    ImVec2 r2_top(cx + size * 0.466f, cy - size * 0.61f);
+    
+    ImVec2 l1_top(cx - size * 0.646f, cy - size * 0.525f);
+    ImVec2 r1_top(cx + size * 0.466f, cy - size * 0.525f);
+
+    // Bumpers L1/R1
+    drawShoulderInteractive(l1_top, sh_sz, 4, "L1");
+    drawShoulderInteractive(r1_top, sh_sz, 5, "R1");
+
+    // Triggers L2/R2
+    float l2_val = state.trigger_l2 / 255.0f;
+    float r2_val = state.trigger_r2 / 255.0f;
+
+    // L2
+    dl->AddRectFilled(l2_top, l2_top + trig_sz, ui::u32(ui::rgba(25, 22, 33, 160)), 6.0f);
+    dl->AddRectFilled(ImVec2(l2_top.x, l2_top.y + trig_sz.y * (1.0f - l2_val)),
+                      l2_top + trig_sz,
+                      ui::u32(palette.primary2), 6.0f);
+    dl->AddRect(l2_top, l2_top + trig_sz, ui::u32(palette.border), 6.0f, 0, 1.0f);
+    ImVec2 l2_ts = ImGui::CalcTextSize("L2");
+    dl->AddText(ImVec2(l2_top.x + (trig_sz.x - l2_ts.x) * 0.5f, l2_top.y + (trig_sz.y - l2_ts.y) * 0.5f), ui::u32(palette.text), "L2");
+
+    // R2
+    dl->AddRectFilled(r2_top, r2_top + trig_sz, ui::u32(ui::rgba(25, 22, 33, 160)), 6.0f);
+    dl->AddRectFilled(ImVec2(r2_top.x, r2_top.y + trig_sz.y * (1.0f - r2_val)),
+                      r2_top + trig_sz,
+                      ui::u32(palette.primary2), 6.0f);
+    dl->AddRect(r2_top, r2_top + trig_sz, ui::u32(palette.border), 6.0f, 0, 1.0f);
+    ImVec2 r2_ts = ImGui::CalcTextSize("R2");
+    dl->AddText(ImVec2(r2_top.x + (trig_sz.x - r2_ts.x) * 0.5f, r2_top.y + (trig_sz.y - r2_ts.y) * 0.5f), ui::u32(palette.text), "R2");
+
+    // Click & Drag triggers
+    ImGui::SetCursorScreenPos(l2_top);
+    ImGui::InvisibleButton("##L2", trig_sz);
+    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+        float val = 1.0f - (ImGui::GetMousePos().y - l2_top.y) / trig_sz.y;
+        state.trigger_l2 = static_cast<uint8_t>(std::clamp(val * 255.0f, 0.0f, 255.0f));
+    } else if (ImGui::IsItemHovered() && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        state.trigger_l2 = 255;
+    } else if (!ImGui::IsItemActive()) {
+        state.trigger_l2 = 0;
+    }
+
+    ImGui::SetCursorScreenPos(r2_top);
+    ImGui::InvisibleButton("##R2", trig_sz);
+    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+        float val = 1.0f - (ImGui::GetMousePos().y - r2_top.y) / trig_sz.y;
+        state.trigger_r2 = static_cast<uint8_t>(std::clamp(val * 255.0f, 0.0f, 255.0f));
+    } else if (ImGui::IsItemHovered() && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        state.trigger_r2 = 255;
+    } else if (!ImGui::IsItemActive()) {
+        state.trigger_r2 = 0;
+    }
+
+    // ── Sticks L3/R3 ────────────────────────────────────────
+
     auto drawInteractiveStick = [&](ImVec2 sc, int idx_x, int idx_y, const char* label) {
         float r = l.stick_radius;
-        // Draw stick base
-        dl->AddCircle(sc, r + 2, IM_COL32(80, 80, 80, 255), 32, 2.0f);
-        dl->AddCircleFilled(sc, r, IM_COL32(50, 50, 50, 255), 32);
+        // Subtle guide ring
+        dl->AddCircle(sc, r + 2, ui::u32(ui::withAlpha(palette.primary2, 0.25f)), 32, 1.0f);
 
-        // Current stick position
+        // Stick position indicator
         uint8_t xv = state.stick_states[idx_x];
         uint8_t yv = state.stick_states[idx_y];
         float dx = (xv - 128) / 128.0f * r * 0.7f;
         float dy = (yv - 128) / 128.0f * r * 0.7f;
         ImVec2 dot_pos(sc.x + dx, sc.y + dy);
-        dl->AddCircleFilled(dot_pos, r * 0.4f, IM_COL32(100, 200, 140, 255), 16);
+        dl->AddCircleFilled(dot_pos, r * 0.4f, ui::u32(palette.success), 16);
+        dl->AddCircle(dot_pos, r * 0.4f + 1, ui::u32(palette.text), 16, 1.0f);
 
-        dl->AddText(ImVec2(sc.x - 8, sc.y + r + 4), IM_COL32(180, 180, 180, 255), label);
+        dl->AddText(ImVec2(sc.x - 8, sc.y + r + 4), ui::u32(palette.muted), label);
 
-        // Invisible button for drag interaction
+        // Stick dragging
         ImGui::SetCursorScreenPos(ImVec2(sc.x - r, sc.y - r));
         ImGui::InvisibleButton((std::string("stick_") + label).c_str(), ImVec2(r * 2, r * 2));
 
@@ -135,15 +282,7 @@ void renderInteractivePadVisualizer(PadStateInput& state, float size) {
             state.stick_states[idx_y] = static_cast<uint8_t>(ry);
         }
 
-        if (!ImGui::IsItemActive() && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            // Snap back to center
-            if (state.stick_states[idx_x] != 128 || state.stick_states[idx_y] != 128) {
-                // Gradual return or instant? Let's do instant snap back on release
-                // Only snap if this stick was being dragged (we'd need per-stick state, skip for now)
-            }
-        }
-
-        // L3/R3 click
+        // Click L3/R3
         if (ImGui::IsItemClicked()) {
             int btn_id = (label[0] == 'L') ? 10 : 11;
             state.button_states[btn_id] = !state.button_states[btn_id];
@@ -153,181 +292,173 @@ void renderInteractivePadVisualizer(PadStateInput& state, float size) {
     drawInteractiveStick(l.l_stick_c, 0, 1, "L");
     drawInteractiveStick(l.r_stick_c, 2, 3, "R");
 
-    // D-pad with clickable regions
-    float ds = l.dpad_size;
+    // ── D-pad ───────────────────────────────────────────────
+    
+    float arrow_dist = size * 0.065f;
+    float arrow_w = size * 0.038f;
+    float arrow_h = size * 0.026f;
 
-    // Up triangle
-    ImVec2 up_a(l.dpad_center.x, l.dpad_center.y - ds);
-    ImVec2 up_b(l.dpad_center.x - ds, l.dpad_center.y + ds * 0.3f);
-    ImVec2 up_c(l.dpad_center.x + ds, l.dpad_center.y + ds * 0.3f);
-    ImU32 up_col = state.button_states[12] ? IM_COL32(200, 200, 200, 255) : IM_COL32(70, 70, 70, 255);
-    dl->AddTriangleFilled(up_a, up_b, up_c, up_col);
+    auto drawDpadArrow = [&](ImVec2 a, ImVec2 b, ImVec2 c, int btn_id) {
+        bool pressed = state.button_states[btn_id];
+        if (pressed) {
+            dl->AddTriangleFilled(a, b, c, ui::u32(palette.primary2));
+        } else {
+            dl->AddTriangle(a, b, c, ui::u32(ui::rgba(255, 255, 255, 30)), 1.0f);
+        }
+    };
 
-    // Down triangle
-    ImVec2 dn_a(l.dpad_center.x, l.dpad_center.y + ds);
-    ImVec2 dn_b(l.dpad_center.x - ds, l.dpad_center.y - ds * 0.3f);
-    ImVec2 dn_c(l.dpad_center.x + ds, l.dpad_center.y - ds * 0.3f);
-    ImU32 dn_col = state.button_states[13] ? IM_COL32(200, 200, 200, 255) : IM_COL32(70, 70, 70, 255);
-    dl->AddTriangleFilled(dn_a, dn_b, dn_c, dn_col);
+    // Up arrow
+    ImVec2 up_c(l.dpad_center.x, l.dpad_center.y - arrow_dist);
+    drawDpadArrow(
+        ImVec2(up_c.x, up_c.y - arrow_h),
+        ImVec2(up_c.x - arrow_w, up_c.y + arrow_h * 0.5f),
+        ImVec2(up_c.x + arrow_w, up_c.y + arrow_h * 0.5f),
+        12
+    );
 
-    // Left triangle
-    ImVec2 lf_a(l.dpad_center.x - ds, l.dpad_center.y);
-    ImVec2 lf_b(l.dpad_center.x + ds * 0.3f, l.dpad_center.y - ds);
-    ImVec2 lf_c(l.dpad_center.x + ds * 0.3f, l.dpad_center.y + ds);
-    ImU32 lf_col = state.button_states[14] ? IM_COL32(200, 200, 200, 255) : IM_COL32(70, 70, 70, 255);
-    dl->AddTriangleFilled(lf_a, lf_b, lf_c, lf_col);
+    // Down arrow
+    ImVec2 dn_c(l.dpad_center.x, l.dpad_center.y + arrow_dist);
+    drawDpadArrow(
+        ImVec2(dn_c.x, dn_c.y + arrow_h),
+        ImVec2(dn_c.x - arrow_w, dn_c.y - arrow_h * 0.5f),
+        ImVec2(dn_c.x + arrow_w, dn_c.y - arrow_h * 0.5f),
+        13
+    );
 
-    // Right triangle
-    ImVec2 rt_a(l.dpad_center.x + ds, l.dpad_center.y);
-    ImVec2 rt_b(l.dpad_center.x - ds * 0.3f, l.dpad_center.y - ds);
-    ImVec2 rt_c(l.dpad_center.x - ds * 0.3f, l.dpad_center.y + ds);
-    ImU32 rt_col = state.button_states[15] ? IM_COL32(200, 200, 200, 255) : IM_COL32(70, 70, 70, 255);
-    dl->AddTriangleFilled(rt_a, rt_b, rt_c, rt_col);
+    // Left arrow
+    ImVec2 lf_c(l.dpad_center.x - arrow_dist, l.dpad_center.y);
+    drawDpadArrow(
+        ImVec2(lf_c.x - arrow_h, lf_c.y),
+        ImVec2(lf_c.x + arrow_h * 0.5f, lf_c.y - arrow_w),
+        ImVec2(lf_c.x + arrow_h * 0.5f, lf_c.y + arrow_w),
+        14
+    );
 
-    // D-pad invisible buttons
-    float dpad_btn_size = ds * 1.2f;
-    ImVec2 dpad_btn_offset(dpad_btn_size, dpad_btn_size);
+    // Right arrow
+    ImVec2 rt_c(l.dpad_center.x + arrow_dist, l.dpad_center.y);
+    drawDpadArrow(
+        ImVec2(rt_c.x + arrow_h, rt_c.y),
+        ImVec2(rt_c.x - arrow_h * 0.5f, rt_c.y - arrow_w),
+        ImVec2(rt_c.x - arrow_h * 0.5f, rt_c.y + arrow_w),
+        15
+    );
 
+    // D-pad interactive overlays
+    float btn_size = size * 0.10f;
     const struct { const char* id; ImVec2 pos; int btn; } dpad_btns[] = {
-        {"##dpad_up",    {l.dpad_center.x - dpad_btn_size * 0.5f, l.dpad_center.y - dpad_btn_size * 2.0f}, 12},
-        {"##dpad_down",  {l.dpad_center.x - dpad_btn_size * 0.5f, l.dpad_center.y + dpad_btn_size * 0.7f}, 13},
-        {"##dpad_left",  {l.dpad_center.x - dpad_btn_size * 2.0f, l.dpad_center.y - dpad_btn_size * 0.5f}, 14},
-        {"##dpad_right", {l.dpad_center.x + dpad_btn_size * 0.7f, l.dpad_center.y - dpad_btn_size * 0.5f}, 15},
+        {"##dpad_up",    {l.dpad_center.x - btn_size * 0.5f, l.dpad_center.y - arrow_dist - btn_size * 0.5f}, 12},
+        {"##dpad_down",  {l.dpad_center.x - btn_size * 0.5f, l.dpad_center.y + arrow_dist - btn_size * 0.5f}, 13},
+        {"##dpad_left",  {l.dpad_center.x - arrow_dist - btn_size * 0.5f, l.dpad_center.y - btn_size * 0.5f}, 14},
+        {"##dpad_right", {l.dpad_center.x + arrow_dist - btn_size * 0.5f, l.dpad_center.y - btn_size * 0.5f}, 15},
     };
 
     for (auto& db : dpad_btns) {
         ImGui::SetCursorScreenPos(db.pos);
-        ImGui::InvisibleButton(db.id, dpad_btn_offset);
+        ImGui::InvisibleButton(db.id, ImVec2(btn_size, btn_size));
         if (ImGui::IsItemActive()) state.button_states[db.btn] = true;
         else if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || !ImGui::IsItemHovered()) state.button_states[db.btn] = false;
     }
 
-    // Face buttons with invisible overlays
+    // ── Face Buttons ────────────────────────────────────────
+    
     const struct { ImVec2 off; int id; ImU32 col; const char* txt; } face_btns[] = {
-        {{0, -l.fb_dist}, 3, IM_COL32(60, 180, 120, 200), "T"},
-        {{l.fb_dist, 0},  1, IM_COL32(200, 60, 60, 200),  "O"},
-        {{0, l.fb_dist},  0, IM_COL32(60, 120, 200, 200), "X"},
-        {{-l.fb_dist, 0}, 2, IM_COL32(200, 120, 180, 200),"S"},
+        {{0, -l.fb_dist}, 3, IM_COL32(60, 180, 120, 220), "T"},
+        {{l.fb_dist, 0},  1, IM_COL32(200, 60, 60, 220),  "O"},
+        {{0, l.fb_dist},  0, IM_COL32(60, 120, 200, 220), "X"},
+        {{-l.fb_dist, 0}, 2, IM_COL32(200, 120, 180, 220),"S"},
     };
 
     for (auto& fb : face_btns) {
         ImVec2 fc(l.fb_center.x + fb.off.x, l.fb_center.y + fb.off.y);
-        ImU32 col = state.button_states[fb.id] ? IM_COL32(255, 255, 255, 255) : fb.col;
-        dl->AddCircleFilled(fc, l.fb_radius, col, 16);
-        dl->AddCircle(fc, l.fb_radius + 1, IM_COL32(120, 120, 120, 255), 16, 1.5f);
-        auto ts = ImGui::CalcTextSize(fb.txt);
-        dl->AddText(ImVec2(fc.x - ts.x * 0.5f, fc.y - ts.y * 0.5f), IM_COL32(0, 0, 0, 255), fb.txt);
-
-        // Invisible clickable area
+        
         float r2 = l.fb_radius + 4;
         ImGui::SetCursorScreenPos(ImVec2(fc.x - r2, fc.y - r2));
         ImGui::InvisibleButton((std::string("##face") + fb.txt).c_str(), ImVec2(r2 * 2, r2 * 2));
+        
+        bool pressed = state.button_states[fb.id];
+        bool hovered = ImGui::IsItemHovered();
+        
+        if (pressed) {
+            dl->AddCircleFilled(fc, l.fb_radius, fb.col, 16);
+            dl->AddCircle(fc, l.fb_radius + 1, IM_COL32(255, 255, 255, 255), 16, 2.0f);
+            auto ts = ImGui::CalcTextSize(fb.txt);
+            dl->AddText(ImVec2(fc.x - ts.x * 0.5f, fc.y - ts.y * 0.5f), IM_COL32(255, 255, 255, 255), fb.txt);
+        } else if (hovered) {
+            ImU32 hover_col = ui::u32(ui::withAlpha(ui::rgba(255, 255, 255), 0.25f));
+            dl->AddCircleFilled(fc, l.fb_radius, hover_col, 16);
+            dl->AddCircle(fc, l.fb_radius + 1, ui::u32(palette.primary2), 16, 1.0f);
+        } else {
+            dl->AddCircle(fc, l.fb_radius, ui::u32(ui::rgba(255, 255, 255, 30)), 16, 1.0f);
+        }
+        
         if (ImGui::IsItemActive()) state.button_states[fb.id] = true;
         else if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || !ImGui::IsItemHovered()) state.button_states[fb.id] = false;
     }
 
-    // Shoulder L1/R1
-    auto drawShoulderInteractive = [&](ImVec2 sp, int id, const char* txt) {
-        ImVec2 sz(l.size * 0.15f, l.size * 0.06f);
-        ImU32 col = state.button_states[id] ? IM_COL32(180, 180, 180, 255) : IM_COL32(60, 60, 60, 255);
-        dl->AddRectFilled(sp, ImVec2(sp.x + sz.x, sp.y + sz.y), col, 4.0f);
-        dl->AddText(ImVec2(sp.x + l.size * 0.02f, sp.y), IM_COL32(200, 200, 200, 255), txt);
+    // ── Create, PS, Options ─────────────────────────────────
 
-        ImGui::SetCursorScreenPos(sp);
-        ImGui::InvisibleButton((std::string("##shldr") + txt).c_str(), sz);
-        if (ImGui::IsItemActive()) state.button_states[id] = true;
-        else if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || !ImGui::IsItemHovered()) state.button_states[id] = false;
-    };
+    auto drawCenterInteractive = [&](float bx, float by, int id, const char* lbl) {
+        bool pressed = state.button_states[id];
+        ImU32 col = pressed ? ui::u32(palette.primary2) : ui::u32(ui::rgba(255, 255, 255, 20));
+        dl->AddCircleFilled(ImVec2(bx, by), size * 0.02f, col, 8);
+        dl->AddCircle(ImVec2(bx, by), size * 0.02f + 1, ui::u32(palette.border), 8, 1.0f);
 
-    drawShoulderInteractive(ImVec2(base.x + l.w * 0.05f, l.shoulder_y), 4, "L1");
-    drawShoulderInteractive(ImVec2(base.x + l.w * 0.80f, l.shoulder_y), 5, "R1");
-
-    // L2/R2 triggers
-    float l2_val = state.trigger_l2 / 255.0f;
-    float r2_val = state.trigger_r2 / 255.0f;
-    ImVec2 l2_top(base.x + l.w * 0.05f, l.shoulder_y + l.size * 0.02f);
-    ImVec2 l2_sz(l.trig_width, l.trig_height);
-    ImVec2 r2_top(base.x + l.w * 0.85f, l.shoulder_y + l.size * 0.02f);
-    ImVec2 r2_sz(l.trig_width, l.trig_height);
-
-    dl->AddRectFilled(l2_top, l2_top + l2_sz, IM_COL32(50, 50, 50, 255), 4.0f);
-    dl->AddRectFilled(ImVec2(l2_top.x, l2_top.y + l.trig_height * (1.0f - l2_val)),
-                      ImVec2(l2_top.x + l.trig_width, l2_top.y + l.trig_height),
-                      IM_COL32(150, 150, 150, 255), 4.0f);
-    dl->AddText(ImVec2(l2_top.x, l2_top.y + l.trig_height + 4), IM_COL32(200, 200, 200, 255), "L2");
-
-    dl->AddRectFilled(r2_top, r2_top + r2_sz, IM_COL32(50, 50, 50, 255), 4.0f);
-    dl->AddRectFilled(ImVec2(r2_top.x, r2_top.y + l.trig_height * (1.0f - r2_val)),
-                      ImVec2(r2_top.x + l.trig_width, r2_top.y + l.trig_height),
-                      IM_COL32(150, 150, 150, 255), 4.0f);
-    dl->AddText(ImVec2(r2_top.x, r2_top.y + l.trig_height + 4), IM_COL32(200, 200, 200, 255), "R2");
-
-    // L2/R2 clickable
-    ImGui::SetCursorScreenPos(l2_top);
-    ImGui::InvisibleButton("##L2", l2_sz);
-    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-        float val = 1.0f - (ImGui::GetMousePos().y - l2_top.y) / l.trig_height;
-        state.trigger_l2 = static_cast<uint8_t>(std::clamp(val * 255.0f, 0.0f, 255.0f));
-    } else if (ImGui::IsItemHovered() && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-        state.trigger_l2 = 255;
-    } else if (!ImGui::IsItemActive()) {
-        state.trigger_l2 = 0;
-    }
-
-    ImGui::SetCursorScreenPos(r2_top);
-    ImGui::InvisibleButton("##R2", r2_sz);
-    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-        float val = 1.0f - (ImGui::GetMousePos().y - r2_top.y) / l.trig_height;
-        state.trigger_r2 = static_cast<uint8_t>(std::clamp(val * 255.0f, 0.0f, 255.0f));
-    } else if (ImGui::IsItemHovered() && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-        state.trigger_r2 = 255;
-    } else if (!ImGui::IsItemActive()) {
-        state.trigger_r2 = 0;
-    }
-
-    // Center buttons (Create, PS, Options)
-    float cy = base.y + l.h * 0.08f;
-    float cbr = l.size * 0.035f;
-
-    auto drawCenterInteractive = [&](float bx, int id, const char* lbl) {
-        ImU32 col = state.button_states[id] ? IM_COL32(180, 180, 180, 255) : IM_COL32(60, 60, 60, 255);
-        dl->AddCircleFilled(ImVec2(bx, cy), cbr, col, 8);
-        dl->AddText(ImVec2(bx - 4, cy + cbr + 2), IM_COL32(160, 160, 160, 255), lbl);
-
-        ImGui::SetCursorScreenPos(ImVec2(bx - cbr - 4, cy - cbr - 4));
-        ImGui::InvisibleButton((std::string("##ctr") + lbl).c_str(), ImVec2((cbr + 4) * 2, (cbr + 4) * 2));
+        ImGui::SetCursorScreenPos(ImVec2(bx - size * 0.04f, by - size * 0.04f));
+        ImGui::InvisibleButton((std::string("##ctr") + lbl).c_str(), ImVec2(size * 0.08f, size * 0.08f));
         if (ImGui::IsItemClicked()) state.button_states[id] = !state.button_states[id];
     };
 
-    drawCenterInteractive(l.cx - l.size * 0.2f, 8, "Create");
-    drawCenterInteractive(l.cx, 16, "PS");
-    drawCenterInteractive(l.cx + l.size * 0.2f, 9, "Options");
+    // Draw buttons
+    float create_x = cx - size * 0.365f;
+    float create_y = cy - size * 0.432f;
+    float options_x = cx + size * 0.365f;
+    float options_y = cy - size * 0.432f;
+    float ps_x = cx;
+    float ps_y = cy + size * 0.035f;
 
-    // Touchpad
-    float touch_y = base.y + l.h * 0.15f;
-    ImVec2 tp_min(l.cx - l.size * 0.3f, touch_y);
-    ImVec2 tp_max(l.cx + l.size * 0.3f, touch_y + l.size * 0.08f);
-    ImU32 touch_col = state.button_states[17] ? IM_COL32(140, 140, 140, 255) : IM_COL32(45, 45, 45, 255);
-    dl->AddRectFilled(tp_min, tp_max, touch_col, 6.0f);
-    dl->AddText(ImVec2(l.cx - 25, touch_y + l.size * 0.01f), IM_COL32(150, 150, 150, 255), "Touchpad");
+    drawCenterInteractive(create_x, create_y, 8, "Create");
+    drawCenterInteractive(ps_x, ps_y, 16, "PS");
+    drawCenterInteractive(options_x, options_y, 9, "Options");
+
+    // Draw text labels with custom positioning to prevent touchpad overlap
+    ImVec2 ts_c = ImGui::CalcTextSize("Create");
+    dl->AddText(ImVec2(create_x - ts_c.x - size * 0.03f, create_y - ts_c.y * 0.5f), ui::u32(palette.muted), "Create");
+
+    ImVec2 ts_o = ImGui::CalcTextSize("Options");
+    dl->AddText(ImVec2(options_x + size * 0.03f, options_y - ts_o.y * 0.5f), ui::u32(palette.muted), "Options");
+
+    ImVec2 ts_p = ImGui::CalcTextSize("PS");
+    dl->AddText(ImVec2(ps_x - ts_p.x * 0.5f, ps_y + size * 0.03f), ui::u32(palette.muted), "PS");
+
+    // ── Touchpad ────────────────────────────────────────────
+
+    ImVec2 tp_min(cx - size * 0.360f, cy - size * 0.543f);
+    ImVec2 tp_max(cx + size * 0.360f, cy - size * 0.202f);
+    ImU32 touch_col = state.button_states[17] ? ui::u32(ui::withAlpha(palette.primary2, 0.4f)) : ui::u32(ui::rgba(25, 22, 33, 120));
+    dl->AddRectFilled(tp_min, tp_max, touch_col, 8.0f);
+    dl->AddRect(tp_min, tp_max, ui::u32(palette.border), 8.0f, 0, 1.0f);
+    ImVec2 tp_ts = ImGui::CalcTextSize("Touchpad");
+    dl->AddText(ImVec2(cx - tp_ts.x * 0.5f, cy - size * 0.37f - tp_ts.y * 0.5f), ui::u32(palette.text), "Touchpad");
 
     ImGui::SetCursorScreenPos(tp_min);
     ImGui::InvisibleButton("##touchpad", tp_max - tp_min);
     if (ImGui::IsItemClicked()) state.button_states[17] = !state.button_states[17];
 
-    // L3/R3 indicators
-    if (state.button_states[10])
-        dl->AddText(ImVec2(l.l_stick_c.x - 8, l.l_stick_c.y - l.size * 0.2f), IM_COL32(100, 200, 140, 255), "L3");
-    if (state.button_states[11])
-        dl->AddText(ImVec2(l.r_stick_c.x - 8, l.r_stick_c.y - l.size * 0.2f), IM_COL32(100, 200, 140, 255), "R3");
+    // ── L3/R3 Indicators ────────────────────────────────────
 
-    ImGui::Dummy(ImVec2(l.w, l.h + 10));
+    if (state.button_states[10])
+        dl->AddText(ImVec2(l.l_stick_c.x - 8, l.l_stick_c.y - l.stick_radius - 16), ui::u32(palette.success), "L3");
+    if (state.button_states[11])
+        dl->AddText(ImVec2(l.r_stick_c.x - 8, l.r_stick_c.y - l.stick_radius - 16), ui::u32(palette.success), "R3");
+
+    ImGui::Dummy(ImVec2(l.w, l.h + 20));
 }
 
-// Non-interactive version (for display only)
+// Display-only version
 void renderPadVisualizer(const PadStateInput& state, float size) {
     PadStateInput copy = state;
     renderInteractivePadVisualizer(copy, size);
 }
 
 } // namespace ghostpad
+

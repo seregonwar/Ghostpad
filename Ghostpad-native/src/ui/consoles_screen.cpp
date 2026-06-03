@@ -1,75 +1,74 @@
 // Ghostpad Native - PS5 Remote Controller
-// Copyright (c) 2024  seregonwar
+// Copyright (c) 2026  seregowar
 // Based on original Ghostpad by stonedmodder  
 // Licensed under the GNU General Public License v3.0. See LICENSE file for details.
 
 #include "ui/app.h"
+#include "ui/native_theme.h"
 #include "imgui.h"
-#include "imgui_internal.h"
 #include <thread>
 
 namespace ghostpad {
 
 void renderConsolesScreen(App& app) {
-    ImGui::TextColored(ImVec4(0.39f, 0.78f, 0.55f, 1.0f), "CONSOLES");
-    ImGui::SameLine();
-    ImGui::TextUnformatted("- Manage PS5 Consoles");
-    ImGui::Separator();
-    ImGui::Spacing();
+    const auto& p = ui::colors();
+    float avail_w = ImGui::GetContentRegionAvail().x;
 
     // Connection bar
+    ui::beginCard("ConnectBar", ImVec2(avail_w, 110));
+    ui::sectionLabel("Direct Connect", ICON_FA_PLUG);
+    ImGui::Spacing();
+
     static char ip_buf[64] = {};
     static int port_buf = 6967;
 
-    ImGui::TextUnformatted("Quick Connect");
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(p.muted, "%s IP:", ICON_FA_DESKTOP);
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(150);
-    ImGui::InputText("##IP", ip_buf, sizeof(ip_buf));
+    ImGui::PushItemWidth(140);
+    ImGui::InputTextWithHint("##IP", "0.0.0.0", ip_buf, sizeof(ip_buf));
+    ImGui::PopItemWidth();
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(80);
-    ImGui::InputInt("Port", &port_buf);
+    
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(p.muted, "Port:");
+    ImGui::SameLine();
+    ImGui::PushItemWidth(70);
+    ImGui::InputInt("##Port", &port_buf, 0, 0);
+    ImGui::PopItemWidth();
     ImGui::SameLine();
 
-    if (ImGui::Button("Connect", ImVec2(100, 0))) {
+    if (ui::primaryButton(ICON_FA_LINK "  Connect", ImVec2(110, 32))) {
         std::string ip(ip_buf);
         if (!ip.empty()) {
             app.addStatus("Connecting to " + ip + "...");
             auto settings = app.settings.read();
-            std::string elf_path = app.settings.resolvePayloadPath();
+            std::string elf = app.settings.resolvePayloadPath();
 
-            // Deploy payload
-            if (settings.auto_deploy_on_connect && !elf_path.empty()) {
+            if (settings.auto_deploy_on_connect && !elf.empty()) {
                 PayloadDeployer::Options opts;
-                opts.elf_path = elf_path;
-                opts.force_deploy = false;
+                opts.elf_path = elf;
                 opts.auto_bind_via_klog = settings.auto_bind_via_klog;
                 opts.status_callback = [&app](const DeployStatus& s) {
-                    app.addStatus(s.phase + ": " + s.message, s.phase == "error");
+                    app.addStatus(s.message, s.phase == "error");
                 };
-
-                auto result = app.deployer.ensurePayloadRunning(ip, opts);
-                if (!result.ok) {
-                    app.addStatus("Deploy failed: " + result.message, true);
-                }
+                app.deployer.ensurePayloadRunning(ip, opts);
             }
 
             if (app.ghostpad.connect(ip, port_buf)) {
                 app.selected_console_ip = ip;
                 app.selected_console_port = port_buf;
                 app.addStatus("Connected to " + ip);
-
-                // Connect beep
-                if (settings.connect_beep_enabled && app.deployer.auto_adopted) {
+                if (settings.connect_beep_enabled && app.deployer.auto_adopted)
                     BeeperClient::buzz(ip, settings.connect_beep_type);
-                }
             } else {
-                app.addStatus("Failed to connect to " + ip, true);
+                app.addStatus("Connection failed", true);
             }
         }
     }
 
     ImGui::SameLine();
-    if (ImGui::Button("Disconnect", ImVec2(100, 0))) {
+    if (ui::dangerButton(ICON_FA_LINK_SLASH "  Disconnect", ImVec2(120, 32))) {
         app.ghostpad.disconnect();
         app.deployer.stopKlogWatcher();
         app.selected_console_ip.clear();
@@ -77,123 +76,141 @@ void renderConsolesScreen(App& app) {
     }
 
     ImGui::SameLine();
-    if (ImGui::Button("Scan Network", ImVec2(140, 0))) {
-        app.addStatus("Scanning network (this may take a while)...");
+    if (ui::softButton(ICON_FA_WIFI "  Scan Network", ImVec2(140, 32))) {
+        app.addStatus("Scanning subnet...");
         std::thread([&app]() {
-            auto results = GhostpadClient::scanNetwork();
-            char buf[128];
-            snprintf(buf, sizeof(buf), "Scan complete: %zu PS5(s) found", results.size());
-            app.addStatus(buf);
+            auto r = GhostpadClient::scanNetwork();
+            app.addStatus(std::to_string(r.size()) + " host(s) found");
         }).detach();
     }
 
-    ImGui::Spacing();
-    ImGui::Separator();
+    ui::endCard();
+
     ImGui::Spacing();
 
-    // Saved consoles list
-    ImGui::TextUnformatted("Saved Consoles");
-    ImGui::SameLine();
-    if (ImGui::Button("Add Console", ImVec2(120, 0))) {
+    // Saved consoles
+    ui::beginCard("ConsolesList", ImVec2(avail_w, 0));
+    ui::sectionLabel("Saved Consoles", ICON_FA_DATABASE);
+    
+    // Add Console float right
+    ImGui::SetCursorPosY(16);
+    ImGui::SetCursorPosX(avail_w - 150);
+    if (ui::primaryButton(ICON_FA_PLUS "  Add Console", ImVec2(130, 30)))
         ImGui::OpenPopup("AddConsolePopup");
-    }
 
+    ImGui::Spacing();
     ImGui::Spacing();
 
     auto consoles = app.consoles.list();
     if (consoles.empty()) {
-        ImGui::TextUnformatted("No consoles saved. Add one or scan the network.");
+        ImGui::TextColored(p.muted, "No saved consoles. Add one or scan the network.");
     }
 
     for (auto& c : consoles) {
         ImGui::PushID(c.id.c_str());
-        ImGui::BeginChild("ConsoleEntry", ImVec2(ImGui::GetContentRegionAvail().x, 60), true,
+        float item_h = 58.0f;
+
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, p.bg1);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
+        ImGui::BeginChild("ConsoleRow", ImVec2(avail_w - 36, item_h), true,
                           ImGuiWindowFlags_NoScrollbar);
 
-        ImGui::Text("%s", c.name.c_str());
-        ImGui::SameLine(200);
-        ImGui::Text("IP: %s:%d", c.ip.c_str(), c.port);
-        ImGui::SameLine(400);
-        ImGui::Text("ELF: %d", c.elf_loader_port);
+        ImGui::SetCursorPos(ImVec2(16, 14));
+        ImGui::TextColored(p.text, "%s  %s", ICON_FA_DESKTOP, c.name.c_str());
+        
+        ImGui::SameLine(avail_w * 0.26f);
+        ImGui::SetCursorPosY(14);
+        ImGui::TextColored(p.muted, "%s  %s:%d", ICON_FA_SIGNAL, c.ip.c_str(), c.port);
+        
+        ImGui::SameLine(avail_w * 0.48f);
+        ImGui::TextColored(p.dim, "%s  Loader: %d", ICON_FA_DOWNLOAD, c.elf_loader_port);
+        
+        ImGui::SameLine(avail_w * 0.66f);
+        ImGui::TextColored(p.dim, "%s  %s", ICON_FA_CALENDAR, c.updated_at.substr(0, 10).c_str());
 
-        ImGui::SameLine(550);
-        if (ImGui::Button("Connect", ImVec2(80, 0))) {
+        ImGui::SameLine(avail_w - 240);
+        ImGui::SetCursorPosY(13);
+        if (ui::primaryButton(ICON_FA_LINK "  Connect", ImVec2(100, 30))) {
             auto settings = app.settings.read();
-            std::string elf_path = app.settings.resolvePayloadPath();
-
-            if (settings.auto_deploy_on_connect && !elf_path.empty()) {
+            std::string elf = app.settings.resolvePayloadPath();
+            if (settings.auto_deploy_on_connect && !elf.empty()) {
                 PayloadDeployer::Options opts;
-                opts.elf_path = elf_path;
+                opts.elf_path = elf;
                 opts.elf_loader_port = c.elf_loader_port;
                 opts.auto_bind_via_klog = settings.auto_bind_via_klog;
                 opts.status_callback = [&app](const DeployStatus& s) {
-                    app.addStatus(s.phase + ": " + s.message, s.phase == "error");
+                    app.addStatus(s.message, s.phase == "error");
                 };
                 app.deployer.ensurePayloadRunning(c.ip, opts);
             }
-
             if (app.ghostpad.connect(c.ip, c.port)) {
                 app.selected_console_ip = c.ip;
                 app.selected_console_port = c.port;
                 app.addStatus("Connected to " + c.name);
+                if (settings.connect_beep_enabled && app.deployer.auto_adopted)
+                    BeeperClient::buzz(c.ip, settings.connect_beep_type);
             } else {
-                app.addStatus("Failed to connect", true);
+                app.addStatus("Connection failed", true);
             }
         }
-
         ImGui::SameLine();
-        if (ImGui::Button("Delete", ImVec2(60, 0))) {
-            ImGui::OpenPopup("DeleteConfirm");
-        }
-
-        if (ImGui::BeginPopupModal("DeleteConfirm", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::Text("Delete console '%s'?", c.name.c_str());
-            if (ImGui::Button("Yes", ImVec2(80, 0))) {
-                app.consoles.remove(c.id);
-                app.addStatus("Console deleted");
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("No", ImVec2(80, 0))) {
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndPopup();
+        if (ui::dangerButton(ICON_FA_TRASH "  Delete", ImVec2(90, 30))) {
+            app.consoles.remove(c.id);
+            app.addStatus("Console removed");
         }
 
         ImGui::EndChild();
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor();
         ImGui::PopID();
+        ImGui::Spacing();
     }
 
-    // Add console popup
+    ui::endCard();
+
+    // Add popup modal with padding
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24, 20));
     if (ImGui::BeginPopupModal("AddConsolePopup", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        static char name_buf[64] = {};
-        static char add_ip_buf[64] = {};
-        static int add_port = 6967;
-        static int add_elf_port = 9021;
+        ImGui::TextColored(p.primary2, "%s  Add New Console", ICON_FA_PLUS);
+        ImGui::Separator();
+        ImGui::Spacing();
 
-        ImGui::InputText("Name", name_buf, sizeof(name_buf));
-        ImGui::InputText("IP Address", add_ip_buf, sizeof(add_ip_buf));
-        ImGui::InputInt("Port", &add_port);
-        ImGui::InputInt("ELF Loader Port", &add_elf_port);
+        static char name[64] = {};
+        static char ip[64] = {};
+        static int port = 6967;
+        static int elf_port = 9021;
 
-        if (ImGui::Button("Save", ImVec2(100, 0))) {
-            std::string name(name_buf);
-            std::string ip(add_ip_buf);
-            if (!ip.empty()) {
-                app.consoles.add(name, ip, add_port, add_elf_port);
-                app.addStatus("Console added: " + ip);
+        ImGui::TextColored(p.muted, "Console Name:");
+        ImGui::InputText("##Name", name, sizeof(name));
+        
+        ImGui::TextColored(p.muted, "IP Address:");
+        ImGui::InputText("##IP", ip, sizeof(ip));
+        
+        ImGui::TextColored(p.muted, "Port:");
+        ImGui::InputInt("##Port", &port, 0, 0);
+        
+        ImGui::TextColored(p.muted, "ELF Port (Loader):");
+        ImGui::InputInt("##ElfPort", &elf_port, 0, 0);
+        
+        ImGui::Spacing();
+        ImGui::Spacing();
+
+        if (ui::primaryButton(ICON_FA_CHECK "  Save", ImVec2(110, 32))) {
+            if (strlen(ip) > 0) {
+                app.consoles.add(name, ip, port, elf_port);
+                app.addStatus("Console saved");
+                name[0] = ip[0] = '\0';
+                ImGui::CloseCurrentPopup();
             }
-            name_buf[0] = '\0';
-            add_ip_buf[0] = '\0';
-            ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(100, 0))) {
+        if (ui::softButton(ICON_FA_XMARK "  Cancel", ImVec2(110, 32))) {
             ImGui::CloseCurrentPopup();
         }
 
         ImGui::EndPopup();
     }
+    ImGui::PopStyleVar();
 }
 
 } // namespace ghostpad

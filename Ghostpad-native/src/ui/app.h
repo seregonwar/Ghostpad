@@ -1,7 +1,13 @@
 #pragma once
 
 // Ghostpad Native - PS5 Remote Controller
-// Copyright (c) 2024  seregonwar
+// Copyright (c) 2026  seregowar
+// Based on original Ghostpad by stonedmodder  
+// Licensed under the GNU General Public License v3.0. See LICENSE file for details.
+
+
+// Ghostpad Native - PS5 Remote Controller
+// Copyright (c) 2026  seregonwar
 // Based on original Ghostpad by stonedmodder  
 // Licensed under the GNU General Public License v3.0. See LICENSE file for details.
 
@@ -78,6 +84,10 @@ public:
     std::string selected_project_id;
     std::string rebind_button_name;
     int rebind_button_id = -1;
+    PadStateInput virtual_pad;
+
+    // Active controller state query
+    PadStateInput getCurrentPadState();
 
     // Status messages
     void addStatus(const std::string& msg, bool error = false);
@@ -85,6 +95,9 @@ public:
 
 private:
     void drawMainMenu();
+    void drawAppChrome();
+    void drawSidebar(float width, float height);
+    void drawTopBar(float x, float y, float width, float height);
     void renderScreen();
 
     // Deploy status tracking
