@@ -215,8 +215,12 @@ extern int32_t sceKernelSendNotificationRequest(int unk0, void *req, size_t size
 #define SCE_PAD_BUTTON_CIRCLE       0x00002000u
 #define SCE_PAD_BUTTON_CROSS        0x00004000u
 #define SCE_PAD_BUTTON_SQUARE       0x00008000u
-#define SCE_PAD_BUTTON_CREATE       0x00010000u  /* PS5: was Share on PS4 */
-#define SCE_PAD_BUTTON_PS           0x00020000u
+/* VDI/RemotePlay path note:
+ * empirical PS4+PS5 testing shows 0x00010000 is the PS button for
+ * scePadVirtualDeviceInsertData().  0x00020000 is not PS on this path and can
+ * behave like Cross/garbage.  Keep the frontend/controller mapping aligned. */
+#define SCE_PAD_BUTTON_CREATE       0x00010000u  /* legacy name; VDI maps this bit to PS */
+#define SCE_PAD_BUTTON_PS           0x00010000u
 #define SCE_PAD_BUTTON_TOUCH_PAD    0x00100000u
 
 /* ScePadData layout — sourced from ps5-payload-dev/SDL SDL_ps5joystick.h.
@@ -260,6 +264,27 @@ typedef struct {
  * as the default VDA type. */
 #define VIRTUAL_DEVICE_TYPE_DUALSENSE  3
 #define VIRTUAL_DEVICE_TYPE_DS4COMPAT  0
+
+/* PS5/Prospero VDA differs from PS4/Orbis:
+ *  - AddDevice must be attempted with userId=1, type=3, size=32.
+ *  - scePadVirtualDeviceAddDevice may return 0x803b0006 while still creating
+ *    an MBus DEVICE_ADDED event; do not treat that as terminal failure.
+ *  - The resulting MBus event appears as type=1/subType=22/capabilityBattery:0.
+ */
+#ifdef __PROSPERO__
+#define GHOSTPAD_PLATFORM_PS5 1
+#else
+#define GHOSTPAD_PLATFORM_PS5 0
+#endif
+#define GHOSTPAD_PS5_VDA_COMPAT_RET ((int32_t)0x803b0006)
+
+static int32_t ghostpad_vda_add_user_id(int32_t direct_user_id) {
+    return GHOSTPAD_PLATFORM_PS5 ? 1 : direct_user_id;
+}
+
+static int ghostpad_vda_ret_can_create_mbus_device(int32_t ret) {
+    return ret >= 0 || (GHOSTPAD_PLATFORM_PS5 && ret == GHOSTPAD_PS5_VDA_COMPAT_RET);
+}
 
 static const char *ghostpad_vda_type_name(int32_t type) {
     switch (type) {
@@ -847,6 +872,15 @@ static void parse_klog_line(const char *line) {
          (gp_strcasestr(line, "subType:2") != NULL || gp_strcasestr(line, "subtype:2") != NULL ||
           gp_strcasestr(line, "subType=2") != NULL || gp_strcasestr(line, "subtype=2") != NULL));
 
+    /* PS5 VDA type=3 is reported differently from PS4 RemotePlay VDA:
+     *   SCE_MBUS_EVENT_DEVICE_ADDED [DeviceId:0x5030d][type:1][subType:22][capabilityBattery:0]
+     * Treat it as a virtual candidate even if AddDevice returned 0x803b0006. */
+    int is_vda_ps5_proxy =
+        ((gp_strcasestr(line, "type:1") != NULL || gp_strcasestr(line, "type=1") != NULL) &&
+         (gp_strcasestr(line, "subType:22") != NULL || gp_strcasestr(line, "subtype:22") != NULL ||
+          gp_strcasestr(line, "subType=22") != NULL || gp_strcasestr(line, "subtype=22") != NULL) &&
+         gp_strcasestr(line, "capabilityBattery:0") != NULL);
+
     if (is_phys) {
         g_phys_dev_id = dev_id;
         gp_log("[Ghostpad] Auto-Klog: Detected Physical Controller: 0x%llx\n",
@@ -854,12 +888,14 @@ static void parse_klog_line(const char *line) {
         return;
     }
 
-    if (is_vda_remoteplay || is_unassigned) {
-        gp_log("[Ghostpad] Auto-Klog: Detected candidate virtual/MBus device: 0x%llx%s%s\n",
+    if (is_vda_remoteplay || is_vda_ps5_proxy || is_unassigned) {
+        gp_log("[Ghostpad] Auto-Klog: Detected candidate virtual/MBus device: 0x%llx%s%s%s\n",
                (unsigned long long)dev_id,
                is_vda_remoteplay ? " remoteplay" : "",
+               is_vda_ps5_proxy ? " ps5-vda" : "",
                is_unassigned ? " unassigned" : "");
-        klog_note_vda_candidate(dev_id, is_vda_remoteplay ? "remoteplay" : "unassigned");
+        klog_note_vda_candidate(dev_id,
+            is_vda_ps5_proxy ? "ps5-vda" : (is_vda_remoteplay ? "remoteplay" : "unassigned"));
 #if GHOSTPAD_ENABLE_KLOG_AUTOBIND
         if (dev_id != g_last_bound_virt_id) {
             trigger_auto_bind(dev_id, g_phys_dev_id);
@@ -1372,12 +1408,12 @@ int main(void) {
         const int32_t VDA_SENTINEL = (int32_t)0xDEADBEEF;
         memset(&vd_param, 0, sizeof(vd_param));
         vd_param.size   = (int32_t)sizeof(vd_param);
-        vd_param.userId = userId;
+        vd_param.userId = ghostpad_vda_add_user_id(userId);
         for (int k = 0; k < 6; k++) vd_param.pad[k] = VDA_SENTINEL;
 
-        gp_log("[Ghostpad] VDA call: size=%d userId=0x%08x type=%d (%s)\n",
-               vd_param.size, (uint32_t)vd_param.userId,
-               (int)virtual_device_type, ghostpad_vda_type_name(virtual_device_type));
+        gp_log("[Ghostpad] VDA call: size=%d userId=0x%08x bindUser=0x%08x type=%s%s\n",
+               vd_param.size, (uint32_t)vd_param.userId, (uint32_t)injectUserId,
+               (virtual_device_type == VIRTUAL_DEVICE_TYPE_DUALSENSE) ? "DualSense/RemotePlay" : "DS4-compatible");
 
 #if defined(__ORBIS__) && GHOSTPAD_ENABLE_ORBIS_SETPRIV_VDA_SENTINEL
         ret = scePadSetProcessPrivilege(0xDEADBEEF);
@@ -1405,10 +1441,10 @@ int main(void) {
                 break;
             }
         }
-        if (ret >= 0 && padHandle < 0) {
+        if (ghostpad_vda_ret_can_create_mbus_device(ret) && padHandle < 0) {
             vda_created_without_handle = 1;
             vda_pending_mbus_bind = 1;
-            gp_log("[Ghostpad] VDA returned success/status 0x%08x but did not expose a handle; waiting for MBus/klog deviceId path\n",
+            gp_log("[Ghostpad] VDA returned status 0x%08x but may have created an MBus device; waiting for klog DeviceId path\n",
                    (uint32_t)ret);
         }
 
@@ -1423,7 +1459,7 @@ int main(void) {
 
             memset(&vd_param, 0, sizeof(vd_param));
             vd_param.size   = (int32_t)sizeof(vd_param);
-            vd_param.userId = userId;
+            vd_param.userId = ghostpad_vda_add_user_id(userId);
             for (int k = 0; k < 6; k++) vd_param.pad[k] = VDA_SENTINEL;
 
 #if defined(__ORBIS__) && GHOSTPAD_ENABLE_ORBIS_SETPRIV_VDA_SENTINEL
@@ -1446,10 +1482,10 @@ int main(void) {
                     break;
                 }
             }
-            if (vda2 >= 0 && padHandle < 0) {
+            if (ghostpad_vda_ret_can_create_mbus_device(vda2) && padHandle < 0) {
                 vda_created_without_handle = 1;
                 vda_pending_mbus_bind = 1;
-                gp_log("[Ghostpad] VDA(shellcore) returned success/status 0x%08x but did not expose a handle; waiting for MBus/klog deviceId path\n",
+                gp_log("[Ghostpad] VDA(shellcore) returned status 0x%08x but may have created an MBus device; waiting for klog DeviceId path\n",
                        (uint32_t)vda2);
             }
         } else if (padHandle < 0 && vda_created_without_handle) {
