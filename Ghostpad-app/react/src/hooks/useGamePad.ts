@@ -187,7 +187,8 @@ export const useGamePad = () => {
   );
 
   const convert = React.useCallback((x: number): number => {
-    const val = x > 0.08 || x < -0.08 ? (256 * (x + 1)) / 2 : 128;
+    const deadZone = 0.12;
+    const val = x > deadZone || x < -deadZone ? (256 * (x + 1)) / 2 : 128;
     if (val !== 69 && val !== 83) return val;
     else return val + 1;
   }, []);

@@ -15,10 +15,10 @@ export interface PadVisualizerProps {
 type StickSide = "left" | "right";
 
 const FACE_BUTTONS = [
-  { id: 2, label: "△", row: 1, col: 2 },
-  { id: 3, label: "□", row: 2, col: 1 },
-  { id: 0, label: "○", row: 2, col: 3 },
-  { id: 1, label: "✕", row: 3, col: 2 },
+  { id: 3, label: "△", row: 1, col: 2 },   // Triangle (top)
+  { id: 2, label: "□", row: 2, col: 1 },   // Square (left)
+  { id: 1, label: "○", row: 2, col: 3 },   // Circle (right)
+  { id: 0, label: "✕", row: 3, col: 2 },   // Cross (bottom)
 ] as const;
 
 const DPAD_BUTTONS = [

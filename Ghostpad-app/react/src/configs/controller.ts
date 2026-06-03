@@ -22,14 +22,20 @@ export const ProControllerConfig: { [key: string]: number } = {
   RightStickY: 21,
   LeftTrigger: 6,
   RightTrigger: 7,
+  PS: 16,
+  Touchpad: 17,
+  Up: 12,
+  Down: 13,
+  Left: 14,
+  Right: 15,
 };
 
 // For Display (PS5 DualSense labels; SVG layout from PhantomHand — see README credits)
 export const ProControllerButtonNames: { [key: number]: string } = {
-  0: "Circle",
-  1: "Cross",
-  2: "Triangle",
-  3: "Square",
+  0: "Cross",
+  1: "Circle",
+  2: "Square",
+  3: "Triangle",
   4: "L1",
   5: "R1",
   6: "L2",

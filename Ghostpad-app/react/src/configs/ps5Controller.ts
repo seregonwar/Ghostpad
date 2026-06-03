@@ -1,14 +1,14 @@
 /** Maps legacy PhantomHand signal IDs to PS5 DualSense GPAD button bits. */
 export const PS5_BUTTON_BITS: Record<number, number> = {
-  0: 0x00002000, // Circle
-  1: 0x00004000, // Cross
-  2: 0x00001000, // Triangle
-  3: 0x00008000, // Square
+  0: 0x00004000, // Cross  (bottom face — A on Xbox)
+  1: 0x00002000, // Circle (right face — B on Xbox)
+  2: 0x00008000, // Square (left face  — X on Xbox)
+  3: 0x00001000, // Triangle (top face — Y on Xbox)
   4: 0x00000400, // L1
   5: 0x00000800, // R1
   6: 0x00000100, // L2 (digital)
   7: 0x00000200, // R2 (digital)
-  8: 0x00000001, // Create / Share
+  8: 0x00010000, // Create / Share
   9: 0x00000008, // Options
   10: 0x00000002, // L3
   11: 0x00000004, // R3
@@ -16,7 +16,7 @@ export const PS5_BUTTON_BITS: Record<number, number> = {
   13: 0x00000040, // D-pad Down
   14: 0x00000080, // D-pad Left
   15: 0x00000020, // D-pad Right
-  16: 0x00010000, // PS
+  16: 0x00020000, // PS
   17: 0x00100000, // Touchpad click
 };
 
