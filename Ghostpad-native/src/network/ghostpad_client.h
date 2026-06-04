@@ -63,6 +63,8 @@ public:
     // Control port (6970)
     static CtrlResult sendType(const std::string& ip, uint32_t device_type, int timeout_ms = 3000);
     static CtrlResult disconnectVirtual(const std::string& ip);
+    static CtrlResult terminatePayload(const std::string& ip, int timeout_ms = 3000);
+
 
     // Network scanning
     static std::vector<ScanResult> scanNetwork(const std::string& subnet = "", int timeout_ms = 600);

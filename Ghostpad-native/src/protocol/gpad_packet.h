@@ -175,4 +175,8 @@ inline std::array<uint8_t, 4> buildDiscPacket() {
     return {'D', 'I', 'S', 'C'};
 }
 
+inline std::array<uint8_t, 4> buildUnptPacket() {
+    return {'U', 'N', 'P', 'T'};
+}
+
 } // namespace ghostpad

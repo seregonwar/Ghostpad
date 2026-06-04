@@ -137,3 +137,5 @@ int32_t shellui_pad_retry_vda_shellcore(int32_t userId);
 int shellui_pad_patch_vda(int dump_only);
 int shellui_pad_patch_vda_self(int dump_only);
 int shellui_pad_hook_setpriv(void);
+int shellui_pad_unpatch(void);
+

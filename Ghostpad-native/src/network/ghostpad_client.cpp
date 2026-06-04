@@ -240,6 +240,12 @@ CtrlResult GhostpadClient::disconnectVirtual(const std::string& ip) {
     return result;
 }
 
+CtrlResult GhostpadClient::terminatePayload(const std::string& ip, int timeout_ms) {
+    auto packet = buildUnptPacket();
+    return sendCtrlPacket(ip, packet.data(), packet.size(), timeout_ms);
+}
+
+
 bool GhostpadClient::probeHostPort(const std::string& ip, int port, int timeout_ms) {
     int sock = ::socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return false;

@@ -256,9 +256,25 @@ static ShellUiDirectState g_shellui_direct_state = {0};
 static int32_t g_shellui_direct_last_stage = 0;
 static int64_t g_shellui_direct_last_value = 0;
 
+/* ── Original bytes saved for unpatching ── */
+static uint8_t  g_orig_gethandle[5];
+static int      g_gethandle_hooked        = 0;
+static uint8_t  g_orig_setpriv[5];
+static int      g_setpriv_hooked          = 0;
+static uint8_t  g_orig_vdi_128[128];
+static int      g_vdi_hooked              = 0;
+static uint8_t  g_orig_vda_call[5];
+static uint8_t  g_orig_vda_cave[8];
+static int      g_vda_patched             = 0;
+static pid_t    g_vda_patched_pid         = -1;
+static uint8_t  g_orig_self_vda_call[5];
+static uint8_t  g_orig_self_vda_cave[8];
+static int      g_self_vda_patched        = 0;
+
 /* Saved injection state for stub relaunch — populated by shellui_pad_inject */
 static pid_t    g_relaunch_pid            = -1;
 static intptr_t g_relaunch_args_kaddr     = 0;
+
 static intptr_t g_relaunch_stub_fn        = 0;   /* stub function addr in target */
 static intptr_t g_relaunch_thread_storage = 0;   /* pthread_t storage in target  */
 static intptr_t g_relaunch_pthread_fn     = 0;   /* pthread_create addr in target*/
@@ -2893,6 +2909,19 @@ shellui_pad_patch_vda_target(pid_t target, const char *target_name, int dump_onl
     cave_patch[6] = 0xc0;
     cave_patch[7] = 0xc3;
 
+    if (target == getpid()) {
+        memcpy(g_orig_self_vda_call, buf + GHOSTPAD_VDA_PS4_CALL_OFF, 5);
+        memcpy(g_orig_self_vda_cave, buf + GHOSTPAD_VDA_PS4_CAVE_OFF, 8);
+        g_self_vda_patched = 1;
+        klog_printf("[Ghostpad] patch_vda: saved original VDA self patch bytes\n");
+    } else {
+        memcpy(g_orig_vda_call, buf + GHOSTPAD_VDA_PS4_CALL_OFF, 5);
+        memcpy(g_orig_vda_cave, buf + GHOSTPAD_VDA_PS4_CAVE_OFF, 8);
+        g_vda_patched = 1;
+        g_vda_patched_pid = target;
+        klog_printf("[Ghostpad] patch_vda: saved original VDA target patch bytes for pid=%d\n", target);
+    }
+
     uint8_t call_patch[5];
     call_patch[0] = 0xe8;
     call_patch[1] = (uint8_t)(patched_call_rel & 0xff);
@@ -2901,6 +2930,8 @@ shellui_pad_patch_vda_target(pid_t target, const char *target_name, int dump_onl
     call_patch[4] = (uint8_t)((patched_call_rel >> 24) & 0xff);
 
     if (mdbg_copyin(target, cave_patch, cave_addr, sizeof(cave_patch)) != 0) {
+
+
         klog_printf("[Ghostpad] patch_vda: cave write failed errno=%d\n", errno);
         if (have_saved_caps) {
             kernel_set_ucred_authid(mypid, saved_authid);
@@ -3171,6 +3202,10 @@ shellui_pad_disconnect_device(uint64_t physicalDeviceId)
     return (ret == 0) ? 0 : (int)ret;
 
 fallback:
+#ifdef __PROSPERO__
+    klog_printf("[Ghostpad] disconnect: direct fallback not supported on PS5\n");
+    return -1;
+#else
     {
         klog_printf("[Ghostpad] disconnect: executing direct fallback for 0x%llx\n", (unsigned long long)physicalDeviceId);
         void *h = dlopen("/system/common/lib/libSceMbus.sprx", RTLD_LAZY);
@@ -3200,6 +3235,8 @@ fallback:
         dlclose(h);
         return r;
     }
+#endif
+
 }
 
 int
@@ -3262,6 +3299,10 @@ shellui_pad_force_bind(uint64_t virtualDeviceId, int32_t userId)
     return (ret == 0) ? 0 : (int)ret;
 
 fallback:
+#ifdef __PROSPERO__
+    klog_printf("[Ghostpad] force_bind: direct fallback not supported on PS5\n");
+    return -1;
+#else
     {
         klog_printf("[Ghostpad] force_bind: executing direct fallback for 0x%llx -> 0x%x\n",
                     (unsigned long long)virtualDeviceId, (uint32_t)userId);
@@ -3292,6 +3333,8 @@ fallback:
         dlclose(h);
         return r;
     }
+#endif
+
 }
 
 /* shellui_pad_relaunch_stub_with_handle — re-launch stub with known VDI handle.
@@ -3429,15 +3472,26 @@ shellui_pad_hook_gethandle(void)
     }
 
     /* Read original 5 bytes of scePadGetHandle */
-    uint8_t orig_5[5];
-    if (mdbg_copyout(target, fn_gethandle, orig_5, 5) != 0) {
+    if (mdbg_copyout(target, fn_gethandle, g_orig_gethandle, 5) != 0) {
         klog_printf("[Ghostpad] hook_gh: failed to read original 5 bytes of gethandle\n");
         if (saved_authid) kernel_set_ucred_authid(mypid, saved_authid);
         return -1;
     }
+    g_gethandle_hooked = 1;
+
+    /* Read original 128 bytes of scePadVirtualDeviceInsertData if not already done */
+    if (!g_vdi_hooked) {
+        if (mdbg_copyout(target, fn_vdi, g_orig_vdi_128, 128) == 0) {
+            g_vdi_hooked = 1;
+            klog_printf("[Ghostpad] hook_gh: captured original 128 bytes of vdi\n");
+        } else {
+            klog_printf("[Ghostpad] hook_gh: failed to read original 128 bytes of vdi\n");
+        }
+    }
 
     klog_printf("[Ghostpad] hook_gh: original gethandle bytes: %02x %02x %02x %02x %02x\n",
-                orig_5[0], orig_5[1], orig_5[2], orig_5[3], orig_5[4]);
+                g_orig_gethandle[0], g_orig_gethandle[1], g_orig_gethandle[2], g_orig_gethandle[3], g_orig_gethandle[4]);
+
 
     /* Construct 128-byte hook block */
     uint8_t hook[128];
@@ -3519,7 +3573,7 @@ shellui_pad_hook_gethandle(void)
 
     /* ---- Trampoline at offset 104 (0x68) ---- */
     /* 1. Copy original 5 bytes of scePadGetHandle */
-    memcpy(&hook[104], orig_5, 5);
+    memcpy(&hook[104], g_orig_gethandle, 5);
 
     /* 2. mov rax, fn_gethandle + 5 */
     hook[109] = 0x48; hook[110] = 0xB8;
@@ -3597,15 +3651,26 @@ shellui_pad_hook_setpriv(void)
     }
 
     /* Read original 5 bytes of scePadSetProcessPrivilege */
-    uint8_t orig_5[5];
-    if (mdbg_copyout(target, fn_setpriv, orig_5, 5) != 0) {
+    if (mdbg_copyout(target, fn_setpriv, g_orig_setpriv, 5) != 0) {
         klog_printf("[Ghostpad] hook_sp: failed to read original 5 bytes of setpriv\n");
         if (saved_authid) kernel_set_ucred_authid(mypid, saved_authid);
         return -1;
     }
+    g_setpriv_hooked = 1;
+
+    /* Read original 128 bytes of scePadVirtualDeviceInsertData if not already done */
+    if (!g_vdi_hooked) {
+        if (mdbg_copyout(target, fn_vdi, g_orig_vdi_128, 128) == 0) {
+            g_vdi_hooked = 1;
+            klog_printf("[Ghostpad] hook_sp: captured original 128 bytes of vdi\n");
+        } else {
+            klog_printf("[Ghostpad] hook_sp: failed to read original 128 bytes of vdi\n");
+        }
+    }
 
     klog_printf("[Ghostpad] hook_sp: original setpriv bytes: %02x %02x %02x %02x %02x\n",
-                orig_5[0], orig_5[1], orig_5[2], orig_5[3], orig_5[4]);
+                g_orig_setpriv[0], g_orig_setpriv[1], g_orig_setpriv[2], g_orig_setpriv[3], g_orig_setpriv[4]);
+
 
     /* Construct 128-byte hook block */
     uint8_t hook[128];
@@ -3694,7 +3759,7 @@ shellui_pad_hook_setpriv(void)
     hook[jne_instr_off + 1] = (uint8_t)(tramp_off - (jne_instr_off + 2));
 
     /* Trampoline: original 5 bytes */
-    memcpy(&hook[tramp_off], orig_5, 5);
+    memcpy(&hook[tramp_off], g_orig_setpriv, 5);
 
     /* Trampoline: mov rax, fn_setpriv + 5 */
     hook[tramp_off + 5] = 0x48; hook[tramp_off + 6] = 0xB8;
@@ -3729,3 +3794,139 @@ shellui_pad_hook_setpriv(void)
     return 0;
 #endif /* GHOSTPAD_ALLOW_UNSAFE_SETPRIV_HOOK */
 }
+
+/*
+ * =====================================================================================
+ *            UNPATCH SYSTEM PROCESS HOOKS & TERMINATE STUB
+ * =====================================================================================
+ */
+
+/* Safe memory write with VM protection escalation/restoration */
+static void safe_mdbg_restore(pid_t target, void *orig_bytes, intptr_t addr, size_t len) {
+    intptr_t page1 = addr & ~(intptr_t)0xfff;
+    intptr_t page2 = (addr + len - 1) & ~(intptr_t)0xfff;
+    int protect1_ok = (kernel_set_vmem_protection(target, page1, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) == 0);
+    int protect2_ok = 0;
+    if (page2 != page1) {
+        protect2_ok = (kernel_set_vmem_protection(target, page2, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) == 0);
+    }
+    
+    mdbg_copyin(target, orig_bytes, addr, len);
+    
+    if (protect1_ok) {
+        kernel_set_vmem_protection(target, page1, 0x1000, PROT_READ | PROT_EXEC);
+    }
+    if (protect2_ok) {
+        kernel_set_vmem_protection(target, page2, 0x1000, PROT_READ | PROT_EXEC);
+    }
+}
+
+int
+shellui_pad_unpatch(void)
+{
+    pid_t mypid = getpid();
+    uint64_t saved_authid = kernel_get_ucred_authid(mypid);
+    uint8_t privcaps[16];
+    memset(privcaps, 0xff, sizeof(privcaps));
+    uint8_t saved_caps[16];
+    int have_saved_caps = 0;
+
+    if (saved_authid && kernel_get_ucred_caps(mypid, saved_caps) == 0) {
+        have_saved_caps = 1;
+        kernel_set_ucred_authid(mypid, 0x4800000000010003l);
+        kernel_set_ucred_caps(mypid, privcaps);
+    }
+
+    klog_printf("[Ghostpad] shellui_pad_unpatch: starting unpatching sequence...\n");
+
+    /* 1. Stop SceShellUI/SceShellCore stub thread if it is running */
+    if (g_relaunch_pid > 0 && g_relaunch_args_kaddr != 0) {
+        klog_printf("[Ghostpad] shellui_pad_unpatch: stopping target stub thread in pid %d...\n", g_relaunch_pid);
+        int32_t stop_val = 1;
+        if (mdbg_copyin(g_relaunch_pid, &stop_val, g_relaunch_args_kaddr + (intptr_t)offsetof(ShellUiPadArgs, stop), 4) == 0) {
+            /* Wait up to 1 second for the thread to exit and clean up */
+            for (int i = 0; i < 50; i++) {
+                usleep(20000);
+                int32_t ready_val = (int32_t)mdbg_getint(g_relaunch_pid, g_relaunch_args_kaddr + (intptr_t)offsetof(ShellUiPadArgs, ready));
+                if (ready_val == 0 || ready_val == -1) {
+                    klog_printf("[Ghostpad] shellui_pad_unpatch: stub thread exited successfully.\n");
+                    break;
+                }
+            }
+        } else {
+            klog_printf("[Ghostpad] shellui_pad_unpatch: failed to write stop flag to target stub.\n");
+        }
+    }
+
+    /* Find SceShellCore PID */
+    pid_t core_pid = -1;
+    {
+        pid_t pids[8];
+        if (find_pids("SceShellCore", pids, 8) > 0) {
+            core_pid = pids[0];
+        }
+    }
+
+    if (core_pid > 0) {
+        uint32_t libpad_h = 0;
+        get_lib(core_pid, "libScePad", &libpad_h);
+        if (libpad_h) {
+            intptr_t fn_gethandle = resolve_sym(core_pid, libpad_h, "scePadGetHandle");
+            intptr_t fn_vdi = resolve_sym(core_pid, libpad_h, "scePadVirtualDeviceInsertData");
+            intptr_t fn_setpriv = resolve_sym(core_pid, libpad_h, "scePadSetProcessPrivilege");
+            intptr_t fn_vda = resolve_sym(core_pid, libpad_h, "scePadVirtualDeviceAddDevice");
+
+            /* Restore scePadGetHandle hook */
+            if (g_gethandle_hooked && fn_gethandle) {
+                klog_printf("[Ghostpad] shellui_pad_unpatch: restoring scePadGetHandle (5 bytes)\n");
+                safe_mdbg_restore(core_pid, g_orig_gethandle, fn_gethandle, 5);
+                g_gethandle_hooked = 0;
+            }
+
+            /* Restore scePadSetProcessPrivilege hook */
+            if (g_setpriv_hooked && fn_setpriv) {
+                klog_printf("[Ghostpad] shellui_pad_unpatch: restoring scePadSetProcessPrivilege (5 bytes)\n");
+                safe_mdbg_restore(core_pid, g_orig_setpriv, fn_setpriv, 5);
+                g_setpriv_hooked = 0;
+            }
+
+            /* Restore scePadVirtualDeviceInsertData (128 bytes) */
+            if (g_vdi_hooked && fn_vdi) {
+                klog_printf("[Ghostpad] shellui_pad_unpatch: restoring scePadVirtualDeviceInsertData (128 bytes)\n");
+                safe_mdbg_restore(core_pid, g_orig_vdi_128, fn_vdi, 128);
+                g_vdi_hooked = 0;
+            }
+
+            /* Restore SceShellCore VDA patch */
+            if (g_vda_patched && fn_vda && g_vda_patched_pid == core_pid) {
+                klog_printf("[Ghostpad] shellui_pad_unpatch: restoring SceShellCore VDA patch\n");
+                safe_mdbg_restore(core_pid, g_orig_vda_call, fn_vda + (intptr_t)GHOSTPAD_VDA_PS4_CALL_OFF, 5);
+                safe_mdbg_restore(core_pid, g_orig_vda_cave, fn_vda + (intptr_t)GHOSTPAD_VDA_PS4_CAVE_OFF, 8);
+                g_vda_patched = 0;
+            }
+        }
+    }
+
+    /* Restore self VDA patch */
+    if (g_self_vda_patched) {
+        uint32_t self_libpad_h = 0;
+        if (get_lib(mypid, "libScePad", &self_libpad_h) == 0) {
+            intptr_t self_fn_vda = resolve_sym(mypid, self_libpad_h, "scePadVirtualDeviceAddDevice");
+            if (self_fn_vda) {
+                klog_printf("[Ghostpad] shellui_pad_unpatch: restoring self VDA patch\n");
+                safe_mdbg_restore(mypid, g_orig_self_vda_call, self_fn_vda + (intptr_t)GHOSTPAD_VDA_PS4_CALL_OFF, 5);
+                safe_mdbg_restore(mypid, g_orig_self_vda_cave, self_fn_vda + (intptr_t)GHOSTPAD_VDA_PS4_CAVE_OFF, 8);
+                g_self_vda_patched = 0;
+            }
+        }
+    }
+
+    klog_printf("[Ghostpad] shellui_pad_unpatch: unpatching sequence complete.\n");
+
+    if (have_saved_caps) {
+        kernel_set_ucred_authid(mypid, saved_authid);
+        kernel_set_ucred_caps(mypid, saved_caps);
+    }
+    return 0;
+}
+

@@ -89,6 +89,26 @@ void renderConsolesScreen(App& app) {
     }
 
     ImGui::SameLine();
+    if (ui::dangerButton(ICON_FA_POWER_OFF "  Terminate Payload", ImVec2(150, 32))) {
+        if (!app.selected_console_ip.empty()) {
+            std::string ip = app.selected_console_ip;
+            app.addStatus("Terminating and unpatching payload...");
+            std::thread([&app, ip]() {
+                auto r = GhostpadClient::terminatePayload(ip);
+                if (r.ok) {
+                    app.addStatus("Payload terminated and unpatched successfully");
+                } else {
+                    app.addStatus("Payload termination sent, checking status...", true);
+                }
+                app.ghostpad.disconnect();
+                app.deployer.stopKlogWatcher();
+                app.selected_console_ip.clear();
+            }).detach();
+        }
+    }
+
+
+    ImGui::SameLine();
     if (ui::softButton(ICON_FA_WIFI "  Scan Network", ImVec2(140, 32))) {
         app.addStatus("Scanning subnet...");
         std::thread([&app]() {

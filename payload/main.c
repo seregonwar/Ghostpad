@@ -1830,6 +1830,19 @@ int main(void) {
                                     }
                                 }
                             }
+                        } else if (nr4 == 4 && memcmp(magic, "UNPT", 4) == 0) {
+                            notify("Ghostpad: Unpatched and Exited");
+                            gp_log("[Ghostpad] UNPT(ctrl): unpatch and exit requested\n");
+                            shellui_pad_unpatch();
+                            if (padHandle >= 0) {
+                                scePadVirtualDeviceDeleteDevice(padHandle);
+                            }
+                            if (clientFd >= 0) close(clientFd);
+                            if (ctrlFd   >= 0) close(ctrlFd);
+                            if (serverFd >= 0) close(serverFd);
+                            sceUserServiceTerminate();
+                            close(cfd);
+                            exit(0);
                         } else if (nr4 == 4 && memcmp(magic, "DISC", 4) == 0) {
                             int ddr = -1;
                             if (bound_virtual_device_id != 0) {
@@ -1844,6 +1857,7 @@ int main(void) {
                         } else {
                             close(cfd);
                         }
+
                     }
                 }
                 stub_ready  = (int32_t)mdbg_getint(shellui_pid,
@@ -1946,6 +1960,19 @@ int main(void) {
             }
 
             /* Validate magic bytes */
+            if (memcmp(pkt.magic, "UNPT", 4) == 0) {
+                notify("Ghostpad: Unpatched and Exited");
+                gp_log("[Ghostpad] UNPT(gpad): unpatch and exit requested\n");
+                shellui_pad_unpatch();
+                if (padHandle >= 0) {
+                    scePadVirtualDeviceDeleteDevice(padHandle);
+                }
+                if (clientFd >= 0) close(clientFd);
+                if (ctrlFd   >= 0) close(ctrlFd);
+                if (serverFd >= 0) close(serverFd);
+                sceUserServiceTerminate();
+                exit(0);
+            }
             if (memcmp(pkt.magic, "DISC", 4) == 0) {
                 int ddr = -1;
                 if (bound_virtual_device_id != 0) {
@@ -1957,6 +1984,7 @@ int main(void) {
                 /* Keep device_vdi_ready/stub intact — stub still running, reuse on reconnect */
                 break;
             }
+
             if (memcmp(pkt.magic, GP_MAGIC, GP_MAGIC_LEN) != 0) {
                 gp_log("[Ghostpad] Bad magic: %02x %02x %02x %02x\n",
                             (uint8_t)pkt.magic[0], (uint8_t)pkt.magic[1],

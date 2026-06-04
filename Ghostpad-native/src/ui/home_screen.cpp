@@ -6,6 +6,8 @@
 #include "ui/app.h"
 #include "ui/native_theme.h"
 #include "imgui.h"
+#include <thread>
+
 
 namespace ghostpad {
 
@@ -44,6 +46,25 @@ void renderHomeScreen(App& app) {
             app.selected_console_ip.clear();
             app.addStatus("Disconnected");
         }
+        ImGui::Spacing();
+        if (ui::dangerButton(ICON_FA_POWER_OFF "  Terminate Payload", ImVec2(180, 38))) {
+            if (!app.selected_console_ip.empty()) {
+                std::string ip = app.selected_console_ip;
+                app.addStatus("Terminating and unpatching payload...");
+                std::thread([&app, ip]() {
+                    auto r = GhostpadClient::terminatePayload(ip);
+                    if (r.ok) {
+                        app.addStatus("Payload terminated and unpatched successfully");
+                    } else {
+                        app.addStatus("Payload termination sent, checking status...", true);
+                    }
+                    app.ghostpad.disconnect();
+                    app.deployer.stopKlogWatcher();
+                    app.selected_console_ip.clear();
+                }).detach();
+            }
+        }
+
     } else {
         ImGui::TextColored(p.danger, "%s  NOT CONNECTED", ICON_FA_CIRCLE_XMARK);
         ImGui::Spacing();
