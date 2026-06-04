@@ -6,6 +6,7 @@
 #include "input/macro_engine.h"
 #include <algorithm>
 #include <sstream>
+#include <regex>
 
 namespace ghostpad {
 
@@ -75,6 +76,10 @@ void MacroEngine::updatePlayback(double delta_ms) {
             current_state_.stick_states[2] = static_cast<uint8_t>(signal.value);
         } else if (signal.button_id == 21) {
             current_state_.stick_states[3] = static_cast<uint8_t>(signal.value);
+        } else if (signal.button_id == 22) {
+            current_state_.trigger_l2 = static_cast<uint8_t>(signal.value);
+        } else if (signal.button_id == 23) {
+            current_state_.trigger_r2 = static_cast<uint8_t>(signal.value);
         }
         playback_index_++;
     }
@@ -145,6 +150,40 @@ std::string MacroEngine::exportAsPython(const std::vector<MacroSignal>& signals,
     oss << "    play('PS5_IP_HERE')\n";
 
     return oss.str();
+}
+
+std::vector<MacroSignal> MacroEngine::importSignalsFromJson(const std::string& json) {
+    std::vector<MacroSignal> signals;
+    try {
+        nlohmann::json j = nlohmann::json::parse(json);
+        if (j.is_array()) {
+            for (auto& item : j) {
+                MacroSignal sig;
+                sig.button_id = item.value("button_id", 0);
+                sig.value = item.value("value", 0);
+                sig.time_ms = item.value("time_ms", 0);
+                signals.push_back(sig);
+            }
+        }
+    } catch (...) {}
+    return normalizeSignals(signals);
+}
+
+std::vector<MacroSignal> MacroEngine::importSignalsFromPython(const std::string& py) {
+    std::vector<MacroSignal> signals;
+    std::regex tuple_re(R"(\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\))");
+    std::sregex_iterator it(py.begin(), py.end(), tuple_re);
+    std::sregex_iterator end;
+
+    for (; it != end; ++it) {
+        try {
+            int time_ms = std::stoi((*it)[1].str());
+            int button_id = std::stoi((*it)[2].str());
+            int value = std::stoi((*it)[3].str());
+            signals.push_back({button_id, value, time_ms});
+        } catch (...) {}
+    }
+    return normalizeSignals(signals);
 }
 
 } // namespace ghostpad

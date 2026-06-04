@@ -91,6 +91,7 @@ set(SOURCES
   src/network/network_scanner.cpp
   src/storage/console_store.cpp
   src/storage/settings_store.cpp
+  src/storage/profile_store.cpp
   src/storage/project_store.cpp
   src/input/keyboard_input.cpp
   src/input/gamepad_input.cpp

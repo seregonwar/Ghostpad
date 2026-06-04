@@ -48,7 +48,7 @@ static ImGuiKey glfwKeyToImGuiKey(int glfw_key) {
 namespace ghostpad {
 
 App::App(const std::string& data_dir)
-    : consoles(data_dir), settings(data_dir), projects(data_dir), is_connecting_(false) {}
+    : consoles(data_dir), settings(data_dir), projects(data_dir), profiles(data_dir), is_connecting_(false) {}
 
 App::~App() { shutdown(); }
 
@@ -118,6 +118,15 @@ void App::init() {
     glfwShowWindow(g_window);
 
     last_pad_send_ = std::chrono::steady_clock::now();
+
+    auto appSettings = settings.read();
+    if (!appSettings.active_profile_id.empty()) {
+        auto profile = profiles.get(appSettings.active_profile_id);
+        if (!profile.id.empty()) {
+            keyboard.loadFromProfile(profile);
+            selected_profile_id = profile.id;
+        }
+    }
 }
 
 void App::update(double dt) {
@@ -137,13 +146,63 @@ void App::update(double dt) {
     input_flush_timer_ += dt;
     if (input_flush_timer_ >= 1.0 / 60.0) {
         input_flush_timer_ = 0.0;
-        auto st = ghostpad.getStatus();
-        if (st.is_connected) {
-            if (macro_engine.isPlaying()) {
-                macro_engine.updatePlayback(16.667);
+        
+        // Update macro playback logic
+        if (macro_engine.isPlaying()) {
+            macro_engine.updatePlayback(16.667);
+        }
+        
+        // Fetch current active input state
+        PadStateInput ps = getCurrentPadState();
+        
+        // ── LIVE SIGNAL RECORDING ──────────────────────────
+        // Intercept input state deltas and store them as signals
+        if (macro_engine.isRecording()) {
+            if (!has_last_recorded_) {
+                for (int i = 0; i < 22; i++) {
+                    if (ps.button_states[i]) {
+                        macro_engine.recordSignal(i, 255);
+                    }
+                }
+                for (int i = 0; i < 4; i++) {
+                    if (ps.stick_states[i] != 128) {
+                        macro_engine.recordSignal(18 + i, ps.stick_states[i]);
+                    }
+                }
+                if (ps.trigger_l2 > 0) {
+                    macro_engine.recordSignal(22, ps.trigger_l2);
+                }
+                if (ps.trigger_r2 > 0) {
+                    macro_engine.recordSignal(23, ps.trigger_r2);
+                }
+                last_recorded_ps_ = ps;
+                has_last_recorded_ = true;
+            } else {
+                for (int i = 0; i < 22; i++) {
+                    if (ps.button_states[i] != last_recorded_ps_.button_states[i]) {
+                        macro_engine.recordSignal(i, ps.button_states[i] ? 255 : 0);
+                    }
+                }
+                for (int i = 0; i < 4; i++) {
+                    if (ps.stick_states[i] != last_recorded_ps_.stick_states[i]) {
+                        macro_engine.recordSignal(18 + i, ps.stick_states[i]);
+                    }
+                }
+                if (ps.trigger_l2 != last_recorded_ps_.trigger_l2) {
+                    macro_engine.recordSignal(22, ps.trigger_l2);
+                }
+                if (ps.trigger_r2 != last_recorded_ps_.trigger_r2) {
+                    macro_engine.recordSignal(23, ps.trigger_r2);
+                }
+                last_recorded_ps_ = ps;
             }
-            PadStateInput ps = getCurrentPadState();
-            ghostpad.sendPadState(buildGpadState(ps));
+        } else {
+            has_last_recorded_ = false;
+        }
+
+        // Stream input to all connected PS5 slots
+        if (isAnyGhostpadConnected()) {
+            sendPadStateToAll(buildGpadState(ps));
         }
     }
 }
@@ -209,7 +268,7 @@ void App::render() {
 }
 
 void App::shutdown() {
-    ghostpad.disconnect();
+    disconnectAllGhostpad();
     deployer.stopKlogWatcher();
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
@@ -283,20 +342,17 @@ static void drawSidebarHeader(float x, float w) {
 
 static void drawSidebarConnection(App& app, float x, float w) {
     const auto& p = ui::colors();
-    auto st = app.ghostpad.getStatus();
     auto ds = app.deployer.getStatus();
+    int connected = app.ghostpadConnectedCount();
+    bool anyConnected = connected > 0;
 
-    /*
-     *    [  STATUS LED  ]
-     *    Connected (pulsing) or Offline
-     */
     ImGui::SetCursorPosX(x);
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ui::rgba(255, 255, 255, 8));
     ImGui::PushStyleColor(ImGuiCol_Border, ui::rgba(255, 255, 255, 12));
     
     float cardH = 50.0f;
-    if (st.is_connected) cardH += 22.0f;
+    if (anyConnected) cardH += 22.0f * connected;
     if (ds.phase != "idle" && !ds.phase.empty()) cardH += 22.0f;
     
     ImGui::BeginChild("ConnectionCard", ImVec2(w - 28, cardH), true);
@@ -305,25 +361,34 @@ static void drawSidebarConnection(App& app, float x, float w) {
     ImVec2 pos = ImGui::GetCursorScreenPos();
     ImVec2 led_pos(pos.x + 16.0f, pos.y + 16.0f);
 
-    if (st.is_connected) {
+    if (anyConnected) {
         float t = (float)glfwGetTime();
         float glow_r = 7.0f + 2.0f * std::sin(t * 4.0f);
         float glow_a = 0.25f + 0.15f * std::sin(t * 4.0f);
         dl->AddCircleFilled(led_pos, glow_r, ui::u32(ui::withAlpha(p.success, glow_a)), 16);
         dl->AddCircleFilled(led_pos, 3.5f, ui::u32(p.success), 16);
-        dl->AddText(ImVec2(pos.x + 28.0f, pos.y + 8.0f), ui::u32(ui::rgba(220, 220, 225)), "Connected");
-        
-        ImGui::SetCursorPos(ImVec2(12, 34));
-        ImGui::TextColored(p.muted, "%s  %s:%d", ICON_FA_SIGNAL, st.ip.c_str(), st.port);
+        dl->AddText(ImVec2(pos.x + 28.0f, pos.y + 8.0f), ui::u32(ui::rgba(220, 220, 225)),
+                    connected > 1 ? ("Connected x" + std::to_string(connected)).c_str() : "Connected");
+
+        float yOff = 34.0f;
+        for (int i = 0; i < App::MAX_CONTROLLER_SLOTS; i++) {
+            auto slotSt = app.ghostpadSlot(i).getStatus();
+            if (slotSt.is_connected) {
+                ImGui::SetCursorPos(ImVec2(12, yOff));
+                ImGui::TextColored(p.muted, "%s  P%d  %s:%d", ICON_FA_SIGNAL, i + 1, slotSt.ip.c_str(), slotSt.port);
+                yOff += 22.0f;
+            }
+        }
     } else {
         dl->AddCircleFilled(led_pos, 3.5f, ui::u32(p.muted), 16);
         dl->AddText(ImVec2(pos.x + 28.0f, pos.y + 8.0f), ui::u32(p.muted), "Offline");
     }
     
+    float deployY = anyConnected ? 34.0f + 22.0f * connected : 34.0f;
     if (ds.phase != "idle" && !ds.phase.empty()) {
         ImVec4 col = ds.phase == "error" ? p.danger :
                      ds.phase == "ready" ? p.success : p.warning;
-        ImGui::SetCursorPos(ImVec2(12, st.is_connected ? 56.0f : 34.0f));
+        ImGui::SetCursorPos(ImVec2(12, deployY));
         ImGui::TextColored(col, "%s  %s", ICON_FA_DOWNLOAD, ds.message.c_str());
     }
     
@@ -497,24 +562,30 @@ void App::drawTopBar(float x, float y, float width, float height) {
     ImGui::BeginChild("TopBar", ImVec2(width, height), true,
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
-    auto st = ghostpad.getStatus();
+    bool anyConnected = isAnyGhostpadConnected();
+    int connected = ghostpadConnectedCount();
+    auto st = ghostpad().getStatus();
 
     ImGui::SetCursorPos(ImVec2(24, 14));
     ImGui::TextColored(p.primary2, "%s  %s", screenIcon(current_screen), screenTitle(current_screen));
     ImGui::SetCursorPos(ImVec2(24, 40));
-    if (st.is_connected)
-        ImGui::TextColored(p.success, "%s  Streaming  %s:%d", ICON_FA_SIGNAL, st.ip.c_str(), st.port);
-    else
+    if (anyConnected) {
+        if (connected > 1)
+            ImGui::TextColored(p.success, "%s  Streaming %d controllers  %s:%d", ICON_FA_SIGNAL, connected, st.ip.c_str(), st.port);
+        else
+            ImGui::TextColored(p.success, "%s  Streaming  %s:%d", ICON_FA_SIGNAL, st.ip.c_str(), st.port);
+    } else {
         ImGui::TextColored(p.muted, "Connect a console to begin");
+    }
 
     /*
      *    [ NAV BUTTONS ] -> aligned right
      */
     float r = ImGui::GetWindowWidth() - 12.0f;
-    float buttons_w = !st.is_connected ? 150.0f : (120.0f + 120.0f + ImGui::GetStyle().ItemSpacing.x);
+    float buttons_w = !anyConnected ? 150.0f : (120.0f + 120.0f + ImGui::GetStyle().ItemSpacing.x);
 
     ImGui::SetCursorPos(ImVec2(r - buttons_w, 16));
-    if (!st.is_connected) {
+    if (!anyConnected) {
         if (ui::primaryButton(ICON_FA_LINK "  Connect Console", ImVec2(150, 36)))
             current_screen = Screen::Consoles;
     } else {
@@ -522,10 +593,10 @@ void App::drawTopBar(float x, float y, float width, float height) {
             current_screen = Screen::Controller;
         ImGui::SameLine();
         if (ui::dangerButton(ICON_FA_LINK_SLASH "  Disconnect", ImVec2(120, 36))) {
-            ghostpad.disconnect();
+            disconnectAllGhostpad();
             deployer.stopKlogWatcher();
             selected_console_ip.clear();
-            addStatus("Disconnected");
+            addStatus("Disconnected all controllers");
         }
     }
     ImGui::SameLine();
@@ -583,7 +654,6 @@ void App::addStatus(const std::string& msg, bool error) {
 
 void App::drawStatusBar() {
     const auto& p = ui::colors();
-    auto st = ghostpad.getStatus();
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ui::rgba(13, 13, 16, 240));
     ImGui::PushStyleColor(ImGuiCol_Border, ui::rgba(48, 44, 58, 100));
@@ -613,8 +683,9 @@ void App::drawStatusBar() {
     ImGui::SameLine(r - 400);
     ImGui::TextColored(p.dim, "%s  FPS %.0f", ICON_FA_GAUGE_HIGH, current_fps_);
     ImGui::SameLine();
+    int cnt = ghostpadConnectedCount();
     ImGui::TextColored(p.dim, "|  %s  %s", ICON_FA_GAMEPAD,
-        st.is_connected ? "GPAD active" : "GPAD idle");
+        cnt > 0 ? (cnt > 1 ? ("GPAD x" + std::to_string(cnt)).c_str() : "GPAD active") : "GPAD idle");
     ImGui::SameLine();
     
     size_t num_notices = 0;
@@ -626,6 +697,41 @@ void App::drawStatusBar() {
 
     ImGui::EndChild();
     ImGui::PopStyleColor(2);
+}
+
+// ── Multi-Controller Helpers ────────────────────────────
+
+void App::setActiveSlot(int slot) {
+    active_slot_ = slot % MAX_CONTROLLER_SLOTS;
+}
+
+int App::ghostpadConnectedCount() const {
+    int count = 0;
+    for (int i = 0; i < MAX_CONTROLLER_SLOTS; i++) {
+        if (ghostpad_[i].getStatus().is_connected) count++;
+    }
+    return count;
+}
+
+bool App::isAnyGhostpadConnected() const {
+    for (int i = 0; i < MAX_CONTROLLER_SLOTS; i++) {
+        if (ghostpad_[i].getStatus().is_connected) return true;
+    }
+    return false;
+}
+
+void App::disconnectAllGhostpad() {
+    for (int i = 0; i < MAX_CONTROLLER_SLOTS; i++) {
+        ghostpad_[i].disconnect();
+    }
+}
+
+void App::sendPadStateToAll(const GpadNetworkState& state) {
+    for (int i = 0; i < MAX_CONTROLLER_SLOTS; i++) {
+        if (ghostpad_[i].getStatus().is_connected) {
+            ghostpad_[i].sendPadState(state);
+        }
+    }
 }
 
 } // namespace ghostpad

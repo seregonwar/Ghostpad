@@ -32,7 +32,7 @@ static const char* keyName(int key) {
 void renderInputRedirectScreen(App& app) {
     const auto& p = ui::colors();
     float avail_w = ImGui::GetContentRegionAvail().x;
-    auto status = app.ghostpad.getStatus();
+    auto status = app.ghostpad().getStatus();
 
     if (!status.is_connected) {
         ImGui::TextColored(p.warning, "%s  Not connected. Go to Consoles first.", ICON_FA_TRIANGLE_EXCLAMATION);
@@ -42,7 +42,112 @@ void renderInputRedirectScreen(App& app) {
         return;
     }
 
-    ImGui::TextColored(p.muted, "%s Connected: %s:%d", ICON_FA_SIGNAL, status.ip.c_str(), status.port);
+    ImGui::TextColored(p.muted, "%s Connected: %s:%d  |  P%d", ICON_FA_SIGNAL, status.ip.c_str(), status.port, app.activeSlot() + 1);
+    ImGui::SameLine(0, 10);
+    ImGui::TextColored(p.muted, "Slot:");
+    ImGui::SameLine(0, 4);
+    ImGui::PushItemWidth(55);
+    int slot = app.activeSlot();
+    if (ImGui::Combo("##IRSlot", &slot, "P1\0P2\0P3\0P4\0")) {
+        app.setActiveSlot(slot);
+    }
+    ImGui::PopItemWidth();
+    ImGui::Spacing();
+
+    auto profileList = app.profiles.list();
+
+    ui::sectionLabel("Keybinding Profiles", ICON_FA_LAYER_GROUP);
+    ImGui::Spacing();
+
+    int selectedProfileIdx = -1;
+    for (int i = 0; i < (int)profileList.size(); i++) {
+        if (profileList[i].id == app.selected_profile_id) {
+            selectedProfileIdx = i;
+            break;
+        }
+    }
+
+    const char* previewLabel = selectedProfileIdx >= 0 ? profileList[selectedProfileIdx].name.c_str() : "(none)";
+    ImGui::SetNextItemWidth(220);
+    if (ImGui::BeginCombo("##ProfileCombo", previewLabel)) {
+        for (int i = 0; i < (int)profileList.size(); i++) {
+            bool isSel = (selectedProfileIdx == i);
+            if (ImGui::Selectable(profileList[i].name.c_str(), isSel)) {
+                app.keyboard.loadFromProfile(profileList[i]);
+                app.selected_profile_id = profileList[i].id;
+                auto s = app.settings.read();
+                s.active_profile_id = profileList[i].id;
+                app.settings.write(s);
+                app.addStatus("Loaded profile \"" + profileList[i].name + "\"");
+            }
+            if (isSel) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+
+    ImGui::SameLine(0, 10);
+    if (ui::primaryButton(ICON_FA_PLUS "  Save New", ImVec2(110, 28))) {
+        ImGui::OpenPopup("SaveProfilePopup");
+    }
+
+    ImGui::SameLine(0, 6);
+    if (ui::softButton(ICON_FA_FLOPPY_DISK "  Overwrite", ImVec2(110, 28))) {
+        if (!app.selected_profile_id.empty()) {
+            auto profile = app.keyboard.saveToProfile("");
+            app.profiles.update(app.selected_profile_id, profile);
+            app.addStatus("Profile overwritten");
+        } else {
+            ImGui::OpenPopup("SaveProfilePopup");
+        }
+    }
+
+    ImGui::SameLine(0, 6);
+    if (ui::dangerButton(ICON_FA_TRASH "  Delete", ImVec2(90, 28))) {
+        if (!app.selected_profile_id.empty()) {
+            app.profiles.remove(app.selected_profile_id);
+            app.selected_profile_id.clear();
+            auto s = app.settings.read();
+            s.active_profile_id = "";
+            app.settings.write(s);
+            app.keyboard.loadDefaultBindings();
+            app.addStatus("Profile deleted, defaults restored");
+        }
+    }
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24, 20));
+    if (ImGui::BeginPopupModal("SaveProfilePopup", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextColored(p.primary2, "%s  Save Keybinding Profile", ICON_FA_FLOPPY_DISK);
+        ImGui::Separator();
+        ImGui::Spacing();
+        static char profileNameBuf[128] = {};
+        ImGui::Text("Profile Name:");
+        ImGui::SetNextItemWidth(300);
+        ImGui::InputText("##ProfileName", profileNameBuf, sizeof(profileNameBuf));
+        ImGui::Spacing();
+        if (ui::primaryButton(ICON_FA_CHECK "  Save", ImVec2(100, 32))) {
+            std::string name(profileNameBuf);
+            if (!name.empty()) {
+                auto entry = app.keyboard.saveToProfile(name);
+                auto saved = app.profiles.add(entry);
+                app.selected_profile_id = saved.id;
+                auto s = app.settings.read();
+                s.active_profile_id = saved.id;
+                app.settings.write(s);
+                app.addStatus("Profile \"" + name + "\" saved");
+                memset(profileNameBuf, 0, sizeof(profileNameBuf));
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::SameLine();
+        if (ui::softButton("Cancel", ImVec2(80, 32))) {
+            memset(profileNameBuf, 0, sizeof(profileNameBuf));
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar();
+
+    ImGui::Spacing();
     ImGui::Spacing();
 
     float col_w = (avail_w - 16.0f) * 0.5f;

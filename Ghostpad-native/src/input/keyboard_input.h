@@ -10,7 +10,11 @@
 #include <vector>
 #include "protocol/gpad_packet.h"
 
+#include <nlohmann/json.hpp>
+
 namespace ghostpad {
+
+struct ProfileBindingEntry;
 
 struct KeyBinding {
     int button_id = 0;  // PS5 button ID
@@ -18,6 +22,8 @@ struct KeyBinding {
     bool ctrl = false;
     bool shift = false;
     bool alt = false;
+
+    NLOHMANN_DEFINE_TYPE_INTRUSIVE(KeyBinding, button_id, glfw_key, ctrl, shift, alt)
 };
 
 struct StickBindings {
@@ -29,6 +35,8 @@ struct StickBindings {
     int rx_neg = 0;   // key for RX negative (left)
     int ry_pos = 0;   // key for RY positive (down)
     int ry_neg = 0;   // key for RY negative (up)
+
+    NLOHMANN_DEFINE_TYPE_INTRUSIVE(StickBindings, lx_pos, lx_neg, ly_pos, ly_neg, rx_pos, rx_neg, ry_pos, ry_neg)
 };
 
 struct MouseLookSettings {
@@ -77,6 +85,10 @@ public:
 
     // Default bindings (WASD layout)
     void loadDefaultBindings();
+
+    // Profile management
+    void loadFromProfile(const ProfileBindingEntry& profile);
+    ProfileBindingEntry saveToProfile(const std::string& name) const;
 
 private:
     struct KeyState {

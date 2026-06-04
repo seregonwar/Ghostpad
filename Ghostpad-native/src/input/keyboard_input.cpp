@@ -4,6 +4,7 @@
 // Licensed under the GNU General Public License v3.0. See LICENSE file for details.
 
 #include "input/keyboard_input.h"
+#include "storage/profile_store.h"
 #include <algorithm>
 #include <cmath>
 #include <GLFW/glfw3.h>
@@ -202,6 +203,41 @@ PadStateInput KeyboardInput::getPadState() const {
     pad.trigger_r2 = (it_r2 != button_bindings_.end() && isKeyHeld(key_states_, it_r2->second.glfw_key)) ? 255 : 0;
 
     return pad;
+}
+
+/*
+ *  +--------------------------------------------------------+
+ *  |                 PROFILE SERIALIZATION                  |
+ *  +--------------------------------------------------------+
+ */
+void KeyboardInput::loadFromProfile(const ProfileBindingEntry& profile) {
+    button_bindings_.clear();
+    for (const auto& b : profile.button_bindings) {
+        button_bindings_[b.button_id] = b;
+    }
+    stick_bindings_ = profile.stick_bindings;
+    mouse_look_.enabled = profile.mouse_look_enabled;
+    mouse_look_.sensitivity = profile.mouse_sensitivity;
+    auto_clicker_.enabled = profile.auto_clicker_enabled;
+    auto_clicker_.button_id = profile.auto_clicker_button_id;
+    auto_clicker_.hold_ms = profile.auto_clicker_hold_ms;
+    auto_clicker_.gap_ms = profile.auto_clicker_gap_ms;
+}
+
+ProfileBindingEntry KeyboardInput::saveToProfile(const std::string& name) const {
+    ProfileBindingEntry profile;
+    profile.name = name;
+    for (const auto& [_, b] : button_bindings_) {
+        profile.button_bindings.push_back(b);
+    }
+    profile.stick_bindings = stick_bindings_;
+    profile.mouse_look_enabled = mouse_look_.enabled;
+    profile.mouse_sensitivity = mouse_look_.sensitivity;
+    profile.auto_clicker_enabled = auto_clicker_.enabled;
+    profile.auto_clicker_button_id = auto_clicker_.button_id;
+    profile.auto_clicker_hold_ms = auto_clicker_.hold_ms;
+    profile.auto_clicker_gap_ms = auto_clicker_.gap_ms;
+    return profile;
 }
 
 } // namespace ghostpad

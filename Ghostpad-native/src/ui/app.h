@@ -19,6 +19,7 @@
 #include "storage/console_store.h"
 #include "storage/settings_store.h"
 #include "storage/project_store.h"
+#include "storage/profile_store.h"
 #include "input/keyboard_input.h"
 #include "input/gamepad_input.h"
 #include "input/macro_engine.h"
@@ -46,6 +47,8 @@ struct StatusMessage {
 
 class App {
 public:
+    static constexpr int MAX_CONTROLLER_SLOTS = 4;
+
     App(const std::string& data_dir);
     ~App();
 
@@ -63,20 +66,33 @@ public:
     bool should_close = false;
 
     // Public state
-    GhostpadClient ghostpad;
     KeyboardInput keyboard;
     GamepadInput gamepad_input;
     MacroEngine macro_engine;
     ConsoleStore consoles;
     SettingsStore settings;
     ProjectStore projects;
+    ProfileStore profiles;
     PayloadDeployer deployer;
+
+    // Multi-controller slot access
+    GhostpadClient& ghostpad() { return ghostpad_[active_slot_]; }
+    const GhostpadClient& ghostpad() const { return ghostpad_[active_slot_]; }
+    GhostpadClient& ghostpadSlot(int slot) { return ghostpad_[slot % MAX_CONTROLLER_SLOTS]; }
+    int activeSlot() const { return active_slot_; }
+    void setActiveSlot(int slot);
+    int ghostpadConnectedCount() const;
+    bool isAnyGhostpadConnected() const;
+    void disconnectAllGhostpad();
+    void sendPadStateToAll(const GpadNetworkState& state);
 
     // UI state
     Screen current_screen = Screen::Home;
     std::string selected_console_ip;
     int selected_console_port = 6967;
     std::string selected_project_id;
+    std::string selected_profile_id;
+    std::string selected_command_id;
     std::string rebind_button_name;
     int rebind_button_id = -1;
     PadStateInput virtual_pad;
@@ -84,6 +100,8 @@ public:
     bool is_layout_edit_mode = false;
     int selected_layout_component = 0;
     PadLayoutSettings temp_layout;
+    bool has_last_recorded_ = false;
+    PadStateInput last_recorded_ps_;
 
     // Active controller state query
     PadStateInput getCurrentPadState();
@@ -98,6 +116,10 @@ private:
     void drawSidebar(float width, float height);
     void drawTopBar(float x, float y, float width, float height);
     void renderScreen();
+
+    // Multi-controller state
+    GhostpadClient ghostpad_[MAX_CONTROLLER_SLOTS];
+    int active_slot_ = 0;
 
     // Deploy status tracking
     DeployStatus deploy_status_;

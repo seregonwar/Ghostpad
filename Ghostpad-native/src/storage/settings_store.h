@@ -160,6 +160,7 @@ struct AppSettings {
     bool connect_beep_enabled = false;
     int connect_beep_type = 1;
     PadLayoutSettings pad_layout;
+    std::string active_profile_id;
 };
 
 inline void to_json(nlohmann::json& j, const AppSettings& s) {
@@ -169,7 +170,8 @@ inline void to_json(nlohmann::json& j, const AppSettings& s) {
         {"auto_bind_via_klog", s.auto_bind_via_klog},
         {"connect_beep_enabled", s.connect_beep_enabled},
         {"connect_beep_type", s.connect_beep_type},
-        {"pad_layout", s.pad_layout}
+        {"pad_layout", s.pad_layout},
+        {"active_profile_id", s.active_profile_id}
     };
 }
 
@@ -182,6 +184,7 @@ inline void from_json(const nlohmann::json& j, AppSettings& s) {
     if (j.contains("pad_layout")) {
         j.at("pad_layout").get_to(s.pad_layout);
     }
+    s.active_profile_id = j.value("active_profile_id", "");
 }
 
 class SettingsStore {

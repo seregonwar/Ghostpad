@@ -33,6 +33,8 @@ public:
 
     static std::vector<MacroSignal> normalizeSignals(const std::vector<MacroSignal>& signals);
     static std::string exportAsPython(const std::vector<MacroSignal>& signals, const std::string& name);
+    static std::vector<MacroSignal> importSignalsFromJson(const std::string& json);
+    static std::vector<MacroSignal> importSignalsFromPython(const std::string& py);
 
 private:
     bool recording_ = false;

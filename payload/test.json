@@ -1,0 +1,1192 @@
+{
+  "commands": [
+    {
+      "id": "8ecf1ddc-0d1d-a561-feeb-bcf5078826d5",
+      "name": "Recording 1",
+      "signals": [
+        {
+          "button_id": 15,
+          "time_ms": 299,
+          "value": 255
+        },
+        {
+          "button_id": 13,
+          "time_ms": 468,
+          "value": 255
+        },
+        {
+          "button_id": 15,
+          "time_ms": 485,
+          "value": 0
+        },
+        {
+          "button_id": 14,
+          "time_ms": 570,
+          "value": 255
+        },
+        {
+          "button_id": 13,
+          "time_ms": 599,
+          "value": 0
+        },
+        {
+          "button_id": 12,
+          "time_ms": 666,
+          "value": 255
+        },
+        {
+          "button_id": 14,
+          "time_ms": 699,
+          "value": 0
+        },
+        {
+          "button_id": 15,
+          "time_ms": 771,
+          "value": 255
+        },
+        {
+          "button_id": 12,
+          "time_ms": 882,
+          "value": 0
+        },
+        {
+          "button_id": 13,
+          "time_ms": 982,
+          "value": 255
+        },
+        {
+          "button_id": 15,
+          "time_ms": 1020,
+          "value": 0
+        },
+        {
+          "button_id": 13,
+          "time_ms": 1102,
+          "value": 0
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1306,
+          "value": 72
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1306,
+          "value": 74
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1332,
+          "value": 17
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1332,
+          "value": 53
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1352,
+          "value": 7
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1352,
+          "value": 78
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1382,
+          "value": 0
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1382,
+          "value": 128
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1401,
+          "value": 168
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1419,
+          "value": 7
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1419,
+          "value": 195
+        },
+        {
+          "button_id": 10,
+          "time_ms": 1449,
+          "value": 255
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1449,
+          "value": 26
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1449,
+          "value": 229
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1469,
+          "value": 39
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1469,
+          "value": 246
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1499,
+          "value": 71
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1499,
+          "value": 255
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1521,
+          "value": 96
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1549,
+          "value": 128
+        },
+        {
+          "button_id": 10,
+          "time_ms": 1566,
+          "value": 0
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1566,
+          "value": 182
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1587,
+          "value": 223
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1587,
+          "value": 236
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1616,
+          "value": 252
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1616,
+          "value": 200
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1632,
+          "value": 253
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1632,
+          "value": 193
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1649,
+          "value": 255
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1649,
+          "value": 189
+        },
+        {
+          "button_id": 10,
+          "time_ms": 1670,
+          "value": 255
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1670,
+          "value": 183
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1687,
+          "value": 168
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1716,
+          "value": 128
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1735,
+          "value": 93
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1753,
+          "value": 83
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1770,
+          "value": 72
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1799,
+          "value": 246
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1799,
+          "value": 44
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1816,
+          "value": 237
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1816,
+          "value": 34
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1832,
+          "value": 226
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1832,
+          "value": 21
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1849,
+          "value": 212
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1849,
+          "value": 11
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1868,
+          "value": 202
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1868,
+          "value": 5
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1887,
+          "value": 201
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1887,
+          "value": 4
+        },
+        {
+          "button_id": 10,
+          "time_ms": 1916,
+          "value": 0
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1916,
+          "value": 208
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1916,
+          "value": 7
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1932,
+          "value": 226
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1932,
+          "value": 28
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1953,
+          "value": 255
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1953,
+          "value": 78
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1970,
+          "value": 96
+        },
+        {
+          "button_id": 18,
+          "time_ms": 1999,
+          "value": 128
+        },
+        {
+          "button_id": 19,
+          "time_ms": 1999,
+          "value": 128
+        },
+        {
+          "button_id": 20,
+          "time_ms": 2120,
+          "value": 110
+        },
+        {
+          "button_id": 21,
+          "time_ms": 2120,
+          "value": 76
+        },
+        {
+          "button_id": 20,
+          "time_ms": 2137,
+          "value": 53
+        },
+        {
+          "button_id": 21,
+          "time_ms": 2137,
+          "value": 9
+        },
+        {
+          "button_id": 20,
+          "time_ms": 2166,
+          "value": 51
+        },
+        {
+          "button_id": 21,
+          "time_ms": 2166,
+          "value": 10
+        },
+        {
+          "button_id": 20,
+          "time_ms": 2187,
+          "value": 50
+        },
+        {
+          "button_id": 21,
+          "time_ms": 2187,
+          "value": 11
+        },
+        {
+          "button_id": 21,
+          "time_ms": 2216,
+          "value": 12
+        },
+        {
+          "button_id": 20,
+          "time_ms": 2249,
+          "value": 46
+        },
+        {
+          "button_id": 21,
+          "time_ms": 2249,
+          "value": 15
+        },
+        {
+          "button_id": 20,
+          "time_ms": 2271,
+          "value": 69
+        },
+        {
+          "button_id": 21,
+          "time_ms": 2271,
+          "value": 56
+        },
+        {
+          "button_id": 20,
+          "time_ms": 2299,
+          "value": 128
+        },
+        {
+          "button_id": 21,
+          "time_ms": 2299,
+          "value": 128
+        },
+        {
+          "button_id": 11,
+          "time_ms": 2419,
+          "value": 255
+        },
+        {
+          "button_id": 20,
+          "time_ms": 2449,
+          "value": 101
+        },
+        {
+          "button_id": 21,
+          "time_ms": 2449,
+          "value": 70
+        },
+        {
+          "button_id": 20,
+          "time_ms": 2471,
+          "value": 58
+        },
+        {
+          "button_id": 21,
+          "time_ms": 2471,
+          "value": 4
+        },
+        {
+          "button_id": 20,
+          "time_ms": 2516,
+          "value": 68
+        },
+        {
+          "button_id": 21,
+          "time_ms": 2516,
+          "value": 0
+        },
+        {
+          "button_id": 11,
+          "time_ms": 2537,
+          "value": 0
+        },
+        {
+          "button_id": 20,
+          "time_ms": 2537,
+          "value": 83
+        },
+        {
+          "button_id": 20,
+          "time_ms": 2566,
+          "value": 91
+        },
+        {
+          "button_id": 20,
+          "time_ms": 2582,
+          "value": 105
+        },
+        {
+          "button_id": 21,
+          "time_ms": 2582,
+          "value": 5
+        },
+        {
+          "button_id": 20,
+          "time_ms": 2599,
+          "value": 128
+        },
+        {
+          "button_id": 21,
+          "time_ms": 2599,
+          "value": 29
+        },
+        {
+          "button_id": 21,
+          "time_ms": 2619,
+          "value": 61
+        },
+        {
+          "button_id": 21,
+          "time_ms": 2636,
+          "value": 128
+        },
+        {
+          "button_id": 2,
+          "time_ms": 3620,
+          "value": 255
+        },
+        {
+          "button_id": 2,
+          "time_ms": 3749,
+          "value": 0
+        },
+        {
+          "button_id": 2,
+          "time_ms": 3799,
+          "value": 255
+        },
+        {
+          "button_id": 2,
+          "time_ms": 3916,
+          "value": 0
+        },
+        {
+          "button_id": 2,
+          "time_ms": 3932,
+          "value": 255
+        },
+        {
+          "button_id": 2,
+          "time_ms": 4003,
+          "value": 0
+        },
+        {
+          "button_id": 3,
+          "time_ms": 4082,
+          "value": 255
+        },
+        {
+          "button_id": 3,
+          "time_ms": 4182,
+          "value": 0
+        },
+        {
+          "button_id": 1,
+          "time_ms": 4282,
+          "value": 255
+        },
+        {
+          "button_id": 0,
+          "time_ms": 4349,
+          "value": 255
+        },
+        {
+          "button_id": 1,
+          "time_ms": 4349,
+          "value": 0
+        },
+        {
+          "button_id": 0,
+          "time_ms": 4532,
+          "value": 0
+        },
+        {
+          "button_id": 2,
+          "time_ms": 4599,
+          "value": 255
+        },
+        {
+          "button_id": 1,
+          "time_ms": 4666,
+          "value": 255
+        },
+        {
+          "button_id": 2,
+          "time_ms": 4666,
+          "value": 0
+        },
+        {
+          "button_id": 3,
+          "time_ms": 4666,
+          "value": 255
+        },
+        {
+          "button_id": 3,
+          "time_ms": 4704,
+          "value": 0
+        },
+        {
+          "button_id": 15,
+          "time_ms": 4732,
+          "value": 255
+        },
+        {
+          "button_id": 3,
+          "time_ms": 4799,
+          "value": 255
+        },
+        {
+          "button_id": 0,
+          "time_ms": 4902,
+          "value": 255
+        },
+        {
+          "button_id": 2,
+          "time_ms": 4902,
+          "value": 255
+        },
+        {
+          "button_id": 3,
+          "time_ms": 4949,
+          "value": 0
+        },
+        {
+          "button_id": 1,
+          "time_ms": 4969,
+          "value": 0
+        },
+        {
+          "button_id": 20,
+          "time_ms": 4986,
+          "value": 109
+        },
+        {
+          "button_id": 21,
+          "time_ms": 4986,
+          "value": 158
+        },
+        {
+          "button_id": 20,
+          "time_ms": 5016,
+          "value": 100
+        },
+        {
+          "button_id": 21,
+          "time_ms": 5016,
+          "value": 167
+        },
+        {
+          "button_id": 20,
+          "time_ms": 5032,
+          "value": 95
+        },
+        {
+          "button_id": 20,
+          "time_ms": 5052,
+          "value": 92
+        },
+        {
+          "button_id": 21,
+          "time_ms": 5052,
+          "value": 163
+        },
+        {
+          "button_id": 20,
+          "time_ms": 5082,
+          "value": 128
+        },
+        {
+          "button_id": 21,
+          "time_ms": 5082,
+          "value": 128
+        },
+        {
+          "button_id": 15,
+          "time_ms": 5104,
+          "value": 0
+        },
+        {
+          "button_id": 1,
+          "time_ms": 5132,
+          "value": 255
+        },
+        {
+          "button_id": 2,
+          "time_ms": 5132,
+          "value": 0
+        },
+        {
+          "button_id": 3,
+          "time_ms": 5132,
+          "value": 255
+        },
+        {
+          "button_id": 14,
+          "time_ms": 5132,
+          "value": 255
+        },
+        {
+          "button_id": 0,
+          "time_ms": 5149,
+          "value": 0
+        },
+        {
+          "button_id": 0,
+          "time_ms": 5382,
+          "value": 255
+        },
+        {
+          "button_id": 13,
+          "time_ms": 5382,
+          "value": 255
+        },
+        {
+          "button_id": 14,
+          "time_ms": 5382,
+          "value": 0
+        },
+        {
+          "button_id": 2,
+          "time_ms": 5404,
+          "value": 255
+        },
+        {
+          "button_id": 15,
+          "time_ms": 5432,
+          "value": 255
+        },
+        {
+          "button_id": 3,
+          "time_ms": 5449,
+          "value": 0
+        },
+        {
+          "button_id": 1,
+          "time_ms": 5532,
+          "value": 0
+        },
+        {
+          "button_id": 20,
+          "time_ms": 5532,
+          "value": 109
+        },
+        {
+          "button_id": 21,
+          "time_ms": 5532,
+          "value": 150
+        },
+        {
+          "button_id": 20,
+          "time_ms": 5549,
+          "value": 100
+        },
+        {
+          "button_id": 21,
+          "time_ms": 5549,
+          "value": 153
+        },
+        {
+          "button_id": 20,
+          "time_ms": 5569,
+          "value": 93
+        },
+        {
+          "button_id": 21,
+          "time_ms": 5569,
+          "value": 154
+        },
+        {
+          "button_id": 20,
+          "time_ms": 5586,
+          "value": 94
+        },
+        {
+          "button_id": 13,
+          "time_ms": 5603,
+          "value": 0
+        },
+        {
+          "button_id": 20,
+          "time_ms": 5603,
+          "value": 128
+        },
+        {
+          "button_id": 21,
+          "time_ms": 5603,
+          "value": 128
+        },
+        {
+          "button_id": 1,
+          "time_ms": 5632,
+          "value": 255
+        },
+        {
+          "button_id": 15,
+          "time_ms": 5652,
+          "value": 0
+        },
+        {
+          "button_id": 0,
+          "time_ms": 5682,
+          "value": 0
+        },
+        {
+          "button_id": 3,
+          "time_ms": 5682,
+          "value": 255
+        },
+        {
+          "button_id": 12,
+          "time_ms": 5682,
+          "value": 255
+        },
+        {
+          "button_id": 2,
+          "time_ms": 5702,
+          "value": 0
+        },
+        {
+          "button_id": 3,
+          "time_ms": 5749,
+          "value": 0
+        },
+        {
+          "button_id": 1,
+          "time_ms": 5770,
+          "value": 0
+        },
+        {
+          "button_id": 12,
+          "time_ms": 5799,
+          "value": 0
+        },
+        {
+          "button_id": 18,
+          "time_ms": 6587,
+          "value": 112
+        },
+        {
+          "button_id": 19,
+          "time_ms": 6587,
+          "value": 145
+        },
+        {
+          "button_id": 18,
+          "time_ms": 6616,
+          "value": 67
+        },
+        {
+          "button_id": 19,
+          "time_ms": 6616,
+          "value": 209
+        },
+        {
+          "button_id": 18,
+          "time_ms": 6632,
+          "value": 51
+        },
+        {
+          "button_id": 19,
+          "time_ms": 6632,
+          "value": 244
+        },
+        {
+          "button_id": 18,
+          "time_ms": 6649,
+          "value": 50
+        },
+        {
+          "button_id": 18,
+          "time_ms": 6682,
+          "value": 72
+        },
+        {
+          "button_id": 19,
+          "time_ms": 6682,
+          "value": 254
+        },
+        {
+          "button_id": 18,
+          "time_ms": 6704,
+          "value": 128
+        },
+        {
+          "button_id": 19,
+          "time_ms": 6704,
+          "value": 255
+        },
+        {
+          "button_id": 18,
+          "time_ms": 6732,
+          "value": 238
+        },
+        {
+          "button_id": 19,
+          "time_ms": 6732,
+          "value": 218
+        },
+        {
+          "button_id": 18,
+          "time_ms": 6753,
+          "value": 255
+        },
+        {
+          "button_id": 19,
+          "time_ms": 6753,
+          "value": 128
+        },
+        {
+          "button_id": 19,
+          "time_ms": 6770,
+          "value": 72
+        },
+        {
+          "button_id": 18,
+          "time_ms": 6799,
+          "value": 223
+        },
+        {
+          "button_id": 19,
+          "time_ms": 6799,
+          "value": 20
+        },
+        {
+          "button_id": 18,
+          "time_ms": 6819,
+          "value": 181
+        },
+        {
+          "button_id": 19,
+          "time_ms": 6819,
+          "value": 1
+        },
+        {
+          "button_id": 18,
+          "time_ms": 6849,
+          "value": 86
+        },
+        {
+          "button_id": 19,
+          "time_ms": 6849,
+          "value": 0
+        },
+        {
+          "button_id": 18,
+          "time_ms": 6866,
+          "value": 68
+        },
+        {
+          "button_id": 19,
+          "time_ms": 6866,
+          "value": 2
+        },
+        {
+          "button_id": 18,
+          "time_ms": 6882,
+          "value": 40
+        },
+        {
+          "button_id": 19,
+          "time_ms": 6882,
+          "value": 18
+        },
+        {
+          "button_id": 18,
+          "time_ms": 6903,
+          "value": 16
+        },
+        {
+          "button_id": 19,
+          "time_ms": 6903,
+          "value": 76
+        },
+        {
+          "button_id": 18,
+          "time_ms": 6932,
+          "value": 55
+        },
+        {
+          "button_id": 19,
+          "time_ms": 6932,
+          "value": 248
+        },
+        {
+          "button_id": 18,
+          "time_ms": 6953,
+          "value": 87
+        },
+        {
+          "button_id": 19,
+          "time_ms": 6953,
+          "value": 255
+        },
+        {
+          "button_id": 18,
+          "time_ms": 6982,
+          "value": 128
+        },
+        {
+          "button_id": 18,
+          "time_ms": 7003,
+          "value": 190
+        },
+        {
+          "button_id": 19,
+          "time_ms": 7003,
+          "value": 254
+        },
+        {
+          "button_id": 18,
+          "time_ms": 7021,
+          "value": 241
+        },
+        {
+          "button_id": 19,
+          "time_ms": 7021,
+          "value": 220
+        },
+        {
+          "button_id": 18,
+          "time_ms": 7049,
+          "value": 255
+        },
+        {
+          "button_id": 19,
+          "time_ms": 7049,
+          "value": 128
+        },
+        {
+          "button_id": 19,
+          "time_ms": 7069,
+          "value": 59
+        },
+        {
+          "button_id": 18,
+          "time_ms": 7099,
+          "value": 188
+        },
+        {
+          "button_id": 19,
+          "time_ms": 7099,
+          "value": 2
+        },
+        {
+          "button_id": 18,
+          "time_ms": 7116,
+          "value": 128
+        },
+        {
+          "button_id": 19,
+          "time_ms": 7116,
+          "value": 0
+        },
+        {
+          "button_id": 18,
+          "time_ms": 7132,
+          "value": 81
+        },
+        {
+          "button_id": 18,
+          "time_ms": 7152,
+          "value": 44
+        },
+        {
+          "button_id": 19,
+          "time_ms": 7152,
+          "value": 14
+        },
+        {
+          "button_id": 18,
+          "time_ms": 7169,
+          "value": 14
+        },
+        {
+          "button_id": 19,
+          "time_ms": 7169,
+          "value": 51
+        },
+        {
+          "button_id": 18,
+          "time_ms": 7186,
+          "value": 0
+        },
+        {
+          "button_id": 19,
+          "time_ms": 7186,
+          "value": 128
+        },
+        {
+          "button_id": 18,
+          "time_ms": 7216,
+          "value": 27
+        },
+        {
+          "button_id": 19,
+          "time_ms": 7216,
+          "value": 226
+        },
+        {
+          "button_id": 18,
+          "time_ms": 7235,
+          "value": 52
+        },
+        {
+          "button_id": 19,
+          "time_ms": 7235,
+          "value": 246
+        },
+        {
+          "button_id": 18,
+          "time_ms": 7253,
+          "value": 79
+        },
+        {
+          "button_id": 19,
+          "time_ms": 7253,
+          "value": 255
+        },
+        {
+          "button_id": 18,
+          "time_ms": 7270,
+          "value": 111
+        },
+        {
+          "button_id": 18,
+          "time_ms": 7299,
+          "value": 212
+        },
+        {
+          "button_id": 19,
+          "time_ms": 7299,
+          "value": 243
+        },
+        {
+          "button_id": 18,
+          "time_ms": 7321,
+          "value": 255
+        },
+        {
+          "button_id": 19,
+          "time_ms": 7321,
+          "value": 175
+        },
+        {
+          "button_id": 19,
+          "time_ms": 7349,
+          "value": 96
+        },
+        {
+          "button_id": 19,
+          "time_ms": 7370,
+          "value": 91
+        },
+        {
+          "button_id": 18,
+          "time_ms": 7399,
+          "value": 220
+        },
+        {
+          "button_id": 19,
+          "time_ms": 7399,
+          "value": 40
+        },
+        {
+          "button_id": 18,
+          "time_ms": 7420,
+          "value": 128
+        },
+        {
+          "button_id": 19,
+          "time_ms": 7420,
+          "value": 112
+        },
+        {
+          "button_id": 19,
+          "time_ms": 7437,
+          "value": 128
+        }
+      ],
+      "type": "macro"
+    }
+  ],
+  "created_at": "2026-06-04T10:34:40Z",
+  "description": "",
+  "game": "",
+  "id": "7e5ea24c-2945-1de2-aba8-8220b9b69826",
+  "name": "test",
+  "updated_at": "2026-06-04T10:34:53Z"
+}

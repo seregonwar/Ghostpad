@@ -49,6 +49,7 @@ public:
     Project update(const std::string& id, const Project& patch);
     bool remove(const std::string& id);
     bool addCommand(const std::string& project_id, const MacroCommand& cmd);
+    bool updateCommand(const std::string& project_id, const MacroCommand& cmd);
     bool removeCommand(const std::string& project_id, const std::string& cmd_id);
     std::string exportJson(const std::string& id) const;
     bool importJson(const std::string& json_str);

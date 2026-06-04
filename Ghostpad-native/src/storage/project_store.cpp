@@ -135,6 +135,28 @@ bool ProjectStore::addCommand(const std::string& project_id, const MacroCommand&
     return false;
 }
 
+/*
+ *  +--------------------------------------------------------+
+ *  |                 UPDATE MACRO SIGNAL LIST               |
+ *  +--------------------------------------------------------+
+ */
+bool ProjectStore::updateCommand(const std::string& project_id, const MacroCommand& cmd) {
+    auto entries = readAll();
+    for (auto& e : entries) {
+        if (e.id == project_id) {
+            for (auto& c : e.commands) {
+                if (c.id == cmd.id) {
+                    c = cmd;
+                    e.updated_at = nowISO();
+                    writeAll(entries);
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 bool ProjectStore::removeCommand(const std::string& project_id, const std::string& cmd_id) {
     auto entries = readAll();
     for (auto& e : entries) {

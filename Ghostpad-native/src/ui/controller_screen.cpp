@@ -14,7 +14,7 @@ extern void renderInteractivePadVisualizer(App& app, PadStateInput& state, float
 
 void renderControllerScreen(App& app) {
     const auto& p = ui::colors();
-    auto status = app.ghostpad.getStatus();
+    auto status = app.ghostpad().getStatus();
     float avail_w = ImGui::GetContentRegionAvail().x;
     float avail_h = ImGui::GetContentRegionAvail().y;
 
@@ -23,9 +23,9 @@ void renderControllerScreen(App& app) {
     ImGui::TextColored(p.primary2, "%s  Virtual DualSense", ICON_FA_GAMEPAD);
     ImGui::SameLine();
     if (status.is_connected)
-        ImGui::TextColored(p.success, "%s (streaming to %s:%d)", ICON_FA_SIGNAL, status.ip.c_str(), status.port);
+        ImGui::TextColored(p.success, "%s (P%d streaming to %s:%d)", ICON_FA_SIGNAL, app.activeSlot() + 1, status.ip.c_str(), status.port);
     else
-        ImGui::TextColored(p.danger, "%s (not connected)", ICON_FA_CIRCLE_XMARK);
+        ImGui::TextColored(p.danger, "%s (P%d not connected)", ICON_FA_CIRCLE_XMARK, app.activeSlot() + 1);
 
     /*
      *  ┌──────────────────────────────────────────────────────────┐
@@ -44,6 +44,20 @@ void renderControllerScreen(App& app) {
             top_actions_w += spacing + 100.0f;
         }
     }
+
+    // Slot selector
+    top_actions_w += spacing + 60.0f;
+    ImGui::SameLine(avail_w - top_actions_w);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(p.muted, "%s", ICON_FA_USER);
+    ImGui::SameLine();
+    ImGui::PushItemWidth(55);
+    int slot = app.activeSlot();
+    if (ImGui::Combo("##CtrlSlot", &slot, "P1\0P2\0P3\0P4\0")) {
+        app.setActiveSlot(slot);
+    }
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
 
     ImGui::SameLine(avail_w - top_actions_w);
     

@@ -107,6 +107,7 @@ AppSettings SettingsStore::write(const AppSettings& patch) {
     current.connect_beep_enabled = patch.connect_beep_enabled;
     current.connect_beep_type = patch.connect_beep_type;
     current.pad_layout = patch.pad_layout;
+    if (!patch.active_profile_id.empty()) current.active_profile_id = patch.active_profile_id;
 
     nlohmann::json j = current;
     std::ofstream file(file_path_);

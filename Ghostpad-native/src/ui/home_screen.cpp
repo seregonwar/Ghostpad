@@ -13,7 +13,7 @@ namespace ghostpad {
 
 void renderHomeScreen(App& app) {
     const auto& p = ui::colors();
-    auto status = app.ghostpad.getStatus();
+    auto status = app.ghostpad().getStatus();
 
     float avail_w = ImGui::GetContentRegionAvail().x;
     float avail_h = ImGui::GetContentRegionAvail().y;
@@ -41,7 +41,7 @@ void renderHomeScreen(App& app) {
         ImGui::Spacing();
         
         if (ui::dangerButton(ICON_FA_LINK_SLASH "  Disconnect Console", ImVec2(180, 38))) {
-            app.ghostpad.disconnect();
+            app.ghostpad().disconnect();
             app.deployer.stopKlogWatcher();
             app.selected_console_ip.clear();
             app.addStatus("Disconnected");
@@ -58,7 +58,7 @@ void renderHomeScreen(App& app) {
                     } else {
                         app.addStatus("Payload termination sent, checking status...", true);
                     }
-                    app.ghostpad.disconnect();
+                    app.ghostpad().disconnect();
                     app.deployer.stopKlogWatcher();
                     app.selected_console_ip.clear();
                 }).detach();

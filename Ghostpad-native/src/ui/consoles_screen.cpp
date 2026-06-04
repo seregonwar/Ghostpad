@@ -38,6 +38,18 @@ void renderConsolesScreen(App& app) {
     ImGui::PopItemWidth();
     ImGui::SameLine();
 
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(p.muted, "Slot:");
+    ImGui::SameLine();
+    ImGui::PushItemWidth(50);
+    static const char* slotNames[] = { "P1", "P2", "P3", "P4" };
+    int currentSlot = app.activeSlot();
+    if (ImGui::Combo("##Slot", &currentSlot, slotNames, App::MAX_CONTROLLER_SLOTS)) {
+        app.setActiveSlot(currentSlot);
+    }
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
+
     bool connecting = app.is_connecting_.load();
 
     if (connecting) {
@@ -65,10 +77,10 @@ void renderConsolesScreen(App& app) {
                         app.deployer.ensurePayloadRunning(ip, opts);
                     }
 
-                    if (app.ghostpad.connect(ip, port)) {
+                    if (app.ghostpad().connect(ip, port)) {
                         app.selected_console_ip = ip;
                         app.selected_console_port = port;
-                        app.addStatus("Connected to " + ip);
+                        app.addStatus("Connected P" + std::to_string(app.activeSlot() + 1) + " to " + ip);
                         if (settings.connect_beep_enabled && app.deployer.auto_adopted)
                             BeeperClient::buzz(ip, settings.connect_beep_type);
                     } else {
@@ -82,10 +94,10 @@ void renderConsolesScreen(App& app) {
 
     ImGui::SameLine();
     if (ui::dangerButton(ICON_FA_LINK_SLASH "  Disconnect", ImVec2(120, 32))) {
-        app.ghostpad.disconnect();
+        app.disconnectAllGhostpad();
         app.deployer.stopKlogWatcher();
         app.selected_console_ip.clear();
-        app.addStatus("Disconnected");
+        app.addStatus("Disconnected all controllers");
     }
 
     ImGui::SameLine();
@@ -100,7 +112,7 @@ void renderConsolesScreen(App& app) {
                 } else {
                     app.addStatus("Payload termination sent, checking status...", true);
                 }
-                app.ghostpad.disconnect();
+                app.ghostpad().disconnect();
                 app.deployer.stopKlogWatcher();
                 app.selected_console_ip.clear();
             }).detach();
@@ -197,10 +209,10 @@ void renderConsolesScreen(App& app) {
                         app.deployer.ensurePayloadRunning(ip, opts);
                     }
                     
-                    if (app.ghostpad.connect(ip, port)) {
+                    if (app.ghostpad().connect(ip, port)) {
                         app.selected_console_ip = ip;
                         app.selected_console_port = port;
-                        app.addStatus("Connected to " + name);
+                        app.addStatus("Connected P" + std::to_string(app.activeSlot() + 1) + " to " + name);
                         if (settings.connect_beep_enabled && app.deployer.auto_adopted)
                             BeeperClient::buzz(ip, settings.connect_beep_type);
                     } else {
