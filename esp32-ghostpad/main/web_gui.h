@@ -101,11 +101,11 @@ static const char *INDEX_HTML =
 "<!-- BLE Controller Section -->"
 "<div class='glass-panel ble-section' id='bleSectionPanel'>"
 "<div class='ble-header'>"
-"<span class='ble-title'>🎮 BLE Controller</span>"
+"<span class='ble-title'>🎮 BT Controller</span>"
 "<span class='ble-badge idle' id='bleBadge'>IDLE</span>"
 "</div>"
 "<div id='bleConnectedCard' style='display:none;margin-bottom:10px'></div>"
-"<button class='btn-primary' id='bleScanBtn' onclick='startBleScan()' style='background:linear-gradient(135deg,#00f5d4 0%,#00bfa5 100%);box-shadow:0 4px 15px rgba(0,245,212,0.2);margin-bottom:10px'>🔍 Scan BLE Controllers</button>"
+"<button class='btn-primary' id='bleScanBtn' onclick='startBleScan()' style='background:linear-gradient(135deg,#00f5d4 0%,#00bfa5 100%);box-shadow:0 4px 15px rgba(0,245,212,0.2);margin-bottom:10px'>🔍 Scan BT Controllers</button>"
 "<div id='bleDeviceList'></div>"
 "</div>"
 

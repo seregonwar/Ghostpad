@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 static const char *TAG = "ble_hid";
 
@@ -66,6 +67,8 @@ static const char *TAG = "ble_hid";
 #define SONY_PID_DUALSENSE          0x0CE6
 #define SONY_PID_DUALSENSE_EDGE     0x0DF2
 
+#define SONY_BLE_COMPANY_ID         0x004C
+
 #define MICROSOFT_USB_VID           0x045E
 #define NINTENDO_USB_VID            0x057E
 #define EIGHTBITDO_USB_VID          0x2DC8
@@ -93,6 +96,7 @@ typedef struct {
     bool        gamepad_appearance;
     bool        known_name;
     bool        sony_name;
+    bool        sony_mfg;
 } scan_result_t;
 
 static scan_result_t s_results[MAX_SCAN_RESULTS];
@@ -112,6 +116,7 @@ static char     s_device_addr[18] = "";
 
 /* Handle of the HID Report characteristic (input report, notifiable) */
 static uint16_t s_report_handle = 0;
+static uint16_t s_hid_service_end = 0;
 
 /* True while a GATT discovery is running */
 static bool s_discovering = false;
@@ -291,22 +296,72 @@ static int on_write_cccd(uint16_t conn_handle,
     return 0;
 }
 
+static int on_disc_descs(uint16_t conn_handle,
+                         const struct ble_gatt_error *error,
+                         uint16_t chr_val_handle,
+                         const struct ble_gatt_dsc *dsc,
+                         void *arg) {
+    if (error->status == BLE_HS_EDONE) {
+        s_discovering = false;
+        return 0;
+    }
+    if (error->status != 0) {
+        ESP_LOGE(TAG, "Descriptor discovery error: %d", error->status);
+        s_discovering = false;
+        return 0;
+    }
+
+    /* Log each descriptor */
+    if (dsc->uuid.u.type == BLE_UUID_TYPE_16) {
+        ESP_LOGI(TAG, "  Desc: uuid=0x%04x handle=0x%04x",
+                 dsc->uuid.u16.value, dsc->handle);
+    }
+
+    /* Look for CCCD (0x2902) among the descriptors of this characteristic */
+    if (dsc->uuid.u.type == BLE_UUID_TYPE_16 &&
+        dsc->uuid.u16.value == BLE_UUID_CCCD) {
+        ESP_LOGI(TAG, "Found CCCD at handle=0x%04x, enabling notifications...",
+                 dsc->handle);
+        uint8_t val[2] = {0x01, 0x00};
+        ble_gattc_write_flat(conn_handle, dsc->handle,
+                             val, sizeof(val), on_write_cccd, NULL);
+    }
+    return 0;
+}
+
 static int on_disc_chars(uint16_t conn_handle,
                          const struct ble_gatt_error *error,
                          const struct ble_gatt_chr *chr, void *arg) {
     if (error->status == BLE_HS_EDONE) {
         if (s_report_handle != 0) {
-            /* Enable notifications: write 0x0001 to CCCD (handle = report + 1) */
-            uint8_t val[2] = {0x01, 0x00};
-            ble_gattc_write_flat(conn_handle, s_report_handle + 1,
-                                 val, sizeof(val), on_write_cccd, NULL);
+            /* Discover descriptors of this characteristic to find the CCCD */
+            uint16_t desc_end = s_hid_service_end;
+            uint16_t desc_start = s_report_handle + 1;
+            if (desc_end == 0 || desc_end < desc_start) {
+                desc_end = s_report_handle + 20;
+            }
+            ESP_LOGI(TAG, "Discovering descriptors for HID Report handles=[0x%04x-0x%04x]...",
+                     desc_start, desc_end);
+            ble_gattc_disc_all_dscs(conn_handle,
+                                    desc_start, desc_end,
+                                    on_disc_descs, NULL);
+        } else {
+            ESP_LOGI(TAG, "No notifiable HID Report characteristic found");
+            s_discovering = false;
         }
-        s_discovering = false;
         return 0;
     }
     if (error->status != 0) {
+        ESP_LOGE(TAG, "Characteristic discovery error: %d", error->status);
         s_discovering = false;
         return 0;
+    }
+
+    /* Log every characteristic found */
+    if (chr->uuid.u.type == BLE_UUID_TYPE_16) {
+        ESP_LOGI(TAG, "  Char: uuid=0x%04x props=0x%02x val_handle=0x%04x def_handle=0x%04x",
+                 chr->uuid.u16.value, chr->properties,
+                 chr->val_handle, chr->def_handle);
     }
 
     /* Look for the HID Report characteristic with notify property */
@@ -315,8 +370,8 @@ static int on_disc_chars(uint16_t conn_handle,
         if (uuid16 == BLE_UUID_HID_REPORT &&
             (chr->properties & BLE_GATT_CHR_PROP_NOTIFY)) {
             s_report_handle = chr->val_handle;
-            ESP_LOGI(TAG, "Found HID Report characteristic, handle=0x%04x",
-                     s_report_handle);
+            ESP_LOGI(TAG, "Found HID Report characteristic, val_handle=0x%04x def_handle=0x%04x",
+                     chr->val_handle, chr->def_handle);
         }
     }
     return 0;
@@ -325,11 +380,41 @@ static int on_disc_chars(uint16_t conn_handle,
 static int on_disc_service(uint16_t conn_handle,
                            const struct ble_gatt_error *error,
                            const struct ble_gatt_svc *svc, void *arg) {
-    if (error->status == BLE_HS_EDONE) return 0;
-    if (error->status != 0) return 0;
+    if (error->status == BLE_HS_EDONE) {
+        ESP_LOGI(TAG, "Service discovery complete");
+        return 0;
+    }
+    if (error->status != 0) {
+        ESP_LOGE(TAG, "Service discovery error: %d", error->status);
+        return 0;
+    }
+
+    /* Log EVERY service found, regardless of UUID type */
+    const char *uuid_type = "?";
+    char uuid_str[40] = "";
+    switch (svc->uuid.u.type) {
+    case BLE_UUID_TYPE_16:
+        uuid_type = "16";
+        snprintf(uuid_str, sizeof(uuid_str), "0x%04x", svc->uuid.u16.value);
+        break;
+    case BLE_UUID_TYPE_32:
+        uuid_type = "32";
+        snprintf(uuid_str, sizeof(uuid_str), "0x%08lx", (unsigned long)svc->uuid.u32.value);
+        break;
+    case BLE_UUID_TYPE_128:
+        uuid_type = "128";
+        snprintf(uuid_str, sizeof(uuid_str), "%02x%02x%02x%02x-...",
+                 svc->uuid.u128.value[12], svc->uuid.u128.value[13],
+                 svc->uuid.u128.value[14], svc->uuid.u128.value[15]);
+        break;
+    }
+    ESP_LOGI(TAG, "  Svc: uuid_type=%s uuid=%s handles=[0x%04x-0x%04x]",
+             uuid_type, uuid_str,
+             svc->start_handle, svc->end_handle);
 
     if (svc->uuid.u.type == BLE_UUID_TYPE_16 &&
         svc->uuid.u16.value == BLE_UUID_HID_SERVICE) {
+        s_hid_service_end = svc->end_handle;
         ESP_LOGI(TAG, "Found HID Service (0x1812), discovering characteristics...");
         s_discovering = true;
         ble_gattc_disc_all_chrs(conn_handle,
@@ -485,6 +570,19 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
             adv_name[n] = '\0';
         }
 
+        /* Parse manufacturer-specific data: Sony company ID 0x004C identifies
+         * DualSense / DualShock 4 even when name/HID/appearance are missing
+         * from the advertisement. */
+        bool is_sony_mfg = false;
+        if (fields.mfg_data && fields.mfg_data_len >= 2) {
+            uint16_t company_id = (uint16_t)fields.mfg_data[0]
+                                | ((uint16_t)fields.mfg_data[1] << 8);
+            if (company_id == SONY_BLE_COMPANY_ID) {
+                is_sony_mfg = true;
+                ESP_LOGI(TAG, "Sony manufacturer data detected");
+            }
+        }
+
         {
             char hexbuf[256];
             int pos = 0;
@@ -514,6 +612,15 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
                                 &is_candidate, &is_known_name, &is_sony,
                                 &score, model, sizeof(model));
 
+        /* Boost Sony devices identified via manufacturer data even if name
+         * and HID UUID are not present in the advertisement. */
+        if (is_sony_mfg) {
+            is_sony = true;
+            is_candidate = true;
+            if (score < 85) score = 85;
+            strlcpy(model, "DualSense/DualShock", sizeof(model));
+        }
+
         /* Store every device — don't filter at advertisement level because
          * DualSense often omits name/HID/appearance from ADV_IND, providing
          * them only in SCAN_RSP or not at all. MAX_SCAN_RESULTS bounds the list. */
@@ -524,17 +631,24 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
             if (memcmp(s_results[i].addr.val, event->disc.addr.val, 6) == 0 &&
                 s_results[i].addr.type == event->disc.addr.type) {
                 found = true;
+                /* Update metadata — keep highest score, OR sony flags */
                 s_results[i].rssi = event->disc.rssi;
                 s_results[i].appearance = appearance;
                 s_results[i].addr_type = event->disc.addr.type;
-                s_results[i].score = score;
-                s_results[i].candidate = is_candidate;
-                s_results[i].hid_service = is_hid;
-                s_results[i].gamepad_appearance = is_gamepad;
-                s_results[i].known_name = is_known_name;
-                s_results[i].sony_name = is_sony;
+                if (score > s_results[i].score) s_results[i].score = score;
+                s_results[i].candidate = s_results[i].candidate || is_candidate;
+                s_results[i].hid_service = s_results[i].hid_service || is_hid;
+                s_results[i].gamepad_appearance = s_results[i].gamepad_appearance || is_gamepad;
+                s_results[i].known_name = s_results[i].known_name || is_known_name;
+                s_results[i].sony_name = s_results[i].sony_name || is_sony;
+                s_results[i].sony_mfg = s_results[i].sony_mfg || is_sony_mfg;
                 if (adv_name[0]) strlcpy(s_results[i].name, adv_name, sizeof(s_results[i].name));
-                if (model[0]) strlcpy(s_results[i].model, model, sizeof(s_results[i].model));
+                /* Update model only when we have specific info (not a generic fallback) */
+                if (model[0] &&
+                    strcmp(model, "Unknown BLE device") != 0 &&
+                    strcmp(model, "Named BLE device") != 0) {
+                    strlcpy(s_results[i].model, model, sizeof(s_results[i].model));
+                }
                 break;
             }
         }
@@ -551,10 +665,15 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
             r->gamepad_appearance = is_gamepad;
             r->known_name = is_known_name;
             r->sony_name = is_sony;
+            r->sony_mfg = is_sony_mfg;
             if (adv_name[0]) {
                 strlcpy(r->name, adv_name, sizeof(r->name));
+            } else if (is_sony_mfg) {
+                strlcpy(r->name, "Sony Wireless Controller", sizeof(r->name));
+            } else if (is_candidate) {
+                strlcpy(r->name, "HID Gamepad", sizeof(r->name));
             } else {
-                strlcpy(r->name, is_candidate ? "HID/Sony candidate" : "BLE Device", sizeof(r->name));
+                strlcpy(r->name, "BLE Device", sizeof(r->name));
             }
             if (model[0]) strlcpy(r->model, model, sizeof(r->model));
             char addr_str[18];
@@ -598,6 +717,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
         s_connected   = false;
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         s_report_handle = 0;
+        s_hid_service_end = 0;
         strcpy(s_device_name, "");
         strcpy(s_device_addr, "");
 
@@ -799,21 +919,19 @@ esp_err_t ble_hid_host_connect(const char *addr_str) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    ble_gap_disc_cancel();
-
     /* Parse "aa:bb:cc:dd:ee:ff" into ble_addr_t (big-endian in string) */
     ble_addr_t addr;
     addr.type = BLE_ADDR_RANDOM;
     unsigned int v[6];
     if (sscanf(addr_str, "%02x:%02x:%02x:%02x:%02x:%02x",
                &v[5], &v[4], &v[3], &v[2], &v[1], &v[0]) != 6) {
-        /* Try public address type if parsing implies it */
         ESP_LOGE(TAG, "Invalid address format: %s", addr_str);
         return ESP_ERR_INVALID_ARG;
     }
     for (int i = 0; i < 6; i++) addr.val[i] = (uint8_t)v[i];
 
     /* Try to match in scan results to know the correct address type */
+    bool found_addr = false;
     xSemaphoreTake(s_results_mutex, portMAX_DELAY);
     for (int i = 0; i < s_result_count; i++) {
         char a[18];
@@ -821,39 +939,37 @@ esp_err_t ble_hid_host_connect(const char *addr_str) {
         if (strcasecmp(a, addr_str) == 0) {
             addr = s_results[i].addr;
             strlcpy(s_device_name, s_results[i].name, sizeof(s_device_name));
+            found_addr = true;
             break;
         }
     }
     xSemaphoreGive(s_results_mutex);
 
+    if (!found_addr) {
+        ESP_LOGW(TAG, "Address %s not found in scan cache; trying with random type", addr_str);
+    }
+
     strlcpy(s_device_addr, addr_str, sizeof(s_device_addr));
 
     uint8_t own_addr_type = 0;
-    ble_hs_util_ensure_addr(0);
     int own_rc = ble_hs_id_infer_auto(0, &own_addr_type);
     if (own_rc != 0) {
         ESP_LOGE(TAG, "ble_hs_id_infer_auto failed before connect: %d", own_rc);
         return ESP_FAIL;
     }
 
-    struct ble_gap_conn_params cp = {
-        .itvl_min            = 8,    /* 10 ms */
-        .itvl_max            = 16,   /* 20 ms */
-        .latency             = 0,
-        .supervision_timeout = 500,  /* 5 s */
-        .min_ce_len          = 0,
-        .max_ce_len          = 0,
-    };
-
-    int rc = ble_gap_connect(own_addr_type, &addr, 5000, &cp,
+    /* Pass NULL for conn_params to use NimBLE defaults (more compatible) */
+    ESP_LOGI(TAG, "Connecting to %s (type=%s, own=%s)...",
+             addr_str, addr_type_name(addr.type), addr_type_name(own_addr_type));
+    int rc = ble_gap_connect(own_addr_type, &addr, 8000, NULL,
                              gap_event_cb, NULL);
     if (rc != 0) {
-        ESP_LOGE(TAG, "ble_gap_connect failed: %d", rc);
+        ESP_LOGE(TAG, "ble_gap_connect failed: %d (addr_type=%s own_addr_type=%s)",
+                 rc, addr_type_name(addr.type), addr_type_name(own_addr_type));
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Connecting to %s (%s) using own_addr_type=%s...",
-             addr_str, addr_type_name(addr.type), addr_type_name(own_addr_type));
+    ESP_LOGI(TAG, "ble_gap_connect initiated to %s", addr_str);
     return ESP_OK;
 }
 

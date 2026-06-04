@@ -1,21 +1,39 @@
 #include "wifi_ap.h"
 #include "web_server.h"
 #include "hid_gamepad.h"
-#include "ble_hid_host.h"
+#include "bt_bridge.h"
 #include "esp_log.h"
-#include "esp_hosted.h"
 #include "nvs_flash.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <string.h>
 
+#if CONFIG_ESP_HOSTED_ENABLED
+#include "esp_hosted.h"
+#endif
+
 static const char *TAG = "ghostpad_main";
+
+#define HID_REPORT_INTERVAL_MS 10
+
+static void hid_sender_task(void *param) {
+    (void)param;
+    TickType_t last_wake = xTaskGetTickCount();
+    while (1) {
+        hid_gamepad_send_report();
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(HID_REPORT_INTERVAL_MS));
+    }
+}
 
 void app_main(void) {
     ESP_LOGI(TAG, "Ghostpad Bridge starting...");
 
+#if CONFIG_ESP_HOSTED_ENABLED
     ESP_LOGI(TAG, "Initializing ESP32-C6 co-processor over SDIO...");
     ESP_ERROR_CHECK(esp_hosted_init());
     ESP_ERROR_CHECK(esp_hosted_connect_to_slave());
     ESP_LOGI(TAG, "ESP32-C6 co-processor ready");
+#endif
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -27,7 +45,9 @@ void app_main(void) {
     ESP_ERROR_CHECK(wifi_ap_init());
     ESP_ERROR_CHECK(web_server_start());
     ESP_ERROR_CHECK(hid_gamepad_init());
-    ESP_ERROR_CHECK(ble_hid_host_init());
+    ESP_ERROR_CHECK(bt_bridge_init());
+
+    xTaskCreate(hid_sender_task, "hid_sender", 2048, NULL, 3, NULL);
 
     char ip[16] = "";
     if (ghostpad_wifi_get_primary_ip(ip, sizeof(ip)) != ESP_OK) {

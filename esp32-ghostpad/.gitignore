@@ -1,5 +1,6 @@
 build/
 sdkconfig
+sdkconfig.private.defaults
 *.o
 *.elf
 dependencies.lock

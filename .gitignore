@@ -16,3 +16,6 @@ Ghostpad-app/pnpm-lock.yaml
 Ghostpad-app/react/src/.DS_Store
 *.log
 /Ghostpad-native/build
+/deprecated/Ghostpad-app/node_modules
+/deprecated/Ghostpad-app/react/build
+/deprecated/Ghostpad-app/react/node_modules

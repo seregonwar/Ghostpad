@@ -1,0 +1,1298 @@
+diff --git a/bt_controller.h b/bt_controller.h
+index 9640efe..c11a3dd 100644
+--- a/bt_controller.h
++++ b/bt_controller.h
+@@ -47,7 +47,7 @@ SOFTWARE.
+  *
+  * @section threading Thread-safety
+  * Le callback vengono invocate dal task Bluedroid.
+- * btc_state, btc_pending_output e il ring-buffer input sono protetti da mutex interno.
++ * btc_state, latest input, auto-reconnect BDA e ring-buffer input sono protetti da mutex interno.
+  * Le API pubbliche sono thread-safe eccetto btc_init() / btc_deinit()
+  * che devono essere chiamate prima/dopo qualsiasi altro accesso.
+  *
+@@ -60,7 +60,7 @@ SOFTWARE.
+  *   - Nessuna malloc/free: tutti i buffer sono statici a dimensione fissa.
+  *   - Architettura driver-table: aggiungere un controller = aggiungere una riga.
+  *   - I dati IMU sono int16_t con fattore di scala esplicito (no float nei path critici).
+- *   - Output report bufferizzato con dirty-flag: inviato solo se cambiato.
++ *   - Output report costruito su stack a dimensione fissa e firmato CRC32 per BT.
+  */
+ 
+ #ifndef BT_CONTROLLER_H
+@@ -77,7 +77,7 @@ SOFTWARE.
+ /* ---- Versione ----------------------------------------------------------- */
+ #define BTC_VERSION_MAJOR 1U
+ #define BTC_VERSION_MINOR 0U
+-#define BTC_VERSION_PATCH 0U
++#define BTC_VERSION_PATCH 1U
+ 
+ /* ---- Limiti configurabili (override via -DBTC_xxx=yyy) ------------------ */
+ 
+@@ -118,6 +118,7 @@ typedef enum {
+     BTC_ERR_DRIVER           = -7, /**< Errore nel driver HID sottostante        */
+     BTC_ERR_UNSUPPORTED      = -8, /**< Controller non supportato                */
+     BTC_ERR_BUSY             = -9, /**< Risorsa occupata                         */
++    BTC_ERR_NO_DATA          = -10,/**< Nessun dato disponibile                  */
+ } btc_err_t;
+ 
+ /* ---- Identificativo controller ------------------------------------------ */
+@@ -272,7 +273,7 @@ typedef struct {
+     uint8_t b;
+ } btc_rgb_t;
+ 
+-/** Effetto trigger adattivo (semplificato, modalità rigidità uniforme). */
++/** Effetto trigger adattivo (riservato: output non inviato finché non verificato). */
+ typedef enum {
+     BTC_TRIGGER_EFFECT_OFF      = 0x00,
+     BTC_TRIGGER_EFFECT_FEEDBACK = 0x01, /**< Resistenza uniforme */
+@@ -467,7 +468,7 @@ btc_err_t btc_get_state(btc_input_state_t *out);
+  *
+  * @return BTC_OK se un evento era disponibile.
+  * @return BTC_ERR_INVALID_PARAM se out è NULL.
+- * @return BTC_ERR_BUFFER_FULL se il buffer era vuoto (nessun evento pendente).
++ * @return BTC_ERR_NO_DATA se il buffer era vuoto (nessun evento pendente).
+  *
+  * @note Thread-safety: thread-safe.
+  */
+@@ -525,8 +526,8 @@ const char *btc_version_string(void);
+ #include "freertos/task.h"
+ #include "nvs_flash.h"
+ 
+-#include <assert.h>
+ #include <inttypes.h>
++#include <stddef.h>
+ 
+ /* ---- Tag di log ESP-IDF ------------------------------------------------- */
+ static const char *BTC_TAG = "bt_ctrl";
+@@ -534,27 +535,27 @@ static const char *BTC_TAG = "bt_ctrl";
+ /* ---- Macro di log condizionale ------------------------------------------ */
+ 
+ #if BTC_LOG_LEVEL >= 1
+-#  define BTC_LOGE(fmt, ...) ESP_LOGE(BTC_TAG, fmt, ##__VA_ARGS__)
++#  define BTC_LOGE(...) ESP_LOGE(BTC_TAG, __VA_ARGS__)
+ #else
+-#  define BTC_LOGE(fmt, ...) ((void)0)
++#  define BTC_LOGE(...) ((void)0)
+ #endif
+ 
+ #if BTC_LOG_LEVEL >= 2
+-#  define BTC_LOGW(fmt, ...) ESP_LOGW(BTC_TAG, fmt, ##__VA_ARGS__)
++#  define BTC_LOGW(...) ESP_LOGW(BTC_TAG, __VA_ARGS__)
+ #else
+-#  define BTC_LOGW(fmt, ...) ((void)0)
++#  define BTC_LOGW(...) ((void)0)
+ #endif
+ 
+ #if BTC_LOG_LEVEL >= 3
+-#  define BTC_LOGI(fmt, ...) ESP_LOGI(BTC_TAG, fmt, ##__VA_ARGS__)
++#  define BTC_LOGI(...) ESP_LOGI(BTC_TAG, __VA_ARGS__)
+ #else
+-#  define BTC_LOGI(fmt, ...) ((void)0)
++#  define BTC_LOGI(...) ((void)0)
+ #endif
+ 
+ #if BTC_LOG_LEVEL >= 4
+-#  define BTC_LOGD(fmt, ...) ESP_LOGD(BTC_TAG, fmt, ##__VA_ARGS__)
++#  define BTC_LOGD(...) ESP_LOGD(BTC_TAG, __VA_ARGS__)
+ #else
+-#  define BTC_LOGD(fmt, ...) ((void)0)
++#  define BTC_LOGD(...) ((void)0)
+ #endif
+ 
+ /* ---- Asserzioni di configurazione --------------------------------------- */
+@@ -609,9 +610,12 @@ typedef struct {
+     uint32_t          ring_head;             /**< Protetto da s_mutex */
+     uint32_t          ring_tail;             /**< Protetto da s_mutex */
+ 
+-    /* Output report pendente */
+-    uint8_t  output_report[48];              /**< Buffer raw report   */
+-    bool     output_dirty;                   /**< Protetto da s_mutex */
++    /* Output report DualSense Bluetooth */
++    uint8_t  output_seq;                     /**< Protetto da s_mutex */
++
++    /* Ultimo controller noto per auto-reconnect. */
++    esp_bd_addr_t last_bda;                  /**< Protetto da s_mutex */
++    bool          last_bda_valid;            /**< Protetto da s_mutex */
+ 
+ } btc_ctx_t;
+ 
+@@ -657,48 +661,54 @@ static btc_controller_type_t btc_identify(uint16_t vid, uint16_t pid)
+ 
+ /* ---- Parser DualSense --------------------------------------------------- */
+ 
+-/**
+- * Layout report di input DualSense (BT Classic, report ID 0x01).
+- * Il byte 0 del payload HID è il report_id; l'offset inizia dal byte 1.
+- *
+- * Offset  Lunghezza  Campo
+- * ------  ---------  ----------------------------
+- *  0      1          LX
+- *  1      1          LY
+- *  2      1          RX
+- *  3      1          RY
+- *  4      1          L2 analog
+- *  5      1          R2 analog
+- *  6      1          seq_num
+- *  7      1          buttons[0]: [sq|x|o|tri|dpad_hi|dpad_lo|dpad_hi2|dpad_lo2]
+- *                    bits [3:0] = dpad nibble, bits [7:4] = sq,x,o,tri
+- *  8      1          buttons[1]: L1,R1,L2d,R2d,create,options,L3,R3
+- *  9      1          buttons[2]: PS,touchpad,mute,[reserved x5]
+- * 10      1          reserved
+- * 11-12   2          timestamp LE16
+- * 13      1          gyro_pitch_bias (reserved)
+- * 14-15   2          gyro_pitch LE16 (signed)
+- * 16-17   2          gyro_yaw   LE16 (signed)
+- * 18-19   2          gyro_roll  LE16 (signed)
+- * 20-21   2          accel_x    LE16 (signed)
+- * 22-23   2          accel_y    LE16 (signed)
+- * 24-25   2          accel_z    LE16 (signed)
+- * 26-29   4          sensor_ts  LE32
+- * 30      1          temperature
+- * 31-34   4          touch point 0  (active:1 | id:7 | x:12 | y:12)
+- * 35-38   4          touch point 1
+- * 39-41   3          touch timestamp
+- * 42      1          r_analog (duplicato, ignorato)
+- * 43-51   9          riservato
+- * 52      1          battery: [charging:1 | level:4 | status:3]
+- * 53-77   25         riservato / padding
++/*
++ * DualSense HID reports over Bluetooth:
++ * - Report 0x01: report compatto BT, contiene assi/pulsanti base.
++ * - Report 0x31: report completo BT da 78 byte inclusi report_id e CRC32.
+  *
+- * Dimensione totale payload (senza report_id): 77 byte
+- * Dimensione minima accettata: 53 byte
++ * ESP-IDF esp_hidh espone il report_id separatamente in ESP_HIDH_INPUT_EVENT;
++ * alcune versioni/trasporti possono però lasciare il report_id anche in data[0].
++ * Il parser accetta entrambe le forme in modo difensivo.
+  */
+ 
+-#define DS_PAYLOAD_MIN  53U  /**< Minimo byte payload per parsing base   */
+-#define DS_PAYLOAD_FULL 77U  /**< Payload completo                       */
++#define DS_INPUT_REPORT_SIMPLE_ID       0x01U
++#define DS_INPUT_REPORT_SIMPLE_MIN_LEN  10U
++#define DS_INPUT_REPORT_BT_ID           0x31U
++#define DS_INPUT_REPORT_BT_TOTAL_LEN    78U
++#define DS_INPUT_REPORT_BT_PAYLOAD_LEN  77U
++#define DS_INPUT_COMMON_LEN             63U
++#define DS_INPUT_COMMON_OFFSET_BT       2U
++#define DS_INPUT_CRC_OFFSET_BT          74U
++
++#define DS_OUTPUT_REPORT_BT_ID          0x31U
++#define DS_OUTPUT_REPORT_BT_TOTAL_LEN   78U
++#define DS_OUTPUT_REPORT_BT_PAYLOAD_LEN 77U
++#define DS_OUTPUT_SEQ_TAG_OFFSET        1U
++#define DS_OUTPUT_TAG_OFFSET            2U
++#define DS_OUTPUT_COMMON_OFFSET_BT      3U
++#define DS_OUTPUT_COMMON_LEN            47U
++#define DS_OUTPUT_CRC_OFFSET_BT         74U
++#define DS_OUTPUT_TAG_VALUE             0x10U
++
++#define DS_CRC32_INPUT_SEED             0xA1U
++#define DS_CRC32_OUTPUT_SEED            0xA2U
++
++#define DS_OUTPUT_VALID_FLAG0_HAPTICS_SELECT                   0x02U
++#define DS_OUTPUT_VALID_FLAG1_MIC_MUTE_LED_CONTROL_ENABLE      0x01U
++#define DS_OUTPUT_VALID_FLAG1_POWER_SAVE_CONTROL_ENABLE        0x02U
++#define DS_OUTPUT_VALID_FLAG1_LIGHTBAR_CONTROL_ENABLE          0x04U
++#define DS_OUTPUT_VALID_FLAG1_PLAYER_INDICATOR_CONTROL_ENABLE  0x10U
++#define DS_OUTPUT_VALID_FLAG2_LIGHTBAR_SETUP_CONTROL_ENABLE    0x02U
++#define DS_OUTPUT_VALID_FLAG2_COMPATIBLE_VIBRATION2            0x04U
++#define DS_OUTPUT_POWER_SAVE_CONTROL_MIC_MUTE                  0x10U
++#define DS_OUTPUT_LIGHTBAR_SETUP_LIGHT_OUT                     0x02U
++
++#define BTC_NVS_NAMESPACE "bt_ctrl"
++#define BTC_NVS_KEY_LAST_BDA "last_bda"
++
++/* Macro CoD Bluetooth Classic: Major/Minor device class. */
++#define BTC_COD_MAJOR_DEVICE(cod_)  (((cod_) >> 8U) & 0x1FU)
++#define BTC_COD_MINOR_DEVICE(cod_)  (((cod_) >> 2U) & 0x3FU)
+ 
+ /**
+  * @brief Decodifica un punto di contatto touchpad da 4 byte raw.
+@@ -744,63 +754,109 @@ static uint32_t btc_read_le32u(const uint8_t *b)
+          | ((uint32_t)b[3] << 24U);
+ }
+ 
++
+ /**
+- * @brief Parsing del report di input DualSense.
+- *
+- * @param[in]  data    Payload HID (senza report_id, il report_id è già
+- *                     strippato da esp_hidh).
+- * @param[in]  len     Lunghezza payload in byte.
+- * @param[out] out     Stato popolato. Non può essere NULL.
++ * @brief Scrive un uint32_t little-endian in quattro byte.
++ */
++static void btc_write_le32u(uint8_t *b, uint32_t v)
++{
++    b[0] = (uint8_t)(v & 0xFFU);
++    b[1] = (uint8_t)((v >> 8U) & 0xFFU);
++    b[2] = (uint8_t)((v >> 16U) & 0xFFU);
++    b[3] = (uint8_t)((v >> 24U) & 0xFFU);
++}
++
++/**
++ * @brief Aggiorna CRC32 little-endian Ethernet/ZIP, polinomio riflesso.
+  *
+- * @return BTC_OK in caso di successo.
+- * @return BTC_ERR_INVALID_PARAM se data==NULL, out==NULL.
+- * @return BTC_ERR_DRIVER se len < DS_PAYLOAD_MIN.
++ * Implementazione tableless: bounded, senza memoria dinamica
++ * e senza tabella globale da 1 KiB.
++ */
++static uint32_t btc_crc32_le_update(uint32_t crc,
++                                     const uint8_t *data,
++                                     size_t len)
++{
++    if ((data == NULL) && (len != 0U)) {
++        return crc;
++    }
++
++    for (size_t i = 0U; i < len; ++i) {
++        crc ^= (uint32_t)data[i];
++        for (uint8_t bit = 0U; bit < 8U; ++bit) {
++            const uint32_t mask = (uint32_t)(0U - (crc & 1U));
++            crc = (crc >> 1U) ^ (0xEDB88320UL & mask);
++        }
++    }
++    return crc;
++}
++
++/**
++ * @brief Calcola il CRC32 PlayStation BT con seed report-type.
++ */
++static uint32_t btc_ps_crc32(uint8_t seed,
++                              const uint8_t *data,
++                              size_t len)
++{
++    uint32_t crc = 0xFFFFFFFFUL;
++    crc = btc_crc32_le_update(crc, &seed, 1U);
++    crc = btc_crc32_le_update(crc, data, len);
++    return ~crc;
++}
++
++/**
++ * @brief Verifica il CRC32 PlayStation BT.
++ */
++static bool btc_ps_crc32_check(uint8_t seed,
++                                const uint8_t *data,
++                                size_t len_without_crc,
++                                uint32_t expected_crc)
++{
++    if (data == NULL) {
++        return false;
++    }
++    return btc_ps_crc32(seed, data, len_without_crc) == expected_crc;
++}
++
++/**
++ * @brief Popola btc_input_state_t dalla sezione comune DualSense completa.
+  *
+- * @pre data non NULL, len >= DS_PAYLOAD_MIN
+- * @post out->valid = true in caso di successo
++ * @param[in]  data  Puntatore alla struct comune da 63 byte.
++ * @param[in]  len   Lunghezza disponibile, deve essere >= 63.
++ * @param[out] out   Stato popolato.
+  */
+-static btc_err_t btc_ds_parse_input(const uint8_t *data,
+-                                     size_t          len,
+-                                     btc_input_state_t *out)
++static btc_err_t btc_ds_parse_common_input(const uint8_t *data,
++                                            size_t len,
++                                            btc_input_state_t *out)
+ {
+     if ((data == NULL) || (out == NULL)) {
+         return BTC_ERR_INVALID_PARAM;
+     }
+-    if (len < DS_PAYLOAD_MIN) {
+-        BTC_LOGW("DualSense: payload troppo corto %zu < %u", len, DS_PAYLOAD_MIN);
++    if (len < DS_INPUT_COMMON_LEN) {
+         return BTC_ERR_DRIVER;
+     }
+ 
+-    /* Reset */
+     (void)memset(out, 0, sizeof(*out));
+ 
+-    /* Assi analogici */
+     out->lx = data[0];
+     out->ly = data[1];
+     out->rx = data[2];
+     out->ry = data[3];
+     out->l2 = data[4];
+     out->r2 = data[5];
+-
+-    /* Numero sequenza */
+     out->seq_num = data[6];
+ 
+-    /* Byte pulsanti 0: [tri|o|x|sq] in bits [7:4], dpad nibble in [3:0] */
+     {
+         const uint8_t b0 = data[7];
+         const uint8_t dpad_val = (uint8_t)(b0 & 0x0FU);
+-
+         out->dpad = (dpad_val <= (uint8_t)BTC_DPAD_NW)
+                     ? (btc_dpad_t)dpad_val
+                     : BTC_DPAD_NONE;
+-
+         out->btn_square   = ((b0 & 0x10U) != 0U);
+         out->btn_cross    = ((b0 & 0x20U) != 0U);
+         out->btn_circle   = ((b0 & 0x40U) != 0U);
+         out->btn_triangle = ((b0 & 0x80U) != 0U);
+     }
+ 
+-    /* Byte pulsanti 1: [R3|L3|options|create|R2d|L2d|R1|L1] */
+     {
+         const uint8_t b1 = data[8];
+         out->btn_l1      = ((b1 & 0x01U) != 0U);
+@@ -813,7 +869,6 @@ static btc_err_t btc_ds_parse_input(const uint8_t *data,
+         out->btn_r3      = ((b1 & 0x80U) != 0U);
+     }
+ 
+-    /* Byte pulsanti 2: [mute|touchpad|PS] in bits [2:0] */
+     {
+         const uint8_t b2 = data[9];
+         out->btn_ps       = ((b2 & 0x01U) != 0U);
+@@ -821,7 +876,6 @@ static btc_err_t btc_ds_parse_input(const uint8_t *data,
+         out->btn_mute     = ((b2 & 0x04U) != 0U);
+     }
+ 
+-    /* IMU: bounds garantiti da DS_PAYLOAD_MIN = 53 >= 26+4 = 30 */
+     out->imu.gyro_pitch = btc_read_le16s(&data[14]);
+     out->imu.gyro_yaw   = btc_read_le16s(&data[16]);
+     out->imu.gyro_roll  = btc_read_le16s(&data[18]);
+@@ -830,143 +884,226 @@ static btc_err_t btc_ds_parse_input(const uint8_t *data,
+     out->imu.accel_z    = btc_read_le16s(&data[24]);
+     out->imu.sensor_ts  = btc_read_le32u(&data[26]);
+ 
+-    /* Touchpad (offset 31..38, dentro DS_PAYLOAD_MIN=53) */
+     out->touch[0] = btc_ds_parse_touch(&data[31]);
+     out->touch[1] = btc_ds_parse_touch(&data[35]);
+ 
+-    /* Batteria */
+     {
+         const uint8_t bat = data[52];
+-        const uint8_t lvl = (uint8_t)((bat & 0x0FU));
+-        /* Il firmware riporta il livello come [0..10] → scale a [0..100] */
+-        out->battery.level_pct = (lvl > 10U) ? 100U : (uint8_t)(lvl * 10U);
+-        out->battery.charging  = ((bat & 0x10U) != 0U);
++        const uint8_t lvl = (uint8_t)(bat & 0x0FU);
++        const uint8_t charging = (uint8_t)((bat >> 4U) & 0x0FU);
++
++        out->battery.level_pct = (lvl >= 10U) ? 100U : (uint8_t)((lvl * 10U) + 5U);
++        out->battery.charging = (charging == 0x01U) || (charging == 0x02U);
+     }
+ 
+     out->valid = true;
+     return BTC_OK;
+ }
+ 
+-/* ---- Costruttore output report DualSense -------------------------------- */
+-
+-/*
+- * Layout output report BT DualSense (report ID 0x31, 47 byte payload):
+- *
+- * Byte  Campo
+- * ----  ----------------------------------------------------------
+- *  0    flags[0]: bit1=rumble, bit2=trigger_r, bit3=trigger_l,
+- *                 bit4=led, bit8=mic_led, bit16=player_led
+- *  1    flags[1]: (stesso bitmask alto)
+- *  2    rumble_right (large motor)
+- *  3    rumble_left  (small motor)
+- *  4-8  headset/audio (ignorato)
+- *  9    mic led (0=off, 1=on, 2=pulse)
+- * 10    audio flags
+- * 11    right trigger effect[0] (mode)
+- * 12    right trigger effect[1] (start)
+- * 13    right trigger effect[2] (end)
+- * 14-20 right trigger params
+- * 21    left trigger effect[0]
+- * 22-28 left trigger params
+- * 29    ???
+- * 30    player_leds bitmask
+- * 31    led_animation
+- * 32    led_brightness
+- * 33    player_led_fade
+- * 34    led_r
+- * 35    led_g
+- * 36    led_b
+- * 37-46 padding
++/**
++ * @brief Parsing report compatto DualSense Bluetooth 0x01.
+  *
+- * NOTA: Questo layout è reverse-engineered da DualSenseX / pydualsense /
+- *       dualsense-windows. Sony non pubblica specifiche ufficiali.
+- *       Dimensione totale report (con ID): 48 byte.
++ * Questo report non contiene IMU/touchpad/batteria; tali campi restano a zero.
++ */
++static btc_err_t btc_ds_parse_simple_input(const uint8_t *data,
++                                            size_t len,
++                                            btc_input_state_t *out)
++{
++    if ((data == NULL) || (out == NULL)) {
++        return BTC_ERR_INVALID_PARAM;
++    }
++    if (len < DS_INPUT_REPORT_SIMPLE_MIN_LEN) {
++        return BTC_ERR_DRIVER;
++    }
++
++    (void)memset(out, 0, sizeof(*out));
++
++    out->lx = data[0];
++    out->ly = data[1];
++    out->rx = data[2];
++    out->ry = data[3];
++    out->l2 = data[4];
++    out->r2 = data[5];
++    out->seq_num = data[6];
++
++    {
++        const uint8_t b0 = data[7];
++        const uint8_t dpad_val = (uint8_t)(b0 & 0x0FU);
++        out->dpad = (dpad_val <= (uint8_t)BTC_DPAD_NW)
++                    ? (btc_dpad_t)dpad_val
++                    : BTC_DPAD_NONE;
++        out->btn_square   = ((b0 & 0x10U) != 0U);
++        out->btn_cross    = ((b0 & 0x20U) != 0U);
++        out->btn_circle   = ((b0 & 0x40U) != 0U);
++        out->btn_triangle = ((b0 & 0x80U) != 0U);
++    }
++
++    {
++        const uint8_t b1 = data[8];
++        out->btn_l1      = ((b1 & 0x01U) != 0U);
++        out->btn_r1      = ((b1 & 0x02U) != 0U);
++        out->btn_l2      = ((b1 & 0x04U) != 0U);
++        out->btn_r2      = ((b1 & 0x08U) != 0U);
++        out->btn_create  = ((b1 & 0x10U) != 0U);
++        out->btn_options = ((b1 & 0x20U) != 0U);
++        out->btn_l3      = ((b1 & 0x40U) != 0U);
++        out->btn_r3      = ((b1 & 0x80U) != 0U);
++    }
++
++    {
++        const uint8_t b2 = data[9];
++        out->btn_ps       = ((b2 & 0x01U) != 0U);
++        out->btn_touchpad = ((b2 & 0x02U) != 0U);
++        out->btn_mute     = ((b2 & 0x04U) != 0U);
++    }
++
++    out->valid = true;
++    return BTC_OK;
++}
++
++/**
++ * @brief Parsing report DualSense con report_id esplicito.
+  */
++static btc_err_t btc_ds_parse_input(uint16_t report_id,
++                                     const uint8_t *data,
++                                     size_t len,
++                                     btc_input_state_t *out)
++{
++    if ((data == NULL) || (out == NULL)) {
++        return BTC_ERR_INVALID_PARAM;
++    }
++    if (len == 0U) {
++        return BTC_ERR_DRIVER;
++    }
+ 
+-#define DS_OUTPUT_REPORT_ID   0x31U
+-#define DS_OUTPUT_PAYLOAD_LEN 47U
+-#define DS_OUTPUT_TOTAL_LEN   (DS_OUTPUT_PAYLOAD_LEN + 1U) /* + report_id */
++    if ((report_id == 0U) &&
++        ((data[0] == DS_INPUT_REPORT_SIMPLE_ID) ||
++         (data[0] == DS_INPUT_REPORT_BT_ID))) {
++        report_id = data[0];
++    }
++
++    if (report_id == DS_INPUT_REPORT_SIMPLE_ID) {
++        const uint8_t *payload = data;
++        size_t payload_len = len;
++
++        if ((payload_len > 0U) && (payload[0] == DS_INPUT_REPORT_SIMPLE_ID)) {
++            payload = &payload[1];
++            payload_len--;
++        }
++        return btc_ds_parse_simple_input(payload, payload_len, out);
++    }
++
++    if (report_id == DS_INPUT_REPORT_BT_ID) {
++        uint8_t frame[DS_INPUT_REPORT_BT_TOTAL_LEN];
++        const uint8_t *full = NULL;
++
++        if ((len >= DS_INPUT_REPORT_BT_TOTAL_LEN) &&
++            (data[0] == DS_INPUT_REPORT_BT_ID)) {
++            full = data;
++        } else if (len >= DS_INPUT_REPORT_BT_PAYLOAD_LEN) {
++            frame[0] = DS_INPUT_REPORT_BT_ID;
++            (void)memcpy(&frame[1], data, DS_INPUT_REPORT_BT_PAYLOAD_LEN);
++            full = frame;
++        } else {
++            BTC_LOGW("DualSense 0x31: len %zu troppo corta", len);
++            return BTC_ERR_DRIVER;
++        }
++
++        {
++            const uint32_t report_crc = btc_read_le32u(&full[DS_INPUT_CRC_OFFSET_BT]);
++            if (!btc_ps_crc32_check((uint8_t)DS_CRC32_INPUT_SEED,
++                                    full,
++                                    DS_INPUT_CRC_OFFSET_BT,
++                                    report_crc)) {
++                BTC_LOGW("DualSense 0x31: CRC input non valido");
++                return BTC_ERR_DRIVER;
++            }
++        }
++
++        return btc_ds_parse_common_input(&full[DS_INPUT_COMMON_OFFSET_BT],
++                                         DS_INPUT_COMMON_LEN,
++                                         out);
++    }
++
++    return BTC_ERR_UNSUPPORTED;
++}
++
++/* ---- Costruttore output report DualSense -------------------------------- */
+ 
+ /**
+- * @brief Costruisce il report di output DualSense in `buf`.
++ * @brief Costruisce il report di output Bluetooth DualSense 0x31.
+  *
+- * @param[in]  cmd  Comando di output. Non può essere NULL.
+- * @param[out] buf  Buffer di almeno DS_OUTPUT_TOTAL_LEN byte.
+- * @param[in]  buf_len  Dimensione buffer (deve essere >= DS_OUTPUT_TOTAL_LEN).
+- * @param[out] written  Numero di byte scritti. Non può essere NULL.
+- *
+- * @return BTC_OK in caso di successo.
+- * @return BTC_ERR_INVALID_PARAM se argomenti NULL o buffer troppo piccolo.
++ * Il report Bluetooth completo è lungo 78 byte inclusi report_id e CRC32.
++ * ESP-IDF riceve report_id separato in esp_hidh_dev_output_set(), ma il CRC
++ * deve essere calcolato sul frame completo che include il report_id.
+  */
+-static btc_err_t btc_ds_build_output(const btc_output_t *cmd,
+-                                      uint8_t            *buf,
+-                                      size_t              buf_len,
+-                                      size_t             *written)
++static btc_err_t btc_ds_build_output(uint8_t seq,
++                                      const btc_output_t *cmd,
++                                      uint8_t *buf,
++                                      size_t buf_len,
++                                      size_t *written)
+ {
+     if ((cmd == NULL) || (buf == NULL) || (written == NULL)) {
+         return BTC_ERR_INVALID_PARAM;
+     }
+-    if (buf_len < DS_OUTPUT_TOTAL_LEN) {
++    if (buf_len < DS_OUTPUT_REPORT_BT_TOTAL_LEN) {
+         return BTC_ERR_INVALID_PARAM;
+     }
+ 
+-    (void)memset(buf, 0, DS_OUTPUT_TOTAL_LEN);
+-    buf[0] = DS_OUTPUT_REPORT_ID;
++    if (cmd->set_left_trigger || cmd->set_right_trigger) {
++        return BTC_ERR_UNSUPPORTED;
++    }
++
++    (void)memset(buf, 0, DS_OUTPUT_REPORT_BT_TOTAL_LEN);
+ 
+-    /* Flags byte 0 */
+-    uint8_t flags0 = 0U;
+-    if (cmd->set_rumble)          { flags0 |= 0x02U; }
+-    if (cmd->set_right_trigger)   { flags0 |= 0x04U; }
+-    if (cmd->set_left_trigger)    { flags0 |= 0x08U; }
+-    if (cmd->set_led)             { flags0 |= 0x04U | 0x08U | 0x10U; }
+-    buf[1] = flags0;
++    buf[0] = DS_OUTPUT_REPORT_BT_ID;
++    buf[DS_OUTPUT_SEQ_TAG_OFFSET] = (uint8_t)((seq & 0x0FU) << 4U);
++    buf[DS_OUTPUT_TAG_OFFSET] = DS_OUTPUT_TAG_VALUE;
+ 
+-    /* Flags byte 1 */
+-    uint8_t flags1 = 0U;
+-    if (cmd->set_mic_led)         { flags1 |= 0x01U; }
+-    if (cmd->set_player_led)      { flags1 |= 0x10U; }
+-    buf[2] = flags1;
++    uint8_t *common = &buf[DS_OUTPUT_COMMON_OFFSET_BT];
+ 
+-    /* Rumble: byte 3 = large (right), byte 4 = small (left) */
+     if (cmd->set_rumble) {
+-        buf[3] = cmd->rumble_large;
+-        buf[4] = cmd->rumble_small;
++        common[0] |= DS_OUTPUT_VALID_FLAG0_HAPTICS_SELECT;
++        common[38] |= DS_OUTPUT_VALID_FLAG2_COMPATIBLE_VIBRATION2;
++        common[2] = cmd->rumble_small; /* motor_right / weak */
++        common[3] = cmd->rumble_large; /* motor_left / strong */
+     }
+ 
+-    /* Mic LED: byte 10 (offset da report_id = 9+1 = 10) */
+-    if (cmd->set_mic_led) {
+-        buf[10] = cmd->mic_led_on ? 0x01U : 0x00U;
++    if (cmd->set_led) {
++        common[1] |= DS_OUTPUT_VALID_FLAG1_LIGHTBAR_CONTROL_ENABLE;
++        common[38] |= DS_OUTPUT_VALID_FLAG2_LIGHTBAR_SETUP_CONTROL_ENABLE;
++        common[41] = DS_OUTPUT_LIGHTBAR_SETUP_LIGHT_OUT;
++        common[42] = 0x02U; /* brightness: medium */
++        common[44] = cmd->led_color.r;
++        common[45] = cmd->led_color.g;
++        common[46] = cmd->led_color.b;
+     }
+ 
+-    /* Trigger destro: byte 12..20 */
+-    if (cmd->set_right_trigger) {
+-        buf[12] = (uint8_t)cmd->right_trigger.effect;
+-        buf[13] = cmd->right_trigger.start_pos;
+-        buf[14] = cmd->right_trigger.end_pos;
+-        buf[15] = cmd->right_trigger.force;
++    if (cmd->set_player_led) {
++        common[1] |= DS_OUTPUT_VALID_FLAG1_PLAYER_INDICATOR_CONTROL_ENABLE;
++        common[43] = (uint8_t)(cmd->player_led_bitmask & 0x1FU);
+     }
+ 
+-    /* Trigger sinistro: byte 22..30 */
+-    if (cmd->set_left_trigger) {
+-        buf[22] = (uint8_t)cmd->left_trigger.effect;
+-        buf[23] = cmd->left_trigger.start_pos;
+-        buf[24] = cmd->left_trigger.end_pos;
+-        buf[25] = cmd->left_trigger.force;
+-    }
++    if (cmd->set_mic_led) {
++        common[1] |= DS_OUTPUT_VALID_FLAG1_MIC_MUTE_LED_CONTROL_ENABLE;
++        common[8] = cmd->mic_led_on ? 0x01U : 0x00U;
+ 
+-    /* Player LEDs: byte 31 */
+-    if (cmd->set_player_led) {
+-        buf[31] = cmd->player_led_bitmask & 0x0FU;
++        common[1] |= DS_OUTPUT_VALID_FLAG1_POWER_SAVE_CONTROL_ENABLE;
++        if (cmd->mic_led_on) {
++            common[9] |= DS_OUTPUT_POWER_SAVE_CONTROL_MIC_MUTE;
++        } else {
++            common[9] &= (uint8_t)~DS_OUTPUT_POWER_SAVE_CONTROL_MIC_MUTE;
++        }
+     }
+ 
+-    /* Lightbar RGB: byte 35..37 */
+-    if (cmd->set_led) {
+-        buf[35] = cmd->led_color.r;
+-        buf[36] = cmd->led_color.g;
+-        buf[37] = cmd->led_color.b;
++    {
++        const uint32_t crc = btc_ps_crc32((uint8_t)DS_CRC32_OUTPUT_SEED,
++                                          buf,
++                                          DS_OUTPUT_CRC_OFFSET_BT);
++        btc_write_le32u(&buf[DS_OUTPUT_CRC_OFFSET_BT], crc);
+     }
+ 
+-    *written = DS_OUTPUT_TOTAL_LEN;
++    *written = DS_OUTPUT_REPORT_BT_TOTAL_LEN;
+     return BTC_OK;
+ }
+ 
+@@ -986,7 +1123,9 @@ typedef struct {
+      *  @param len   Lunghezza payload.
+      *  @param out   Output.
+      */
+-    btc_err_t (*parse_input)(const uint8_t *data, size_t len,
++    btc_err_t (*parse_input)(uint16_t report_id,
++                              const uint8_t *data,
++                              size_t len,
+                               btc_input_state_t *out);
+ 
+     /** Costruzione report di output.
+@@ -995,7 +1134,8 @@ typedef struct {
+      *  @param buf_len  Dimensione buffer.
+      *  @param written  Byte scritti.
+      */
+-    btc_err_t (*build_output)(const btc_output_t *cmd,
++    btc_err_t (*build_output)(uint8_t seq,
++                               const btc_output_t *cmd,
+                                uint8_t *buf, size_t buf_len,
+                                size_t *written);
+ } btc_driver_t;
+@@ -1027,6 +1167,127 @@ static const btc_driver_t *btc_find_driver(btc_controller_type_t type)
+     return NULL;
+ }
+ 
++
++/* ---- Helper NVS / address / discovery ---------------------------------- */
++
++static bool btc_bda_is_nonzero(const uint8_t *bda)
++{
++    if (bda == NULL) {
++        return false;
++    }
++    for (size_t i = 0U; i < sizeof(esp_bd_addr_t); ++i) {
++        if (bda[i] != 0U) {
++            return true;
++        }
++    }
++    return false;
++}
++
++static void btc_nvs_load_last_bda(void)
++{
++    nvs_handle_t h;
++    size_t len = sizeof(esp_bd_addr_t);
++    esp_bd_addr_t tmp;
++
++    if (nvs_open(BTC_NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
++        return;
++    }
++
++    if ((nvs_get_blob(h, BTC_NVS_KEY_LAST_BDA, tmp, &len) == ESP_OK) &&
++        (len == sizeof(esp_bd_addr_t)) &&
++        btc_bda_is_nonzero(tmp)) {
++        if (btc_lock()) {
++            (void)memcpy(s_ctx.last_bda, tmp, sizeof(esp_bd_addr_t));
++            s_ctx.last_bda_valid = true;
++            btc_unlock();
++        }
++    }
++
++    nvs_close(h);
++}
++
++static void btc_nvs_save_last_bda(const uint8_t *bda)
++{
++    nvs_handle_t h;
++
++    if (!btc_bda_is_nonzero(bda)) {
++        return;
++    }
++    if (nvs_open(BTC_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
++        return;
++    }
++
++    if (nvs_set_blob(h, BTC_NVS_KEY_LAST_BDA, bda, sizeof(esp_bd_addr_t)) == ESP_OK) {
++        (void)nvs_commit(h);
++    }
++
++    nvs_close(h);
++}
++
++static bool btc_mem_contains_ascii(const uint8_t *buf,
++                                    size_t len,
++                                    const char *needle)
++{
++    size_t needle_len;
++
++    if ((buf == NULL) || (needle == NULL)) {
++        return false;
++    }
++
++    needle_len = strlen(needle);
++    if ((needle_len == 0U) || (len < needle_len)) {
++        return false;
++    }
++
++    for (size_t i = 0U; i <= (len - needle_len); ++i) {
++        if (memcmp(&buf[i], needle, needle_len) == 0) {
++            return true;
++        }
++    }
++
++    return false;
++}
++
++static bool btc_cod_is_gamepad(uint32_t cod)
++{
++    const uint32_t major = BTC_COD_MAJOR_DEVICE(cod);
++    const uint32_t minor = BTC_COD_MINOR_DEVICE(cod);
++
++    return (major == 0x05U) && ((minor == 0x01U) || (minor == 0x02U));
++}
++
++static btc_err_t btc_open_bda(const uint8_t *bda)
++{
++    esp_bd_addr_t bda_copy;
++    esp_hidh_dev_t *opened;
++
++    if (!btc_bda_is_nonzero(bda)) {
++        return BTC_ERR_INVALID_PARAM;
++    }
++
++    (void)memcpy(bda_copy, bda, sizeof(esp_bd_addr_t));
++    opened = esp_hidh_dev_open(bda_copy, ESP_HID_TRANSPORT_BT, 0U);
++    if (opened == NULL) {
++        return BTC_ERR_DRIVER;
++    }
++
++    if (!btc_lock()) {
++        (void)esp_hidh_dev_close(opened);
++        return BTC_ERR_TIMEOUT;
++    }
++    s_ctx.hid_dev = opened;
++    s_ctx.conn_state = BTC_STATE_CONNECTING;
++    btc_unlock();
++
++    if (s_ctx.cfg.on_connection != NULL) {
++        s_ctx.cfg.on_connection(BTC_STATE_CONNECTING,
++                                BTC_CTRL_UNKNOWN,
++                                s_ctx.cfg.user_data);
++    }
++
++    return BTC_OK;
++}
++
+ /* ---- Ring-buffer helpers ------------------------------------------------- */
+ 
+ /** Ritorna il numero di elementi nel ring-buffer (con mutex già acquisito). */
+@@ -1092,17 +1353,22 @@ static void btc_hidh_event_handler(void            *handler_args,
+     (void)handler_args;
+     (void)base;
+ 
++    if (event_data == NULL) {
++        BTC_LOGW("Evento HID senza payload: %" PRId32, id);
++        return;
++    }
++
+     switch ((esp_hidh_event_t)id) {
+ 
+-    /* ------------------------------------------------------------------ */
+     case ESP_HIDH_OPEN_EVENT: {
+         const esp_hidh_event_data_t *data = (const esp_hidh_event_data_t *)event_data;
+ 
+-        if (data->open.status != ESP_OK) {
++        if ((data->open.status != ESP_OK) || (data->open.dev == NULL)) {
+             BTC_LOGE("OPEN_EVENT errore: %d", data->open.status);
+             if (!btc_lock()) { return; }
+             s_ctx.conn_state = BTC_STATE_IDLE;
+             s_ctx.hid_dev    = NULL;
++            s_ctx.ctrl_type  = BTC_CTRL_UNKNOWN;
+             btc_unlock();
+             if (s_ctx.cfg.on_connection != NULL) {
+                 s_ctx.cfg.on_connection(BTC_STATE_IDLE,
+@@ -1124,14 +1390,23 @@ static void btc_hidh_event_handler(void            *handler_args,
+         }
+ 
+         const btc_controller_type_t type = btc_identify(vid, pid);
++        const uint8_t *bda = esp_hidh_dev_bda_get(data->open.dev);
+ 
+         BTC_LOGI("Controller connesso: VID=0x%04X PID=0x%04X tipo=%d",
+                  (unsigned)vid, (unsigned)pid, (int)type);
+ 
++        if (bda != NULL) {
++            btc_nvs_save_last_bda(bda);
++        }
++
+         if (!btc_lock()) { return; }
+         s_ctx.hid_dev    = data->open.dev;
+         s_ctx.ctrl_type  = type;
+         s_ctx.conn_state = BTC_STATE_CONNECTED;
++        if (bda != NULL) {
++            (void)memcpy(s_ctx.last_bda, bda, sizeof(esp_bd_addr_t));
++            s_ctx.last_bda_valid = true;
++        }
+         btc_unlock();
+ 
+         if (s_ctx.cfg.on_connection != NULL) {
+@@ -1142,18 +1417,21 @@ static void btc_hidh_event_handler(void            *handler_args,
+         break;
+     }
+ 
+-    /* ------------------------------------------------------------------ */
+     case ESP_HIDH_CLOSE_EVENT: {
++        const esp_hidh_event_data_t *data = (const esp_hidh_event_data_t *)event_data;
+         BTC_LOGI("Controller disconnesso");
+ 
+         if (!btc_lock()) { return; }
+         s_ctx.hid_dev    = NULL;
+         s_ctx.ctrl_type  = BTC_CTRL_UNKNOWN;
+         s_ctx.conn_state = BTC_STATE_IDLE;
+-        /* Invalida stato corrente */
+         s_ctx.latest.valid = false;
+         btc_unlock();
+ 
++        if (data->close.dev != NULL) {
++            (void)esp_hidh_dev_free(data->close.dev);
++        }
++
+         if (s_ctx.cfg.on_connection != NULL) {
+             s_ctx.cfg.on_connection(BTC_STATE_IDLE,
+                                     BTC_CTRL_UNKNOWN,
+@@ -1162,12 +1440,12 @@ static void btc_hidh_event_handler(void            *handler_args,
+         break;
+     }
+ 
+-    /* ------------------------------------------------------------------ */
+     case ESP_HIDH_INPUT_EVENT: {
+         const esp_hidh_event_data_t *data = (const esp_hidh_event_data_t *)event_data;
+ 
+         const uint8_t *payload = data->input.data;
+         const size_t   plen    = (size_t)data->input.length;
++        const uint16_t report_id = data->input.report_id;
+ 
+         if ((payload == NULL) || (plen == 0U)) {
+             BTC_LOGW("INPUT_EVENT: payload NULL o vuoto");
+@@ -1179,21 +1457,23 @@ static void btc_hidh_event_handler(void            *handler_args,
+         btc_unlock();
+ 
+         const btc_driver_t *drv = btc_find_driver(type);
+-        if (drv == NULL) {
+-            BTC_LOGD("Nessun driver per tipo %d", (int)type);
++        if ((drv == NULL) || (drv->parse_input == NULL)) {
++            BTC_LOGD("Nessun parser input per tipo %d", (int)type);
+             return;
+         }
+ 
+         btc_input_state_t parsed;
+-        const btc_err_t err = drv->parse_input(payload, plen, &parsed);
++        const btc_err_t err = drv->parse_input(report_id, payload, plen, &parsed);
+ 
+         if (err != BTC_OK) {
+-            BTC_LOGW("Parsing input fallito: %d", (int)err);
++            BTC_LOGW("Parsing input fallito: %d report_id=0x%02X len=%zu",
++                     (int)err,
++                     (unsigned)report_id,
++                     plen);
+             return;
+         }
+ 
+-        /* Aggiorna stato e ring-buffer sotto lock */
+-        btc_input_cb_t  cb   = NULL;
++        btc_input_cb_t  cb    = NULL;
+         void           *udata = NULL;
+ 
+         if (!btc_lock()) { return; }
+@@ -1203,15 +1483,12 @@ static void btc_hidh_event_handler(void            *handler_args,
+         udata = s_ctx.cfg.user_data;
+         btc_unlock();
+ 
+-        /* Callback fuori dal lock per evitare deadlock se l'utente
+-         * chiama btc_get_state() dalla callback. */
+         if (cb != NULL) {
+             cb(&parsed, udata);
+         }
+         break;
+     }
+ 
+-    /* ------------------------------------------------------------------ */
+     case ESP_HIDH_FEATURE_EVENT:
+         BTC_LOGD("FEATURE_EVENT ricevuto");
+         break;
+@@ -1233,44 +1510,63 @@ static void btc_hidh_event_handler(void            *handler_args,
+ static void btc_gap_event_handler(esp_bt_gap_cb_event_t  event,
+                                    esp_bt_gap_cb_param_t *param)
+ {
++    if (param == NULL) {
++        BTC_LOGW("Evento GAP senza parametri: %d", (int)event);
++        return;
++    }
++
+     switch (event) {
+ 
+     case ESP_BT_GAP_DISC_RES_EVT: {
+-        /* Cerca il nome e il CoD tra le property EIR */
+         const uint8_t *bda = param->disc_res.bda;
+-        uint32_t       cod = 0U;
++        uint32_t cod = 0U;
++        bool has_cod = false;
++        bool name_is_dualsense = false;
+ 
+         for (int i = 0; i < param->disc_res.num_prop; ++i) {
+             const esp_bt_gap_dev_prop_t *prop = &param->disc_res.prop[i];
+ 
+             if ((prop->type == ESP_BT_GAP_DEV_PROP_COD) &&
+-                (prop->len  >= sizeof(uint32_t))) {
++                (prop->val != NULL) &&
++                (prop->len >= (int)sizeof(uint32_t))) {
+                 (void)memcpy(&cod, prop->val, sizeof(uint32_t));
++                has_cod = true;
+             }
+-        }
+-
+-        /* Gamepad: Major=Peripheral (0x05), Minor=Gamepad (0x02)
+-         * CoD = (0x05 << 8) | (0x02 << 2) | 0x0200 = 0x002508 */
+-        const uint32_t GAMEPAD_COD = 0x002508UL;
+ 
+-        if ((cod & 0x001FFFUL) == GAMEPAD_COD) {
+-            BTC_LOGI("Gamepad trovato: " ESP_BD_ADDR_STR, ESP_BD_ADDR_HEX(bda));
+-            esp_bt_gap_cancel_discovery();
++            if ((prop->type == ESP_BT_GAP_DEV_PROP_EIR) &&
++                (prop->val != NULL) &&
++                (prop->len > 0)) {
++                const size_t eir_len = (size_t)prop->len;
++                if (btc_mem_contains_ascii((const uint8_t *)prop->val,
++                                           eir_len,
++                                           "DualSense")) {
++                    name_is_dualsense = true;
++                }
++            }
++        }
+ 
+-            /* Tenta connessione HID */
+-            esp_hid_transport_t addr_type = ESP_HID_TRANSPORT_BT;
+-            esp_bd_addr_t bda_copy;
+-            memcpy(bda_copy, bda, sizeof(esp_bd_addr_t));
+-            esp_hidh_dev_open(bda_copy, addr_type, 0);
++        if (((has_cod && btc_cod_is_gamepad(cod)) || name_is_dualsense) &&
++            btc_bda_is_nonzero(bda)) {
++            BTC_LOGI("Controller candidato trovato: " ESP_BD_ADDR_STR,
++                     ESP_BD_ADDR_HEX(bda));
+ 
+-            if (!btc_lock()) { return; }
+-            s_ctx.conn_state = BTC_STATE_CONNECTING;
+-            btc_unlock();
++            const esp_err_t cancel_err = esp_bt_gap_cancel_discovery();
++            if (cancel_err != ESP_OK) {
++                BTC_LOGW("cancel_discovery: %d", cancel_err);
++            }
+ 
+-            if (s_ctx.cfg.on_connection != NULL) {
+-                s_ctx.cfg.on_connection(BTC_STATE_CONNECTING,
+-                                        BTC_CTRL_UNKNOWN,
+-                                        s_ctx.cfg.user_data);
++            const btc_err_t open_err = btc_open_bda(bda);
++            if (open_err != BTC_OK) {
++                BTC_LOGE("Connessione HID fallita: %d", (int)open_err);
++                if (btc_lock()) {
++                    s_ctx.conn_state = BTC_STATE_IDLE;
++                    btc_unlock();
++                }
++                if (s_ctx.cfg.on_connection != NULL) {
++                    s_ctx.cfg.on_connection(BTC_STATE_IDLE,
++                                            BTC_CTRL_UNKNOWN,
++                                            s_ctx.cfg.user_data);
++                }
+             }
+         }
+         break;
+@@ -1284,7 +1580,6 @@ static void btc_gap_event_handler(esp_bt_gap_cb_event_t  event,
+             const btc_state_t st = s_ctx.conn_state;
+             btc_unlock();
+ 
+-            /* Se non stiamo connettendo → ritorna IDLE */
+             if (st == BTC_STATE_SCANNING) {
+                 if (!btc_lock()) { return; }
+                 s_ctx.conn_state = BTC_STATE_IDLE;
+@@ -1321,7 +1616,7 @@ static void btc_gap_event_handler(esp_bt_gap_cb_event_t  event,
+  */
+ const char *btc_version_string(void)
+ {
+-    return "1.0.0";
++    return "1.0.1";
+ }
+ 
+ /**
+@@ -1357,8 +1652,10 @@ btc_err_t btc_lib_init(const btc_config_t *cfg)
+     esp_err_t ret = nvs_flash_init();
+     if ((ret == ESP_ERR_NVS_NO_FREE_PAGES) ||
+         (ret == ESP_ERR_NVS_NEW_VERSION_FOUND)) {
+-        ESP_ERROR_CHECK(nvs_flash_erase());
+-        ret = nvs_flash_init();
++        ret = nvs_flash_erase();
++        if (ret == ESP_OK) {
++            ret = nvs_flash_init();
++        }
+     }
+     if (ret != ESP_OK) {
+         BTC_LOGE("NVS init fallita: %d", ret);
+@@ -1418,11 +1715,19 @@ btc_err_t btc_lib_init(const btc_config_t *cfg)
+ 
+     /* Modalità pairing: no pin (SSP), consenti connessioni in ingresso */
+     esp_bt_sp_param_t sp_param = ESP_BT_SP_IOCAP_MODE;
+-    uint8_t iocap = ESP_BT_IO_CAP_NONE; /* No I/O: accetta qualsiasi pin */
+-    esp_bt_gap_set_security_param(sp_param, &iocap, sizeof(iocap));
++    uint8_t iocap = ESP_BT_IO_CAP_NONE; /* No I/O: accetta pairing SSP */
++    ret = esp_bt_gap_set_security_param(sp_param, &iocap, sizeof(iocap));
++    if (ret != ESP_OK) {
++        BTC_LOGE("Security param fallito: %d", ret);
++        goto fail_bluedroid;
++    }
+ 
+-    /* Imposta il device come discoverable e connettabile durante scansione */
+-    esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
++    /* Imposta il device non discoverable finché non viene richiesta la scansione. */
++    ret = esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
++    if (ret != ESP_OK) {
++        BTC_LOGE("Scan mode init fallito: %d", ret);
++        goto fail_bluedroid;
++    }
+ 
+     /* Inizializza HID Host */
+     const esp_hidh_config_t hidh_cfg = {
+@@ -1440,6 +1745,8 @@ btc_err_t btc_lib_init(const btc_config_t *cfg)
+     s_ctx.conn_state  = BTC_STATE_IDLE;
+     s_ctx.ctrl_type   = BTC_CTRL_UNKNOWN;
+ 
++    btc_nvs_load_last_bda();
++
+     BTC_LOGI("bt_controller v%s inizializzato", btc_version_string());
+     return BTC_OK;
+ 
+@@ -1489,6 +1796,11 @@ btc_err_t btc_scan_start(void)
+         return BTC_ERR_TIMEOUT;
+     }
+     const btc_state_t st = s_ctx.conn_state;
++    const bool can_reconnect = s_ctx.cfg.auto_reconnect && s_ctx.last_bda_valid;
++    esp_bd_addr_t reconnect_bda;
++    if (can_reconnect) {
++        (void)memcpy(reconnect_bda, s_ctx.last_bda, sizeof(esp_bd_addr_t));
++    }
+     btc_unlock();
+ 
+     if ((st == BTC_STATE_SCANNING) ||
+@@ -1497,25 +1809,46 @@ btc_err_t btc_scan_start(void)
+         return BTC_ERR_BUSY;
+     }
+ 
+-    /* Rendi il dispositivo scannabile */
+-    esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
++    if (can_reconnect) {
++        BTC_LOGI("Tentativo auto-reconnect a ultimo controller");
++        const btc_err_t open_err = btc_open_bda(reconnect_bda);
++        if (open_err == BTC_OK) {
++            return BTC_OK;
++        }
++        BTC_LOGW("Auto-reconnect fallito, avvio scansione: %d", (int)open_err);
++    }
++
++    if (!btc_lock()) {
++        return BTC_ERR_TIMEOUT;
++    }
++    s_ctx.conn_state = BTC_STATE_SCANNING;
++    btc_unlock();
++
++    esp_err_t err = esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE,
++                                             ESP_BT_GENERAL_DISCOVERABLE);
++    if (err != ESP_OK) {
++        BTC_LOGE("set_scan_mode fallita: %d", err);
++        if (btc_lock()) {
++            s_ctx.conn_state = BTC_STATE_IDLE;
++            btc_unlock();
++        }
++        return BTC_ERR_DRIVER;
++    }
+ 
+-    const esp_err_t err = esp_bt_gap_start_discovery(
++    err = esp_bt_gap_start_discovery(
+         ESP_BT_INQ_MODE_GENERAL_INQUIRY,
+-        (int)(s_ctx.cfg.scan_timeout_ms / 1280U + 1U), /* unità: 1.28 s */
++        (uint8_t)((s_ctx.cfg.scan_timeout_ms / 1280U) + 1U),
+         0);
+ 
+     if (err != ESP_OK) {
+         BTC_LOGE("start_discovery fallita: %d", err);
++        if (btc_lock()) {
++            s_ctx.conn_state = BTC_STATE_IDLE;
++            btc_unlock();
++        }
+         return BTC_ERR_DRIVER;
+     }
+ 
+-    if (!btc_lock()) {
+-        return BTC_ERR_TIMEOUT;
+-    }
+-    s_ctx.conn_state = BTC_STATE_SCANNING;
+-    btc_unlock();
+-
+     if (s_ctx.cfg.on_connection != NULL) {
+         s_ctx.cfg.on_connection(BTC_STATE_SCANNING,
+                                 BTC_CTRL_UNKNOWN,
+@@ -1575,7 +1908,18 @@ btc_err_t btc_disconnect(void)
+     s_ctx.conn_state = BTC_STATE_DISCONNECTING;
+     btc_unlock();
+ 
+-    esp_hidh_dev_close(dev);
++    const esp_err_t err = esp_hidh_dev_close(dev);
++    if (err != ESP_OK) {
++        if (btc_lock()) {
++            if (s_ctx.hid_dev == dev) {
++                s_ctx.conn_state = BTC_STATE_CONNECTED;
++            }
++            btc_unlock();
++        }
++        BTC_LOGE("esp_hidh_dev_close fallita: %d", err);
++        return BTC_ERR_DRIVER;
++    }
++
+     return BTC_OK;
+ }
+ 
+@@ -1624,9 +1968,7 @@ btc_err_t btc_pop_input(btc_input_state_t *out)
+     const bool ok = btc_ring_pop_nolock(out);
+     btc_unlock();
+ 
+-    /* Riusiamo BTC_ERR_BUFFER_FULL come "buffer vuoto" per evitare un
+-     * nuovo codice di errore; il nome è fuorviante ma documentato. */
+-    return ok ? BTC_OK : BTC_ERR_BUFFER_FULL;
++    return ok ? BTC_OK : BTC_ERR_NO_DATA;
+ }
+ 
+ /**
+@@ -1645,40 +1987,58 @@ btc_err_t btc_set_output(const btc_output_t *output)
+         return BTC_ERR_TIMEOUT;
+     }
+ 
+-    if (s_ctx.conn_state != BTC_STATE_CONNECTED) {
++    if ((s_ctx.conn_state != BTC_STATE_CONNECTED) || (s_ctx.hid_dev == NULL)) {
+         btc_unlock();
+         return BTC_ERR_NOT_CONNECTED;
+     }
+ 
+-    esp_hidh_dev_t         *dev  = s_ctx.hid_dev;
+-    btc_controller_type_t   type = s_ctx.ctrl_type;
+-    btc_unlock();
+-
++    esp_hidh_dev_t *dev = s_ctx.hid_dev;
++    const btc_controller_type_t type = s_ctx.ctrl_type;
+     const btc_driver_t *drv = btc_find_driver(type);
+-    if (drv == NULL) {
++
++    if ((drv == NULL) || (drv->build_output == NULL)) {
++        btc_unlock();
+         return BTC_ERR_UNSUPPORTED;
+     }
+-    if (drv->build_output == NULL) {
+-        return BTC_ERR_UNSUPPORTED;
++
++    uint8_t buf[DS_OUTPUT_REPORT_BT_TOTAL_LEN];
++    size_t written = 0U;
++    const uint8_t seq = s_ctx.output_seq;
++
++    const btc_err_t build_err = drv->build_output(seq,
++                                                  output,
++                                                  buf,
++                                                  sizeof(buf),
++                                                  &written);
++    if (build_err != BTC_OK) {
++        btc_unlock();
++        return build_err;
+     }
+ 
+-    /* Buffer statico: dimensione uguale al report DualSense (il più grande) */
+-    uint8_t buf[DS_OUTPUT_TOTAL_LEN];
+-    size_t  written = 0U;
++    if (written < 2U) {
++        btc_unlock();
++        return BTC_ERR_DRIVER;
++    }
+ 
+-    const btc_err_t err = drv->build_output(output, buf, sizeof(buf), &written);
+-    if (err != BTC_OK) {
+-        return err;
++    if (!esp_hidh_dev_exists(dev)) {
++        s_ctx.hid_dev = NULL;
++        s_ctx.conn_state = BTC_STATE_IDLE;
++        btc_unlock();
++        return BTC_ERR_NOT_CONNECTED;
+     }
+ 
+-    /* Invia come OUTPUT report HID
+-     * report_id = buf[0], payload = buf+1, len = written-1 */
+     const esp_err_t esp_err = esp_hidh_dev_output_set(
+         dev,
+-        0U,          /* map_index (0 = prima mappa HID) */
+-        buf[0],      /* report_id */
+-        buf + 1U,    /* payload */
+-        (int)(written - 1U));
++        0U,
++        buf[0],
++        &buf[1],
++        written - 1U);
++
++    if (esp_err == ESP_OK) {
++        s_ctx.output_seq = (uint8_t)((s_ctx.output_seq + 1U) & 0x0FU);
++    }
++
++    btc_unlock();
+ 
+     if (esp_err != ESP_OK) {
+         BTC_LOGE("output_set fallita: %d", esp_err);

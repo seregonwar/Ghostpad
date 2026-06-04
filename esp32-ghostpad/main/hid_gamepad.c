@@ -1,18 +1,19 @@
 #include "hid_gamepad.h"
 #include "web_server.h"
 #include "esp_log.h"
+#include <string.h>
+
+#if CONFIG_IDF_TARGET_ESP32P4
 #include "tinyusb.h"
 #include "tinyusb_default_config.h"
 #include "class/hid/hid_device.h"
-#include <string.h>
-
-/*
- * =====================================================================================
- *                                   LIBRARIES & HEADERS
- * =====================================================================================
- */
+#endif
 
 static const char *TAG = "ghostpad_hid";
+
+char g_connected_console[32] = "None";
+
+#if CONFIG_IDF_TARGET_ESP32P4
 
 /*
  * =====================================================================================
@@ -86,14 +87,6 @@ static const char *desc_str[] = {
     "Ghostpad Bridge",
 };
 
-char g_connected_console[32] = "None";
-
-/*
- * =====================================================================================
- *                             TINYUSB DRIVER EVENT CALLBACK
- * =====================================================================================
- */
-
 static void usb_device_event_cb(tinyusb_event_t *event, void *arg) {
     (void)arg;
     if (event->id == TINYUSB_EVENT_ATTACHED) {
@@ -102,12 +95,6 @@ static void usb_device_event_cb(tinyusb_event_t *event, void *arg) {
         strcpy(g_connected_console, "None");
     }
 }
-
-/*
- * =====================================================================================
- *                              TINYUSB HID CLASS CALLBACKS
- * =====================================================================================
- */
 
 uint8_t const *tud_hid_descriptor_report_cb(uint8_t itf) {
     (void)itf;
@@ -135,31 +122,6 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id,
     }
 }
 
-/*
- * =====================================================================================
- *                               PUBLIC API IMPLEMENTATION
- * =====================================================================================
- */
-
-esp_err_t hid_gamepad_init(void) {
-    tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
-    tusb_cfg.descriptor.device = &hid_desc_device;
-    tusb_cfg.descriptor.qualifier = &hid_desc_qualifier;
-    tusb_cfg.descriptor.string = desc_str;
-    tusb_cfg.descriptor.string_count = sizeof(desc_str) / sizeof(desc_str[0]);
-    tusb_cfg.descriptor.full_speed_config = config_desc;
-    tusb_cfg.descriptor.high_speed_config = config_desc;
-    tusb_cfg.event_cb = usb_device_event_cb;
-
-    esp_err_t ret = tinyusb_driver_install(&tusb_cfg);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "tinyusb_driver_install failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    ESP_LOGI(TAG, "TinyUSB initialized as DualSense");
-    return ESP_OK;
-}
-
 static uint32_t map_buttons_gpad_to_ps5(uint32_t gpad_buttons) {
     uint32_t ps5 = 0;
     if (gpad_buttons & 0x00000001) ps5 |= 0x00004000;
@@ -183,7 +145,39 @@ static uint32_t map_buttons_gpad_to_ps5(uint32_t gpad_buttons) {
     return ps5;
 }
 
+#endif /* CONFIG_IDF_TARGET_ESP32P4 */
+
+/*
+ * =====================================================================================
+ *                               PUBLIC API IMPLEMENTATION
+ * =====================================================================================
+ */
+
+esp_err_t hid_gamepad_init(void) {
+#if CONFIG_IDF_TARGET_ESP32P4
+    tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
+    tusb_cfg.descriptor.device = &hid_desc_device;
+    tusb_cfg.descriptor.qualifier = &hid_desc_qualifier;
+    tusb_cfg.descriptor.string = desc_str;
+    tusb_cfg.descriptor.string_count = sizeof(desc_str) / sizeof(desc_str[0]);
+    tusb_cfg.descriptor.full_speed_config = config_desc;
+    tusb_cfg.descriptor.high_speed_config = config_desc;
+    tusb_cfg.event_cb = usb_device_event_cb;
+
+    esp_err_t ret = tinyusb_driver_install(&tusb_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "tinyusb_driver_install failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    ESP_LOGI(TAG, "TinyUSB initialized as DualSense");
+#else
+    ESP_LOGI(TAG, "USB HID not available on this target (WiFi-only mode)");
+#endif
+    return ESP_OK;
+}
+
 void hid_gamepad_send_report(void) {
+#if CONFIG_IDF_TARGET_ESP32P4
     if (!tud_hid_ready()) return;
 
     dualsense_report_t report;
@@ -203,4 +197,5 @@ void hid_gamepad_send_report(void) {
     report.r2 = (uint16_t)g_gamepad.r2 << 8;
 
     tud_hid_report(0, &report, sizeof(report));
+#endif
 }

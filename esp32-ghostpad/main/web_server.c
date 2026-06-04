@@ -6,7 +6,7 @@
 #include "esp_netif.h"
 #include "cJSON.h"
 #include "hid_gamepad.h"
-#include "ble_hid_host.h"
+#include "bt_bridge.h"
 #include "wifi_ap.h"
 #include <string.h>
 #include <stdlib.h>
@@ -652,33 +652,16 @@ static const httpd_uri_t ws_uri = {
 static esp_err_t ble_scan_handler(httpd_req_t *req) {
     cJSON *root = cJSON_CreateObject();
 
-    /* Check if NimBLE host is synced */
-    if (!ble_hid_host_is_synced()) {
-        cJSON_AddBoolToObject(root, "synced", false);
-        cJSON_AddStringToObject(root, "error", "BLE host not synced yet, retry in a few seconds");
-        cJSON_AddBoolToObject(root, "connected", false);
-        cJSON_AddStringToObject(root, "device_name", ble_hid_host_device_name());
-        cJSON_AddStringToObject(root, "device_addr", ble_hid_host_device_addr());
-
-        const char *json = cJSON_Print(root);
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, json);
-        free((void *)json);
-        cJSON_Delete(root);
-        return ESP_OK;
-    }
-
-    /* Kick off a new scan */
-    esp_err_t scan_err = ble_hid_host_start_scan();
-
-    cJSON_AddBoolToObject(root, "synced", true);
+    /* Kick off a new BT Classic scan */
+    esp_err_t scan_err = bt_bridge_start_scan();
 
     if (scan_err != ESP_OK) {
+        cJSON_AddBoolToObject(root, "synced", true);
         cJSON_AddBoolToObject(root, "scan_ok", false);
-        cJSON_AddStringToObject(root, "error", "Failed to start BLE scan");
-        cJSON_AddBoolToObject(root, "connected", ble_hid_host_is_connected());
-        cJSON_AddStringToObject(root, "device_name", ble_hid_host_device_name());
-        cJSON_AddStringToObject(root, "device_addr", ble_hid_host_device_addr());
+        cJSON_AddStringToObject(root, "error", "Failed to start BT scan");
+        cJSON_AddBoolToObject(root, "connected", bt_bridge_is_connected());
+        cJSON_AddStringToObject(root, "device_name", bt_bridge_device_name());
+        cJSON_AddStringToObject(root, "device_addr", "bt:classic");
 
         const char *json = cJSON_Print(root);
         httpd_resp_set_type(req, "application/json");
@@ -688,18 +671,17 @@ static esp_err_t ble_scan_handler(httpd_req_t *req) {
         return ESP_OK;
     }
 
-    /* Pairing controllers may advertise sparsely; wait long enough to catch
-     * the active scan response/name before returning results to the dashboard. */
-    vTaskDelay(pdMS_TO_TICKS(6500));
-    ble_hid_host_stop_scan();
+    /* Wait for the BT Classic scan to find and connect to the gamepad */
+    vTaskDelay(pdMS_TO_TICKS(8000));
 
-    char *results_json = ble_hid_host_get_scan_results_json();
+    char *results_json = bt_bridge_get_scan_results_json();
 
+    cJSON_AddBoolToObject(root, "synced", true);
     cJSON_AddBoolToObject(root, "scan_ok", true);
     cJSON_AddRawToObject(root, "devices", results_json ? results_json : "[]");
-    cJSON_AddBoolToObject(root, "connected", ble_hid_host_is_connected());
-    cJSON_AddStringToObject(root, "device_name", ble_hid_host_device_name());
-    cJSON_AddStringToObject(root, "device_addr", ble_hid_host_device_addr());
+    cJSON_AddBoolToObject(root, "connected", bt_bridge_is_connected());
+    cJSON_AddStringToObject(root, "device_name", bt_bridge_device_name());
+    cJSON_AddStringToObject(root, "device_addr", "bt:classic");
 
     const char *json = cJSON_Print(root);
     httpd_resp_set_type(req, "application/json");
@@ -712,10 +694,10 @@ static esp_err_t ble_scan_handler(httpd_req_t *req) {
 
 static esp_err_t ble_status_handler(httpd_req_t *req) {
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root, "connected",   ble_hid_host_is_connected());
-    cJSON_AddStringToObject(root, "device_name", ble_hid_host_device_name());
-    cJSON_AddStringToObject(root, "device_addr", ble_hid_host_device_addr());
-    char *debug_json = ble_hid_host_get_debug_json();
+    cJSON_AddBoolToObject(root, "connected",   bt_bridge_is_connected());
+    cJSON_AddStringToObject(root, "device_name", bt_bridge_device_name());
+    cJSON_AddStringToObject(root, "device_addr", "bt:classic");
+    char *debug_json = bt_bridge_get_debug_json();
     if (debug_json) {
         cJSON_AddRawToObject(root, "debug", debug_json);
         free(debug_json);
@@ -730,40 +712,10 @@ static esp_err_t ble_status_handler(httpd_req_t *req) {
 }
 
 static esp_err_t ble_connect_handler(httpd_req_t *req) {
-    size_t len = req->content_len;
-    if (len == 0 || len > 256) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad body");
-        return ESP_OK;
-    }
-
-    char *buf = calloc(1, len + 1);
-    if (!buf) { httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"); return ESP_OK; }
-
-    if (httpd_req_recv(req, buf, len) <= 0) {
-        free(buf);
-        return ESP_OK;
-    }
-    buf[len] = '\0';
-
-    cJSON *json = cJSON_Parse(buf);
-    free(buf);
-    if (!json) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
-        return ESP_OK;
-    }
-
-    cJSON *addr_item = cJSON_GetObjectItem(json, "addr");
-    if (!cJSON_IsString(addr_item)) {
-        cJSON_Delete(json);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing addr");
-        return ESP_OK;
-    }
-
-    esp_err_t ret = ble_hid_host_connect(addr_item->valuestring);
-    cJSON_Delete(json);
-
+    /* BT Classic auto-connects on scan; explicit connect just triggers a scan */
+    bt_bridge_start_scan();
     cJSON *resp = cJSON_CreateObject();
-    cJSON_AddBoolToObject(resp, "ok", ret == ESP_OK);
+    cJSON_AddBoolToObject(resp, "ok", true);
     const char *resp_str = cJSON_Print(resp);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, resp_str);
@@ -773,7 +725,7 @@ static esp_err_t ble_connect_handler(httpd_req_t *req) {
 }
 
 static esp_err_t ble_disconnect_handler(httpd_req_t *req) {
-    ble_hid_host_disconnect();
+    bt_bridge_disconnect();
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
