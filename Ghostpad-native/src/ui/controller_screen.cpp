@@ -194,6 +194,9 @@ void renderControllerScreen(App& app) {
                 ImGui::TextColored(p.muted, "Scale:");
                 ImGui::SliderFloat("##scale", &comp_layout->scale, 0.4f, 2.5f, "%.2fx");
                 
+                ImGui::TextColored(p.muted, "Button Color:");
+                ImGui::ColorEdit4("##comp_color", comp_layout->color.data(), ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+                
                 ImGui::Spacing();
                 ImGui::Spacing();
                 
@@ -201,6 +204,7 @@ void renderControllerScreen(App& app) {
                     comp_layout->x_offset = 0.0f;
                     comp_layout->y_offset = 0.0f;
                     comp_layout->scale = 1.0f;
+                    comp_layout->color = {0.725f, 0.549f, 1.0f, 1.0f};
                     app.addStatus("Component reset to default");
                 }
             }

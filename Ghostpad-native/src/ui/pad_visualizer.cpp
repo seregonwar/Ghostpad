@@ -351,8 +351,9 @@ void renderInteractivePadVisualizer(App& app, PadStateInput& state, float size) 
     //                           SHOULDER BUTTONS & TRIGGERS
     // ─────────────────────────────────────────────────────────────────────────────
 
-    auto drawShoulderInteractive = [&](ImVec2 sp, ImVec2 sz, int id, const char* txt, float scale_val) {
-        ImU32 col = state.button_states[id] ? ui::u32(palette.primary2) : ui::u32(ui::rgba(25, 22, 33, 160));
+    auto drawShoulderInteractive = [&](ImVec2 sp, ImVec2 sz, int id, const char* txt, const ComponentLayout& comp) {
+        ImVec4 custom_col(comp.color[0], comp.color[1], comp.color[2], comp.color[3]);
+        ImU32 col = state.button_states[id] ? ui::u32(custom_col) : ui::u32(ui::rgba(25, 22, 33, 160));
         dl->AddRectFilled(sp, ImVec2(sp.x + sz.x, sp.y + sz.y), col, 4.0f);
         dl->AddRect(sp, ImVec2(sp.x + sz.x, sp.y + sz.y), ui::u32(palette.border), 4.0f, 0, 1.0f);
         ImVec2 ts = ImGui::CalcTextSize(txt);
@@ -388,18 +389,21 @@ void renderInteractivePadVisualizer(App& app, PadStateInput& state, float size) 
                   cy - size * 0.525f + layout.shoulders_r.y_offset * size);
 
     // Bumpers L1/R1
-    drawShoulderInteractive(l1_top, sh_sz, 4, "L1", layout.shoulders_l.scale);
-    drawShoulderInteractive(r1_top, sh_sz_r, 5, "R1", layout.shoulders_r.scale);
+    drawShoulderInteractive(l1_top, sh_sz, 4, "L1", layout.shoulders_l);
+    drawShoulderInteractive(r1_top, sh_sz_r, 5, "R1", layout.shoulders_r);
 
     // Triggers L2/R2
     float l2_val = state.trigger_l2 / 255.0f;
     float r2_val = state.trigger_r2 / 255.0f;
 
+    ImVec4 l_trig_col(layout.shoulders_l.color[0], layout.shoulders_l.color[1], layout.shoulders_l.color[2], layout.shoulders_l.color[3]);
+    ImVec4 r_trig_col(layout.shoulders_r.color[0], layout.shoulders_r.color[1], layout.shoulders_r.color[2], layout.shoulders_r.color[3]);
+
     // L2
     dl->AddRectFilled(l2_top, l2_top + trig_sz, ui::u32(ui::rgba(25, 22, 33, 160)), 6.0f);
     dl->AddRectFilled(ImVec2(l2_top.x, l2_top.y + trig_sz.y * (1.0f - l2_val)),
                       l2_top + trig_sz,
-                      ui::u32(palette.primary2), 6.0f);
+                      ui::u32(l_trig_col), 6.0f);
     dl->AddRect(l2_top, l2_top + trig_sz, ui::u32(palette.border), 6.0f, 0, 1.0f);
     ImVec2 l2_ts = ImGui::CalcTextSize("L2");
     dl->AddText(ImVec2(l2_top.x + (trig_sz.x - l2_ts.x) * 0.5f, l2_top.y + (trig_sz.y - l2_ts.y) * 0.5f), ui::u32(palette.text), "L2");
@@ -408,7 +412,7 @@ void renderInteractivePadVisualizer(App& app, PadStateInput& state, float size) 
     dl->AddRectFilled(r2_top, r2_top + trig_sz_r, ui::u32(ui::rgba(25, 22, 33, 160)), 6.0f);
     dl->AddRectFilled(ImVec2(r2_top.x, r2_top.y + trig_sz_r.y * (1.0f - r2_val)),
                       r2_top + trig_sz_r,
-                      ui::u32(palette.primary2), 6.0f);
+                      ui::u32(r_trig_col), 6.0f);
     dl->AddRect(r2_top, r2_top + trig_sz_r, ui::u32(palette.border), 6.0f, 0, 1.0f);
     ImVec2 r2_ts = ImGui::CalcTextSize("R2");
     dl->AddText(ImVec2(r2_top.x + (trig_sz_r.x - r2_ts.x) * 0.5f, r2_top.y + (trig_sz_r.y - r2_ts.y) * 0.5f), ui::u32(palette.text), "R2");
@@ -440,10 +444,11 @@ void renderInteractivePadVisualizer(App& app, PadStateInput& state, float size) 
 
     // ── Sticks L3/R3 ────────────────────────────────────────
 
-    auto drawInteractiveStick = [&](ImVec2 sc, float scale_val, int idx_x, int idx_y, const char* label) {
-        float r = l.stick_radius * scale_val;
+    auto drawInteractiveStick = [&](ImVec2 sc, const ComponentLayout& comp, int idx_x, int idx_y, const char* label) {
+        float r = l.stick_radius * comp.scale;
+        ImVec4 custom_col(comp.color[0], comp.color[1], comp.color[2], comp.color[3]);
         // Subtle guide ring
-        dl->AddCircle(sc, r + 2, ui::u32(ui::withAlpha(palette.primary2, 0.25f)), 32, 1.0f);
+        dl->AddCircle(sc, r + 2, ui::u32(ui::withAlpha(custom_col, 0.25f)), 32, 1.0f);
 
         // Stick position indicator
         uint8_t xv = state.stick_states[idx_x];
@@ -477,8 +482,8 @@ void renderInteractivePadVisualizer(App& app, PadStateInput& state, float size) 
         }
     };
 
-    drawInteractiveStick(l.l_stick_c, layout.l_stick.scale, 0, 1, "L");
-    drawInteractiveStick(l.r_stick_c, layout.r_stick.scale, 2, 3, "R");
+    drawInteractiveStick(l.l_stick_c, layout.l_stick, 0, 1, "L");
+    drawInteractiveStick(l.r_stick_c, layout.r_stick, 2, 3, "R");
 
     // ── D-pad ───────────────────────────────────────────────
     
@@ -486,10 +491,11 @@ void renderInteractivePadVisualizer(App& app, PadStateInput& state, float size) 
     float arrow_w = size * 0.038f * layout.dpad.scale;
     float arrow_h = size * 0.026f * layout.dpad.scale;
 
+    ImVec4 dpad_col(layout.dpad.color[0], layout.dpad.color[1], layout.dpad.color[2], layout.dpad.color[3]);
     auto drawDpadArrow = [&](ImVec2 a, ImVec2 b, ImVec2 c, int btn_id) {
         bool pressed = state.button_states[btn_id];
         if (pressed) {
-            dl->AddTriangleFilled(a, b, c, ui::u32(palette.primary2));
+            dl->AddTriangleFilled(a, b, c, ui::u32(dpad_col));
         } else {
             dl->AddTriangle(a, b, c, ui::u32(ui::rgba(255, 255, 255, 30)), 1.0f);
         }
@@ -561,6 +567,9 @@ void renderInteractivePadVisualizer(App& app, PadStateInput& state, float size) 
         {{-fb_dist_val, 0}, 2, IM_COL32(200, 120, 180, 220),"S"},
     };
 
+    ImVec4 fb_custom_col(layout.face_buttons.color[0], layout.face_buttons.color[1], layout.face_buttons.color[2], layout.face_buttons.color[3]);
+    bool fb_is_custom = (layout.face_buttons.color != std::array<float, 4>{0.725f, 0.549f, 1.0f, 1.0f});
+
     for (auto& fb : face_btns) {
         ImVec2 fc(l.fb_center.x + fb.off.x, l.fb_center.y + fb.off.y);
         
@@ -578,14 +587,15 @@ void renderInteractivePadVisualizer(App& app, PadStateInput& state, float size) 
         }
         
         if (pressed) {
-            dl->AddCircleFilled(fc, fb_radius_val, fb.col, 16);
+            ImU32 press_col = fb_is_custom ? ui::u32(fb_custom_col) : fb.col;
+            dl->AddCircleFilled(fc, fb_radius_val, press_col, 16);
             dl->AddCircle(fc, fb_radius_val + 1, IM_COL32(255, 255, 255, 255), 16, 2.0f);
             auto ts = ImGui::CalcTextSize(fb.txt);
             dl->AddText(ImVec2(fc.x - ts.x * 0.5f, fc.y - ts.y * 0.5f), IM_COL32(255, 255, 255, 255), fb.txt);
         } else if (hovered) {
             ImU32 hover_col = ui::u32(ui::withAlpha(ui::rgba(255, 255, 255), 0.25f));
             dl->AddCircleFilled(fc, fb_radius_val, hover_col, 16);
-            dl->AddCircle(fc, fb_radius_val + 1, ui::u32(palette.primary2), 16, 1.0f);
+            dl->AddCircle(fc, fb_radius_val + 1, ui::u32(fb_custom_col), 16, 1.0f);
         } else {
             dl->AddCircle(fc, fb_radius_val, ui::u32(ui::rgba(255, 255, 255, 30)), 16, 1.0f);
         }
@@ -593,9 +603,10 @@ void renderInteractivePadVisualizer(App& app, PadStateInput& state, float size) 
 
     // ── Create, PS, Options ─────────────────────────────────
 
+    ImVec4 cb_custom_col(layout.center_buttons.color[0], layout.center_buttons.color[1], layout.center_buttons.color[2], layout.center_buttons.color[3]);
     auto drawCenterInteractive = [&](float bx, float by, int id, const char* lbl) {
         bool pressed = state.button_states[id];
-        ImU32 col = pressed ? ui::u32(palette.primary2) : ui::u32(ui::rgba(255, 255, 255, 20));
+        ImU32 col = pressed ? ui::u32(cb_custom_col) : ui::u32(ui::rgba(255, 255, 255, 20));
         float button_r = size * 0.02f * layout.center_buttons.scale;
         dl->AddCircleFilled(ImVec2(bx, by), button_r, col, 8);
         dl->AddCircle(ImVec2(bx, by), button_r + 1, ui::u32(palette.border), 8, 1.0f);
@@ -642,7 +653,8 @@ void renderInteractivePadVisualizer(App& app, PadStateInput& state, float size) 
     ImVec2 tp_min(tp_cx - tp_w * 0.5f, tp_cy - tp_h * 0.5f);
     ImVec2 tp_max(tp_cx + tp_w * 0.5f, tp_cy + tp_h * 0.5f);
 
-    ImU32 touch_col = state.button_states[17] ? ui::u32(ui::withAlpha(palette.primary2, 0.4f)) : ui::u32(ui::rgba(25, 22, 33, 120));
+    ImVec4 tp_custom_col(layout.touchpad.color[0], layout.touchpad.color[1], layout.touchpad.color[2], layout.touchpad.color[3]);
+    ImU32 touch_col = state.button_states[17] ? ui::u32(ui::withAlpha(tp_custom_col, 0.4f)) : ui::u32(ui::rgba(25, 22, 33, 120));
     dl->AddRectFilled(tp_min, tp_max, touch_col, 8.0f);
     dl->AddRect(tp_min, tp_max, ui::u32(palette.border), 8.0f, 0, 1.0f);
     ImVec2 tp_ts = ImGui::CalcTextSize("Touchpad");
@@ -656,10 +668,14 @@ void renderInteractivePadVisualizer(App& app, PadStateInput& state, float size) 
 
     // ── L3/R3 Indicators ────────────────────────────────────
 
-    if (state.button_states[10])
-        dl->AddText(ImVec2(l.l_stick_c.x - 8, l.l_stick_c.y - (l.stick_radius * layout.l_stick.scale) - 16), ui::u32(palette.success), "L3");
-    if (state.button_states[11])
-        dl->AddText(ImVec2(l.r_stick_c.x - 8, l.r_stick_c.y - (l.stick_radius * layout.r_stick.scale) - 16), ui::u32(palette.success), "R3");
+    if (state.button_states[10]) {
+        ImVec4 l_col(layout.l_stick.color[0], layout.l_stick.color[1], layout.l_stick.color[2], layout.l_stick.color[3]);
+        dl->AddText(ImVec2(l.l_stick_c.x - 8, l.l_stick_c.y - (l.stick_radius * layout.l_stick.scale) - 16), ui::u32(l_col), "L3");
+    }
+    if (state.button_states[11]) {
+        ImVec4 r_col(layout.r_stick.color[0], layout.r_stick.color[1], layout.r_stick.color[2], layout.r_stick.color[3]);
+        dl->AddText(ImVec2(l.r_stick_c.x - 8, l.r_stick_c.y - (l.stick_radius * layout.r_stick.scale) - 16), ui::u32(r_col), "R3");
+    }
 
     // ─────────────────────────────────────────────────────────────────────────────
     //                         EDIT MODE OVERLAYS & CONTROLS

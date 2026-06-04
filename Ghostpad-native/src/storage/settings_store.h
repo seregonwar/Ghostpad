@@ -12,6 +12,7 @@
 // Licensed under the GNU General Public License v3.0. See LICENSE file for details.
 
 #include <string>
+#include <array>
 #include <nlohmann/json.hpp>
 
 namespace ghostpad {
@@ -25,16 +26,27 @@ struct ComponentLayout {
     float x_offset = 0.0f;
     float y_offset = 0.0f;
     float scale = 1.0f;
+    std::array<float, 4> color = {0.725f, 0.549f, 1.0f, 1.0f};
 };
 
 inline void to_json(nlohmann::json& j, const ComponentLayout& c) {
-    j = nlohmann::json{{"x_offset", c.x_offset}, {"y_offset", c.y_offset}, {"scale", c.scale}};
+    j = nlohmann::json{
+        {"x_offset", c.x_offset},
+        {"y_offset", c.y_offset},
+        {"scale", c.scale},
+        {"color", c.color}
+    };
 }
 
 inline void from_json(const nlohmann::json& j, ComponentLayout& c) {
     c.x_offset = j.value("x_offset", 0.0f);
     c.y_offset = j.value("y_offset", 0.0f);
     c.scale = j.value("scale", 1.0f);
+    if (j.contains("color")) {
+        c.color = j.at("color").get<std::array<float, 4>>();
+    } else {
+        c.color = {0.725f, 0.549f, 1.0f, 1.0f};
+    }
 }
 
 struct PadLayoutSettings {
