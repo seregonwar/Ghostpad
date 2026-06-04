@@ -124,6 +124,8 @@ static bool s_discovering = false;
 /* True once NimBLE host is synced with the controller */
 static bool s_synced = false;
 static bool s_scanning = false;
+static bool s_auto_connect = false;
+static char  s_auto_connect_addr[18] = "";
 static int  s_last_scan_rc = 0;
 static int  s_last_gap_event = 0;
 static int  s_last_disc_count = 0;
@@ -377,10 +379,21 @@ static int on_disc_chars(uint16_t conn_handle,
     return 0;
 }
 
+static int on_disc_service_fallback(uint16_t conn_handle,
+                                     const struct ble_gatt_error *error,
+                                     const struct ble_gatt_svc *svc, void *arg);
+
 static int on_disc_service(uint16_t conn_handle,
                            const struct ble_gatt_error *error,
                            const struct ble_gatt_svc *svc, void *arg) {
     if (error->status == BLE_HS_EDONE) {
+        /* If we didn't find the HID service via disc_svc_by_uuid,
+         * try discovering all primary services as fallback. */
+        if (s_hid_service_end == 0) {
+            ESP_LOGI(TAG, "HID service not found via UUID, trying all services...");
+            ble_gattc_disc_all_svcs(conn_handle, on_disc_service_fallback, NULL);
+            return 0;
+        }
         ESP_LOGI(TAG, "Service discovery complete");
         return 0;
     }
@@ -389,34 +402,41 @@ static int on_disc_service(uint16_t conn_handle,
         return 0;
     }
 
-    /* Log EVERY service found, regardless of UUID type */
-    const char *uuid_type = "?";
-    char uuid_str[40] = "";
-    switch (svc->uuid.u.type) {
-    case BLE_UUID_TYPE_16:
-        uuid_type = "16";
-        snprintf(uuid_str, sizeof(uuid_str), "0x%04x", svc->uuid.u16.value);
-        break;
-    case BLE_UUID_TYPE_32:
-        uuid_type = "32";
-        snprintf(uuid_str, sizeof(uuid_str), "0x%08lx", (unsigned long)svc->uuid.u32.value);
-        break;
-    case BLE_UUID_TYPE_128:
-        uuid_type = "128";
-        snprintf(uuid_str, sizeof(uuid_str), "%02x%02x%02x%02x-...",
-                 svc->uuid.u128.value[12], svc->uuid.u128.value[13],
-                 svc->uuid.u128.value[14], svc->uuid.u128.value[15]);
-        break;
+    ESP_LOGI(TAG, "  Svc: uuid=0x%04x handles=[0x%04x-0x%04x]",
+             svc->uuid.u16.value, svc->start_handle, svc->end_handle);
+
+    s_hid_service_end = svc->end_handle;
+    ESP_LOGI(TAG, "Found HID Service (0x1812), discovering characteristics...");
+    s_discovering = true;
+    s_report_handle = 0;
+    ble_gattc_disc_all_chrs(conn_handle,
+                            svc->start_handle, svc->end_handle,
+                            on_disc_chars, NULL);
+    return 0;
+}
+
+/* Fallback service discovery: look for HID among all primary services,
+ * and also check for included services. */
+static int on_disc_service_fallback(uint16_t conn_handle,
+                                     const struct ble_gatt_error *error,
+                                     const struct ble_gatt_svc *svc, void *arg) {
+    if (error->status == BLE_HS_EDONE) {
+        if (s_hid_service_end == 0) {
+            ESP_LOGW(TAG, "HID service (0x1812) not found in any service");
+        }
+        return 0;
     }
-    ESP_LOGI(TAG, "  Svc: uuid_type=%s uuid=%s handles=[0x%04x-0x%04x]",
-             uuid_type, uuid_str,
-             svc->start_handle, svc->end_handle);
+    if (error->status != 0) return 0;
+
+    ESP_LOGI(TAG, "  SvcFallback: uuid=0x%04x handles=[0x%04x-0x%04x]",
+             svc->uuid.u16.value, svc->start_handle, svc->end_handle);
 
     if (svc->uuid.u.type == BLE_UUID_TYPE_16 &&
         svc->uuid.u16.value == BLE_UUID_HID_SERVICE) {
         s_hid_service_end = svc->end_handle;
-        ESP_LOGI(TAG, "Found HID Service (0x1812), discovering characteristics...");
+        ESP_LOGI(TAG, "Found HID Service via fallback, discovering characteristics...");
         s_discovering = true;
+        s_report_handle = 0;
         ble_gattc_disc_all_chrs(conn_handle,
                                 svc->start_handle, svc->end_handle,
                                 on_disc_chars, NULL);
@@ -613,7 +633,8 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
                                 &score, model, sizeof(model));
 
         /* Boost Sony devices identified via manufacturer data even if name
-         * and HID UUID are not present in the advertisement. */
+         * and HID UUID are not present in the advertisement. DualSense often
+         * omits these from ADV_IND, providing them only after connection. */
         if (is_sony_mfg) {
             is_sony = true;
             is_candidate = true;
@@ -621,9 +642,11 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
             strlcpy(model, "DualSense/DualShock", sizeof(model));
         }
 
-        /* Store every device — don't filter at advertisement level because
-         * DualSense often omits name/HID/appearance from ADV_IND, providing
-         * them only in SCAN_RSP or not at all. MAX_SCAN_RESULTS bounds the list. */
+        /* Store every device — but flag only true gamepads as candidates.
+         * Require BOTH Sony manufacturer data AND either HID service or known
+         * gamepad name to avoid false positives from other Sony BLE devices. */
+        bool store_candidate = is_sony &&
+            (is_hid || is_gamepad || is_known_name || is_sony_mfg);
 
         xSemaphoreTake(s_results_mutex, portMAX_DELAY);
         bool found = false;
@@ -681,6 +704,13 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
             ESP_LOGI(TAG, "Discovered: %s (%s) \"%s\" RSSI=%d app=0x%04x hid=%d sony=%d score=%d",
                      addr_str, addr_type_name(r->addr.type), r->name, r->rssi,
                      r->appearance, r->hid_service, r->sony_name, r->score);
+
+            /* Remember first Sony candidate for deferred auto-connect */
+            if (s_auto_connect && !s_connected && r->sony_name && r->rssi > -70 &&
+                s_auto_connect_addr[0] == '\0') {
+                strlcpy(s_auto_connect_addr, addr_str, sizeof(s_auto_connect_addr));
+                ESP_LOGI(TAG, "Marked %s for auto-connect (RSSI=%d)", addr_str, r->rssi);
+            }
         }
         s_last_disc_count = s_result_count;
         xSemaphoreGive(s_results_mutex);
@@ -692,6 +722,12 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
         s_scanning = false;
         s_last_gap_event = event->type;
         ESP_LOGI(TAG, "BLE scan complete (%d devices found)", s_result_count);
+        /* Deferred auto-connect: connect to the saved address now that scan is done */
+        if (s_auto_connect_addr[0] != '\0' && !s_connected) {
+            ESP_LOGI(TAG, "Auto-connecting to %s...", s_auto_connect_addr);
+            ble_hid_host_connect(s_auto_connect_addr);
+            s_auto_connect_addr[0] = '\0';
+        }
         break;
 
     /* ---- Connected ---- */
@@ -699,10 +735,21 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
         if (event->connect.status == 0) {
             s_conn_handle = event->connect.conn_handle;
             s_connected   = true;
+            s_auto_connect = false;
+            ble_gap_disc_cancel();
             ESP_LOGI(TAG, "Connected! handle=%d  Discovering HID service...",
                      s_conn_handle);
             s_report_handle = 0;
-            ble_gattc_disc_all_svcs(s_conn_handle, on_disc_service, NULL);
+            s_hid_service_end = 0;
+            /* Discover HID service: try by UUID first, then fall back to
+             * discovering all services and searching for included services. */
+            ESP_LOGI(TAG, "Connected! handle=%d  Discovering HID service...",
+                     s_conn_handle);
+            {
+                ble_uuid16_t hid_uuid = BLE_UUID16_INIT(BLE_UUID_HID_SERVICE);
+                ble_gattc_disc_svc_by_uuid(s_conn_handle, &hid_uuid.u,
+                                           on_disc_service, NULL);
+            }
         } else {
             ESP_LOGE(TAG, "Connect failed: status=%d", event->connect.status);
             s_connected = false;
@@ -848,6 +895,7 @@ esp_err_t ble_hid_host_start_scan(void) {
         return ESP_FAIL;
     }
     s_scanning = true;
+    s_auto_connect = true;
     ESP_LOGI(TAG, "BLE scan started (%d ms), own_addr_type=%s",
              SCAN_DURATION_MS, addr_type_name(own_addr_type));
     return ESP_OK;
@@ -856,6 +904,7 @@ esp_err_t ble_hid_host_start_scan(void) {
 void ble_hid_host_stop_scan(void) {
     ble_gap_disc_cancel();
     s_scanning = false;
+    s_auto_connect = false;
 }
 
 void ble_hid_host_clear_results(void) {

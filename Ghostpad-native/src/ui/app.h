@@ -23,6 +23,7 @@
 #include "input/keyboard_input.h"
 #include "input/gamepad_input.h"
 #include "input/macro_engine.h"
+#include "ui/gif_export.h"
 
 namespace ghostpad {
 
@@ -106,6 +107,11 @@ public:
     // Active controller state query
     PadStateInput getCurrentPadState();
 
+    // GIF export
+    void startGifExport(const std::string& output_path, float vis_size, int fps);
+    void cancelGifExport();
+    bool isGifExportActive() const { return gif_export_active_; }
+
     // Status messages
     void addStatus(const std::string& msg, bool error = false);
     void drawStatusBar();
@@ -134,6 +140,18 @@ private:
     // Input flush timer
     double input_flush_timer_ = 0.0;
     std::chrono::steady_clock::time_point last_pad_send_;
+
+    // GIF export state
+    bool gif_export_active_ = false;
+    bool gif_frame_ready_ = false;
+    GifExporter gif_exporter_;
+    std::string gif_output_path_;
+    float gif_vis_size_ = 200.0f;
+    int gif_fps_ = 30;
+    int gif_capture_width_ = 0;
+    int gif_capture_height_ = 0;
+    int gif_frame_idx_ = 0;
+    double gif_frame_timer_ = 0.0;
 };
 
 } // namespace ghostpad

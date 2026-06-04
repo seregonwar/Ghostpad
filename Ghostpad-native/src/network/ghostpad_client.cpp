@@ -55,6 +55,15 @@ static void setNonBlocking(int sock, bool nb) {
 #endif
 }
 
+static void setNoSigPipe(int sock) {
+#ifdef __APPLE__
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
+#elif !defined(_WIN32)
+    (void)sock;
+#endif
+}
+
 static void closeSocket(int sock) {
     if (sock < 0) return;
 #ifdef _WIN32
@@ -81,6 +90,7 @@ bool GhostpadClient::connect(const std::string& ip, int port, int timeout_ms) {
     socket_t temp_sock = ::socket(AF_INET, SOCK_STREAM, 0);
     if (temp_sock < 0) return false;
 
+    setNoSigPipe(static_cast<int>(temp_sock));
     setNonBlocking(static_cast<int>(temp_sock), true);
 
     struct sockaddr_in addr = {};
@@ -171,7 +181,12 @@ bool GhostpadClient::sendPadState(const GpadNetworkState& state) {
 
     auto packet = buildGpadPacket(state);
     int sent = ::send(static_cast<int>(sock_), (const char*)packet.data(), packet.size(), 0);
-    return sent == static_cast<int>(packet.size());
+    if (sent == static_cast<int>(packet.size())) return true;
+
+    closeSocket(static_cast<int>(sock_));
+    sock_ = -1;
+    connected_ = false;
+    return false;
 }
 
 GhostpadStatus GhostpadClient::getStatus() const {
@@ -191,6 +206,8 @@ CtrlResult GhostpadClient::sendCtrlPacket(const std::string& ip, const uint8_t* 
         result.error = "Socket creation failed";
         return result;
     }
+
+    setNoSigPipe(sock);
 
     struct timeval tv;
     tv.tv_sec = timeout_ms / 1000;

@@ -1,3 +1,4 @@
+#if !CONFIG_BLUEPAD32_PLATFORM_CUSTOM
 #define BT_CONTROLLER_IMPL
 #include "bt_controller.h"
 #include "bt_bridge.h"
@@ -105,6 +106,11 @@ esp_err_t bt_bridge_start_scan(void) {
         ESP_LOGW(TAG, "Already connected, skipping scan");
         return ESP_ERR_INVALID_STATE;
     }
+
+    /* The dashboard Scan button must perform a fresh Classic inquiry.
+     * A stale auto-reconnect BDA can otherwise prevent discovery entirely. */
+    btc_forget_last_device();
+
     btc_err_t ret = btc_scan_start();
     if (ret != BTC_OK) {
         ESP_LOGE(TAG, "btc_scan_start failed: %d", ret);
@@ -147,3 +153,5 @@ char *bt_bridge_get_debug_json(void) {
     cJSON_Delete(root);
     return json;
 }
+
+#endif /* !CONFIG_BLUEPAD32_PLATFORM_CUSTOM */

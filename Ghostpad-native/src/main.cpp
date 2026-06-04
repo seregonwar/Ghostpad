@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <libgen.h>
 #include <string>
+#include <signal.h>
 #include <GLFW/glfw3.h>
 
 #ifdef __APPLE__
@@ -29,6 +30,8 @@ static std::string getDefaultDataDir() {
 int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
+
+    signal(SIGPIPE, SIG_IGN);
 
     std::string data_dir = getDefaultDataDir();
     fprintf(stderr, "Ghostpad Native - Data directory: %s\n", data_dir.c_str());

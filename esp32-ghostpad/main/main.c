@@ -1,7 +1,13 @@
 #include "wifi_ap.h"
 #include "web_server.h"
 #include "hid_gamepad.h"
-#include "bt_bridge.h"
+#if CONFIG_BLUEPAD32_PLATFORM_CUSTOM
+#include <uni.h>
+#include <btstack_port_esp32.h>
+struct uni_platform *get_my_platform(void);
+#else
+#include "ble_hid_host.h"
+#endif
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
@@ -45,7 +51,9 @@ void app_main(void) {
     ESP_ERROR_CHECK(wifi_ap_init());
     ESP_ERROR_CHECK(web_server_start());
     ESP_ERROR_CHECK(hid_gamepad_init());
-    ESP_ERROR_CHECK(bt_bridge_init());
+#if !CONFIG_BLUEPAD32_PLATFORM_CUSTOM
+    ESP_ERROR_CHECK(ble_hid_host_init());
+#endif
 
     xTaskCreate(hid_sender_task, "hid_sender", 2048, NULL, 3, NULL);
 
@@ -60,6 +68,14 @@ void app_main(void) {
     ESP_LOGI(TAG, "Web GUI: http://%s", ip);
 #if CONFIG_GHOSTPAD_ENABLE_MDNS
     ESP_LOGI(TAG, "Web GUI mDNS: http://%s.local/", CONFIG_GHOSTPAD_WIFI_HOSTNAME);
+#endif
+
+#if CONFIG_BLUEPAD32_PLATFORM_CUSTOM
+    ESP_LOGI(TAG, "Starting Bluepad32 Custom Platform...");
+    btstack_init();
+    uni_platform_set_custom(get_my_platform());
+    uni_init(0, NULL);
+    btstack_run_loop_execute();
 #endif
 }
 

@@ -967,7 +967,7 @@ static void *klog_bridge_thread(void *arg) {
 
     opt = 1;
     setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+    /* setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)); */
 
     memset(&sin, 0, sizeof(sin));
     sin.sin_family = AF_INET;
@@ -1532,11 +1532,10 @@ int main(void) {
     }
 
     /* Allow port reuse so we can restart the payload without waiting.
-     * SO_REUSEPORT is needed on FreeBSD when the previous payload's socket
-     * is still in TIME_WAIT or a prior instance is partially alive. */
+     * SO_REUSEPORT is disabled to prevent multiple active socket conflicts. */
     int optval = 1;
     setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR,  &optval, sizeof(optval));
-    setsockopt(serverFd, SOL_SOCKET, SO_REUSEPORT,  &optval, sizeof(optval));
+    /* setsockopt(serverFd, SOL_SOCKET, SO_REUSEPORT,  &optval, sizeof(optval)); */
     setsockopt(serverFd, SOL_SOCKET, SO_NOSIGPIPE,  &optval, sizeof(optval));
 
     struct sockaddr_in addr;
@@ -1579,7 +1578,7 @@ int main(void) {
         if (ctrlFd >= 0) {
             int ov = 1;
             setsockopt(ctrlFd, SOL_SOCKET, SO_REUSEADDR, &ov, sizeof(ov));
-            setsockopt(ctrlFd, SOL_SOCKET, SO_REUSEPORT, &ov, sizeof(ov));
+            /* setsockopt(ctrlFd, SOL_SOCKET, SO_REUSEPORT, &ov, sizeof(ov)); */
             setsockopt(ctrlFd, SOL_SOCKET, SO_NOSIGPIPE, &ov, sizeof(ov));
             struct sockaddr_in ca;
             memset(&ca, 0, sizeof(ca));
@@ -2014,8 +2013,10 @@ int main(void) {
 
                 if (padHandle >= 0) {
                     ret = scePadVirtualDeviceInsertData(padHandle, &padData);
-                    if (ret < 0 && pktCount == 0) {
-                        gp_log("[Ghostpad] VDI InsertData failed: 0x%08x\n", ret);
+                    /* ── Log VDI errors on first packet AND periodically ── */
+                    if (ret < 0 && (pktCount == 0 || pktCount % 1000 == 0)) {
+                        gp_log("[Ghostpad] VDI InsertData failed: 0x%08x pkt=%llu handle=0x%x\n",
+                               ret, (unsigned long long)pktCount, padHandle);
                     }
                 } else if (shellui_args != 0) {
                     ret = directPadActive
@@ -2023,9 +2024,9 @@ int main(void) {
                                                   &padData, sizeof(padData))
                         : shellui_pad_update(shellui_pid, shellui_args,
                                              &padData, sizeof(padData));
-                    if (ret < 0 && pktCount == 0) {
-                        gp_log("[Ghostpad] shellui pad send failed pkt=0 ret=%d direct=%d\n",
-                               ret, directPadActive);
+                    if (ret < 0 && (pktCount == 0 || pktCount % 1000 == 0)) {
+                        gp_log("[Ghostpad] shellui pad send failed pkt=%llu ret=%d direct=%d\n",
+                               (unsigned long long)pktCount, ret, directPadActive);
                     }
                     if (pktCount == 4) {
                         int32_t r5 = (int32_t)mdbg_getint(shellui_pid,
@@ -2046,10 +2047,10 @@ int main(void) {
             }
 
             pktCount++;
-            /* Log throughput every 1000 packets */
+            /* Log throughput every 1000 packets + last VDI return code */
             if (pktCount % 1000 == 0) {
-                gp_log("[Ghostpad] speedup: %llu packets processed\n",
-                       (unsigned long long)pktCount);
+                gp_log("[Ghostpad] speedup: %llu packets processed (last_vdi_ret=0x%08x)\n",
+                       (unsigned long long)pktCount, ret);
             }
         }
 

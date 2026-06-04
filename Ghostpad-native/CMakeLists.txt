@@ -48,8 +48,6 @@ if(NOT EXISTS "${CMAKE_CURRENT_BINARY_DIR}/stb_image.h")
        "${CMAKE_CURRENT_BINARY_DIR}/stb_image.h" SHOW_PROGRESS)
 endif()
 
-
-
 set(IMGUI_SOURCES
   ${imgui_SOURCE_DIR}/imgui.cpp
   ${imgui_SOURCE_DIR}/imgui_demo.cpp
@@ -96,6 +94,7 @@ set(SOURCES
   src/input/keyboard_input.cpp
   src/input/gamepad_input.cpp
   src/input/macro_engine.cpp
+  src/ui/gif_export.cpp
   ${IMGUI_SOURCES}
 )
 

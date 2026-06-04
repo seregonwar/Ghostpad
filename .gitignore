@@ -19,3 +19,9 @@ Ghostpad-app/react/src/.DS_Store
 /deprecated/Ghostpad-app/node_modules
 /deprecated/Ghostpad-app/react/build
 /deprecated/Ghostpad-app/react/node_modules
+*.orig
+/esp32-ghostpad/patch
+/esp32-ghostpad/components/btstack/3rd-party/lc3-google/conformance
+/esp32-ghostpad/components
+*.old
+*.txt

@@ -5,6 +5,7 @@
 
 #include "ui/app.h"
 #include "ui/native_theme.h"
+#include "ui/gif_export.h"
 #include "imgui.h"
 #include <cstdio>
 #include <memory>
@@ -747,6 +748,22 @@ void renderProjectDetailScreen(App& app) {
                 ImGui::OpenPopup("PythonExportPopup");
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Export to Python");
+            ImGui::SameLine();
+            
+            if (ui::softButton(ICON_FA_FILE_VIDEO, ImVec2(32, 26))) {
+                if (!app.isGifExportActive()) {
+                    char savePath[512] = {};
+                    std::string defName = proj.name + "_" + cmd.name + ".gif";
+                    snprintf(savePath, sizeof(savePath), "%s", defName.c_str());
+                    browseSavePath(savePath, sizeof(savePath), "Export Macro as GIF", savePath);
+                    if (savePath[0]) {
+                        app.macro_engine.startPlayback(cmd.signals);
+                        app.startGifExport(std::string(savePath), 180.0f, 30);
+                        app.addStatus("Exporting GIF: " + cmd.name);
+                    }
+                }
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Export as GIF");
             ImGui::SameLine();
             
             if (ui::dangerButton(ICON_FA_TRASH, ImVec2(32, 26))) {

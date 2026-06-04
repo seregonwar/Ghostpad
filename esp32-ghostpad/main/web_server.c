@@ -10,9 +10,11 @@
 #include "wifi_ap.h"
 #include <string.h>
 #include <stdlib.h>
+#include "esp_timer.h"
 #include "esp_wifi_ap_get_sta_list.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -62,6 +64,22 @@ static uint32_t s_gpad_tx_errors = 0;
 static uint32_t s_ws_rx_count = 0;
 static int s_last_console_errno = 0;
 
+static httpd_handle_t s_ws_hd = NULL;
+static int s_ws_fd = -1;
+
+static volatile gamepad_state_t s_virtual_gamepad = {
+    .buttons = 0,
+    .lx = 128, .ly = 128,
+    .rx = 128, .ry = 128,
+    .l2 = 0, .r2 = 0
+};
+static volatile gamepad_state_t s_physical_gamepad = {
+    .buttons = 0,
+    .lx = 128, .ly = 128,
+    .rx = 128, .ry = 128,
+    .l2 = 0, .r2 = 0
+};
+
 /* Payload storage (uploaded via web UI) */
 static uint8_t *s_payload_data = NULL;
 static size_t  s_payload_size   = 0;
@@ -102,6 +120,8 @@ static int connect_to_console(const char *ip, int port, int timeout_ms) {
         getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
         if (so_error == 0) {
             fcntl(sock, F_SETFL, flags);
+            int flag = 1;
+            setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
             return sock;
         }
     }
@@ -218,6 +238,28 @@ static void scan_subnet_background(void *arg) {
 
 static uint32_t uptime_sec = 0;
 
+static void update_merged_gamepad_state(void) {
+    g_gamepad.buttons = s_virtual_gamepad.buttons | s_physical_gamepad.buttons;
+    
+    if (s_virtual_gamepad.lx != 128) g_gamepad.lx = s_virtual_gamepad.lx;
+    else g_gamepad.lx = s_physical_gamepad.lx;
+
+    if (s_virtual_gamepad.ly != 128) g_gamepad.ly = s_virtual_gamepad.ly;
+    else g_gamepad.ly = s_physical_gamepad.ly;
+
+    if (s_virtual_gamepad.rx != 128) g_gamepad.rx = s_virtual_gamepad.rx;
+    else g_gamepad.rx = s_physical_gamepad.rx;
+
+    if (s_virtual_gamepad.ry != 128) g_gamepad.ry = s_virtual_gamepad.ry;
+    else g_gamepad.ry = s_physical_gamepad.ry;
+
+    if (s_virtual_gamepad.l2 != 0) g_gamepad.l2 = s_virtual_gamepad.l2;
+    else g_gamepad.l2 = s_physical_gamepad.l2;
+
+    if (s_virtual_gamepad.r2 != 0) g_gamepad.r2 = s_virtual_gamepad.r2;
+    else g_gamepad.r2 = s_physical_gamepad.r2;
+}
+
 static void reset_gamepad(void) {
     g_gamepad.buttons = 0;
     g_gamepad.lx = 128;
@@ -226,6 +268,22 @@ static void reset_gamepad(void) {
     g_gamepad.ry = 128;
     g_gamepad.l2 = 0;
     g_gamepad.r2 = 0;
+
+    s_virtual_gamepad.buttons = 0;
+    s_virtual_gamepad.lx = 128;
+    s_virtual_gamepad.ly = 128;
+    s_virtual_gamepad.rx = 128;
+    s_virtual_gamepad.ry = 128;
+    s_virtual_gamepad.l2 = 0;
+    s_virtual_gamepad.r2 = 0;
+
+    s_physical_gamepad.buttons = 0;
+    s_physical_gamepad.lx = 128;
+    s_physical_gamepad.ly = 128;
+    s_physical_gamepad.rx = 128;
+    s_physical_gamepad.ry = 128;
+    s_physical_gamepad.l2 = 0;
+    s_physical_gamepad.r2 = 0;
 }
 
 static int check_port_open(const char *ip, int port, int timeout_ms) {
@@ -523,16 +581,117 @@ static const httpd_uri_t controller_pulse_uri = {
     .user_ctx  = NULL,
 };
 
+struct ws_gpad_work_msg {
+    httpd_handle_t hd;
+    int fd;
+    size_t len;
+    uint8_t data[];
+};
+
+static void ws_gpad_work_cb(void *arg) {
+    struct ws_gpad_work_msg *m = (struct ws_gpad_work_msg *)arg;
+    httpd_ws_frame_t frame = {
+        .type = HTTPD_WS_TYPE_TEXT,
+        .payload = m->data,
+        .len = m->len
+    };
+    httpd_ws_send_frame_async(m->hd, m->fd, &frame);
+    free(m);
+}
+
+void web_server_push_gamepad_state(const gamepad_state_t *gp) {
+    if (s_ws_hd != NULL && s_ws_fd >= 0) {
+        cJSON *root = cJSON_CreateObject();
+        if (root) {
+            cJSON_AddStringToObject(root, "event", "gamepad_state");
+            cJSON_AddNumberToObject(root, "buttons", gp->buttons);
+            cJSON_AddNumberToObject(root, "lx", gp->lx);
+            cJSON_AddNumberToObject(root, "ly", gp->ly);
+            cJSON_AddNumberToObject(root, "rx", gp->rx);
+            cJSON_AddNumberToObject(root, "ry", gp->ry);
+            cJSON_AddNumberToObject(root, "l2", gp->l2);
+            cJSON_AddNumberToObject(root, "r2", gp->r2);
+            cJSON_AddBoolToObject(root, "bt_connected", bt_bridge_is_connected());
+            cJSON_AddStringToObject(root, "bt_name", bt_bridge_device_name());
+            char *str = cJSON_PrintUnformatted(root);
+            cJSON_Delete(root);
+
+            if (str) {
+                size_t len = strlen(str);
+                struct ws_gpad_work_msg *m = malloc(sizeof(struct ws_gpad_work_msg) + len + 1);
+                if (m) {
+                    m->hd = s_ws_hd;
+                    m->fd = s_ws_fd;
+                    m->len = len;
+                    memcpy(m->data, str, len + 1);
+                    if (httpd_queue_work(s_ws_hd, ws_gpad_work_cb, m) != ESP_OK) {
+                        free(m);
+                    }
+                }
+                free(str);
+            }
+        }
+    }
+}
+
+static int64_t s_last_push_time = 0;
+
+void web_server_handle_physical_gamepad(const gamepad_state_t *gp) {
+    s_physical_gamepad = *gp;
+    update_merged_gamepad_state();
+
+    if (console_tcp_socket >= 0) {
+        GhostpadPacket pkt;
+        memcpy(pkt.magic, "GPAD", 4);
+        pkt.buttons = htonl(g_gamepad.buttons);
+        pkt.lx = g_gamepad.lx;
+        pkt.ly = g_gamepad.ly;
+        pkt.rx = g_gamepad.rx;
+        pkt.ry = g_gamepad.ry;
+        pkt.l2 = g_gamepad.l2;
+        pkt.r2 = g_gamepad.r2;
+        pkt._pad[0] = 0;
+        pkt._pad[1] = 0;
+
+        if (send_all(console_tcp_socket, &pkt, sizeof(pkt)) != 0) {
+            s_last_console_errno = errno;
+            s_gpad_tx_errors++;
+            ESP_LOGE(TAG, "Failed to send GPAD packet to wireless console, errno=%d, closing socket", errno);
+            close_console_socket();
+        } else {
+            s_gpad_tx_count++;
+        }
+    }
+
+    int64_t now = esp_timer_get_time();
+    if (now - s_last_push_time >= 20000) { /* 20ms rate-limit (50 FPS is ultra-smooth and extremely low overhead) */
+        s_last_push_time = now;
+        gamepad_state_t temp = g_gamepad;
+        web_server_push_gamepad_state(&temp);
+    }
+}
+
 static esp_err_t ws_handler(httpd_req_t *req) {
+    s_ws_hd = req->handle;
+    s_ws_fd = httpd_req_to_sockfd(req);
+
     if (req->method == HTTP_GET) {
         ESP_LOGI(TAG, "Controller WebSocket handshake");
         return ESP_OK;
     }
 
     httpd_ws_frame_t ws_frame = {0};
-    ws_frame.type = HTTPD_WS_TYPE_TEXT;
     esp_err_t err = httpd_ws_recv_frame(req, &ws_frame, 0);
     if (err != ESP_OK) return ESP_OK;
+
+    if (ws_frame.type == HTTPD_WS_TYPE_CLOSE) {
+        ESP_LOGI(TAG, "Controller WebSocket closed");
+        s_ws_hd = NULL;
+        s_ws_fd = -1;
+        close_console_socket();
+        return ESP_OK;
+    }
+
     if (ws_frame.len == 0 || ws_frame.len > 512) return ESP_OK;
 
     char *buf = calloc(1, ws_frame.len + 1);
@@ -582,13 +741,15 @@ static esp_err_t ws_handler(httpd_req_t *req) {
     cJSON *l2 = cJSON_GetObjectItem(json, "l2");
     cJSON *r2 = cJSON_GetObjectItem(json, "r2");
 
-    if (cJSON_IsNumber(buttons)) g_gamepad.buttons = (uint32_t)buttons->valueint;
-    if (cJSON_IsNumber(lx)) g_gamepad.lx = (uint8_t)lx->valueint;
-    if (cJSON_IsNumber(ly)) g_gamepad.ly = (uint8_t)ly->valueint;
-    if (cJSON_IsNumber(rx)) g_gamepad.rx = (uint8_t)rx->valueint;
-    if (cJSON_IsNumber(ry)) g_gamepad.ry = (uint8_t)ry->valueint;
-    if (cJSON_IsNumber(l2)) g_gamepad.l2 = (uint8_t)l2->valueint;
-    if (cJSON_IsNumber(r2)) g_gamepad.r2 = (uint8_t)r2->valueint;
+    if (cJSON_IsNumber(buttons)) s_virtual_gamepad.buttons = (uint32_t)buttons->valueint;
+    if (cJSON_IsNumber(lx)) s_virtual_gamepad.lx = (uint8_t)lx->valueint;
+    if (cJSON_IsNumber(ly)) s_virtual_gamepad.ly = (uint8_t)ly->valueint;
+    if (cJSON_IsNumber(rx)) s_virtual_gamepad.rx = (uint8_t)rx->valueint;
+    if (cJSON_IsNumber(ry)) s_virtual_gamepad.ry = (uint8_t)ry->valueint;
+    if (cJSON_IsNumber(l2)) s_virtual_gamepad.l2 = (uint8_t)l2->valueint;
+    if (cJSON_IsNumber(r2)) s_virtual_gamepad.r2 = (uint8_t)r2->valueint;
+
+    update_merged_gamepad_state();
 
     cJSON_Delete(json);
 
@@ -608,7 +769,7 @@ static esp_err_t ws_handler(httpd_req_t *req) {
         if (send_all(console_tcp_socket, &pkt, sizeof(pkt)) != 0) {
             s_last_console_errno = errno;
             s_gpad_tx_errors++;
-            ESP_LOGE(TAG, "Failed to send GPAD packet to wireless console, closing socket");
+            ESP_LOGE(TAG, "Failed to send GPAD packet to wireless console, errno=%d, closing socket", errno);
             close_console_socket();
         } else {
             s_gpad_tx_count++;

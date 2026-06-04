@@ -4,8 +4,8 @@ if(CONFIG_IDF_TARGET_ESP32P4)
     set(target_requires esp_hosted esp_tinyusb)
     set(target_srcs "main.c" "wifi_ap.c" "web_server.c" "hid_gamepad.c" "ble_hid_host.c" "dns_redirect.c")
 else()
-    set(target_requires esp_hid)
-    set(target_srcs "main.c" "wifi_ap.c" "web_server.c" "hid_gamepad.c" "bt_bridge.c" "dns_redirect.c")
+    set(target_requires bluepad32 btstack)
+    set(target_srcs "main.c" "wifi_ap.c" "web_server.c" "hid_gamepad.c" "ghostpad_platform.c" "dns_redirect.c")
 endif()
 
 idf_component_register(

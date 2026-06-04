@@ -14,3 +14,4 @@ typedef struct {
 extern volatile gamepad_state_t g_gamepad;
 
 esp_err_t web_server_start(void);
+void web_server_handle_physical_gamepad(const gamepad_state_t *gp);

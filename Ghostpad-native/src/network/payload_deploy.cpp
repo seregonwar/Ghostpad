@@ -34,6 +34,15 @@ static void closeSocket(int sock) {
 #endif
 }
 
+static void setNoSigPipe(int sock) {
+#ifdef __APPLE__
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
+#elif !defined(_WIN32)
+    (void)sock;
+#endif
+}
+
 PayloadDeployer::PayloadDeployer() {
     status_.phase = "idle";
     status_.message = "Ready";
@@ -102,6 +111,8 @@ bool PayloadDeployer::deployElf(const std::string& host, const std::string& elf_
     int sock = ::socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return false;
 
+    setNoSigPipe(sock);
+
     struct timeval tv;
     tv.tv_sec = 30;
     tv.tv_usec = 0;
@@ -131,6 +142,8 @@ bool PayloadDeployer::sendGbnd(const std::string& host, uint64_t virt, uint64_t 
     int sock = ::socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return false;
 
+    setNoSigPipe(sock);
+
     struct timeval tv;
     tv.tv_sec = 3;
     tv.tv_usec = 0;
@@ -155,6 +168,9 @@ bool PayloadDeployer::sendGbnd(const std::string& host, uint64_t virt, uint64_t 
 }
 
 void PayloadDeployer::processKlogLine(const std::string& line) {
+    fprintf(stderr, "[klog] %s\n", line.c_str());
+    fflush(stderr);
+    try {
     // Match physical device
     static std::regex re_dev_phys(
         R"(DEVICE_ADDED|DeviceAdded.*?(?:DeviceId|DeviceID|deviceId|deviceID|device id)[:=]\s*0x([0-9a-fA-F]+))",
@@ -173,8 +189,9 @@ void PayloadDeployer::processKlogLine(const std::string& line) {
 
     std::smatch match;
 
-    if (std::regex_search(line, match, re_dev_phys)) {
-        uint64_t dev = std::stoull(match[1].str(), nullptr, 16);
+    if (std::regex_search(line, match, re_dev_phys) && match.size() > 1) {
+        uint64_t dev = 0;
+        try { dev = std::stoull(match[1].str(), nullptr, 16); } catch (...) {}
         if (dev > 0 && (line.find("capabilityBattery:1") != std::string::npos ||
                          line.find("Physical") != std::string::npos)) {
             auto_phys = dev;
@@ -182,8 +199,9 @@ void PayloadDeployer::processKlogLine(const std::string& line) {
         }
     }
 
-    if (!auto_sent_gbnd_ && std::regex_search(line, match, re_dev_virt)) {
-        uint64_t dev = std::stoull(match[1].str(), nullptr, 16);
+    if (!auto_sent_gbnd_ && std::regex_search(line, match, re_dev_virt) && match.size() > 1) {
+        uint64_t dev = 0;
+        try { dev = std::stoull(match[1].str(), nullptr, 16); } catch (...) {}
         bool is_virtual = line.find("capabilityBattery:0") != std::string::npos ||
                           line.find("userId=0xffffffff") != std::string::npos ||
                           line.find("UserId:0xffffffff") != std::string::npos ||
@@ -196,7 +214,6 @@ void PayloadDeployer::processKlogLine(const std::string& line) {
             auto_sent_gbnd_ = true;
             emitStatus("klog", "Virtual device 0x" + match[1].str() + " detected - sending GBND");
 
-            // Send GBND after a short delay in a separate thread
             std::thread([this, dev]() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(400));
                 sendGbnd(klog_host_, auto_virt, auto_phys, 0);
@@ -218,6 +235,7 @@ void PayloadDeployer::processKlogLine(const std::string& line) {
         auto_bound = true;
         emitStatus("klog", "MBus bind OK");
     }
+    } catch (...) {}
 }
 
 void PayloadDeployer::processKlogData(const std::string& host, int sock) {

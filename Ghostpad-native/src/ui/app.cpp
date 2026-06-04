@@ -129,6 +129,25 @@ void App::init() {
     }
 }
 
+void App::startGifExport(const std::string& output_path, float vis_size, int fps) {
+    gif_output_path_ = output_path;
+    gif_vis_size_ = vis_size;
+    gif_fps_ = fps;
+    gif_capture_width_ = (int)(vis_size * 2.2f);
+    gif_capture_height_ = (int)(vis_size * 1.5f);
+    gif_frame_timer_ = 0.0;
+    gif_frame_idx_ = 0;
+    gif_exporter_.beginCapture(gif_capture_width_, gif_capture_height_, fps);
+    gif_export_active_ = true;
+}
+
+void App::cancelGifExport() {
+    gif_export_active_ = false;
+    gif_exporter_.cancel();
+    gif_output_path_.clear();
+    macro_engine.stopPlayback();
+}
+
 void App::update(double dt) {
     fps_frame_count_++;
     fps_update_timer_ += dt;
@@ -141,6 +160,28 @@ void App::update(double dt) {
         for (auto& m : status_messages_) m.time_left -= (float)dt;
         while (!status_messages_.empty() && status_messages_.front().time_left <= 0.0f)
             status_messages_.pop_front();
+    }
+
+    if (gif_export_active_) {
+        gif_frame_timer_ += dt;
+        double frame_interval = 1.0 / gif_fps_;
+        if (gif_frame_timer_ >= frame_interval) {
+            gif_frame_timer_ -= frame_interval;
+            macro_engine.updatePlayback(frame_interval * 1000.0);
+            gif_frame_idx_++;
+            gif_frame_ready_ = true;
+        }
+        if (!macro_engine.isPlaying() && gif_frame_idx_ > 0 && !gif_frame_ready_) {
+            gif_export_active_ = false;
+            if (gif_exporter_.finishExport(gif_output_path_)) {
+                addStatus("GIF exported to " + gif_output_path_);
+            } else {
+                addStatus("Failed to export GIF", true);
+            }
+            gif_output_path_.clear();
+            return;
+        }
+        return;
     }
 
     input_flush_timer_ += dt;
@@ -244,26 +285,109 @@ void App::render() {
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
 
-    ImGuiViewport* vp = ImGui::GetMainViewport();
-    ui::drawBackground(ImGui::GetBackgroundDrawList(), vp->Pos, vp->Size);
+    ImVec2 vis_screen_base;
+    float vis_screen_size = gif_vis_size_;
 
-    ImGui::SetNextWindowPos(vp->Pos);
-    ImGui::SetNextWindowSize(vp->Size);
-    ImGui::Begin("Ghostpad Native", nullptr,
-                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
-                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-                 ImGuiWindowFlags_NoBringToFrontOnFocus |
-                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    if (gif_export_active_) {
+        ImGuiViewport* vp = ImGui::GetMainViewport();
 
-    drawAppChrome();
-    ImGui::End();
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            cancelGifExport();
+            addStatus("GIF export cancelled");
+        }
+
+        ImGui::SetNextWindowPos(vp->Pos);
+        ImGui::SetNextWindowSize(vp->Size);
+        ImGui::Begin("GifCapture", nullptr,
+                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+                     ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoBringToFrontOnFocus |
+                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+                     ImGuiWindowFlags_NoBackground);
+
+        float vis_w = vis_screen_size * 2.0f;
+        float vis_h = vis_screen_size * 1.3f;
+        float offset_x = (vp->Size.x - vis_w) * 0.5f;
+        float offset_y = (vp->Size.y - vis_h) * 0.45f;
+
+        ImGui::SetCursorPos(ImVec2(offset_x, offset_y));
+        ImGui::BeginGroup();
+        vis_screen_base = ImGui::GetCursorScreenPos();
+        renderPadVisualizer(*this, macro_engine.getPlaybackState(), vis_screen_size);
+        ImGui::Dummy(ImVec2(vis_w, vis_h));
+        ImGui::EndGroup();
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        std::string progress_text = "Exporting GIF... Frame " + std::to_string(gif_frame_idx_);
+        ImVec2 tp = ImGui::CalcTextSize(progress_text.c_str());
+        float tx = vp->Pos.x + (vp->Size.x - tp.x) * 0.5f;
+        float ty = vp->Pos.y + vp->Size.y - 60.0f;
+        dl->AddText(ImVec2(tx, ty), IM_COL32(200, 200, 220, 200), progress_text.c_str());
+
+        std::string cancel_hint = "Press ESC to cancel";
+        ImVec2 cp = ImGui::CalcTextSize(cancel_hint.c_str());
+        dl->AddText(ImVec2(vp->Pos.x + (vp->Size.x - cp.x) * 0.5f, ty + 20.0f),
+                    IM_COL32(140, 140, 160, 140), cancel_hint.c_str());
+
+        ImGui::End();
+    } else {
+        ImGuiViewport* vp = ImGui::GetMainViewport();
+        ui::drawBackground(ImGui::GetBackgroundDrawList(), vp->Pos, vp->Size);
+
+        ImGui::SetNextWindowPos(vp->Pos);
+        ImGui::SetNextWindowSize(vp->Size);
+        ImGui::Begin("Ghostpad Native", nullptr,
+                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+                     ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoBringToFrontOnFocus |
+                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+        drawAppChrome();
+        ImGui::End();
+    }
 
     ImGui::Render();
     int dw, dh; glfwGetFramebufferSize(g_window, &dw, &dh);
     glViewport(0, 0, dw, dh);
-    glClearColor(0.07f, 0.07f, 0.08f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+    if (gif_export_active_) {
+        glClearColor(1.0f, 0.0f, 1.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+        if (gif_frame_ready_) {
+            gif_frame_ready_ = false;
+            int cap_w = gif_capture_width_;
+            int cap_h = gif_capture_height_;
+            float cx_offs = vis_screen_size * 0.1f;
+            float cy_offs = vis_screen_size * 0.15f;
+            int read_x = (int)(vis_screen_base.x - cx_offs);
+            int read_y = dh - (int)(vis_screen_base.y + gif_vis_size_ * 1.3f + cy_offs);
+            int read_w = cap_w;
+            int read_h = cap_h;
+
+            if (read_x < 0) { read_w += read_x; read_x = 0; }
+            if (read_y < 0) { read_h += read_y; read_y = 0; }
+            if (read_x + read_w > dw) read_w = dw - read_x;
+            if (read_y + read_h > dh) read_h = dh - read_y;
+
+            std::vector<uint8_t> frame(cap_w * cap_h * 4, 0);
+            if (read_w > 0 && read_h > 0) {
+                std::vector<uint8_t> row(read_w * 4);
+                for (int row_y = 0; row_y < read_h; row_y++) {
+                    glReadPixels(read_x, read_y + row_y, read_w, 1, GL_RGBA, GL_UNSIGNED_BYTE, row.data());
+                    int dst_start = ((cap_h - 1 - row_y) * cap_w + (read_x > 0 ? cap_w - read_w : 0)) * 4;
+                    memcpy(frame.data() + dst_start, row.data(), read_w * 4);
+                }
+            }
+            gif_exporter_.addFrame(frame);
+        }
+    } else {
+        glClearColor(0.07f, 0.07f, 0.08f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    }
+
     glfwSwapBuffers(g_window);
 }
 

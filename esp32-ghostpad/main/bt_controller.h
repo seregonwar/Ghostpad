@@ -77,7 +77,7 @@ SOFTWARE.
 /* ---- Versione ----------------------------------------------------------- */
 #define BTC_VERSION_MAJOR 1U
 #define BTC_VERSION_MINOR 0U
-#define BTC_VERSION_PATCH 1U
+#define BTC_VERSION_PATCH 2U
 
 /* ---- Limiti configurabili (override via -DBTC_xxx=yyy) ------------------ */
 
@@ -427,6 +427,11 @@ btc_err_t btc_lib_deinit(void);
  * @note Thread-safety: thread-safe.
  */
 btc_err_t btc_scan_start(void);
+
+/**
+ * @brief Forget the saved Bluetooth address so the next scan performs a real inquiry.
+ */
+void btc_forget_last_device(void);
 
 /**
  * @brief Interrompe la scansione BT.
@@ -1248,12 +1253,121 @@ static bool btc_mem_contains_ascii(const uint8_t *buf,
     return false;
 }
 
+static bool btc_ascii_tolower_eq(char a, char b)
+{
+    if ((a >= 'A') && (a <= 'Z')) { a = (char)(a - 'A' + 'a'); }
+    if ((b >= 'A') && (b <= 'Z')) { b = (char)(b - 'A' + 'a'); }
+    return a == b;
+}
+
+static bool btc_ascii_case_contains(const char *haystack, const char *needle)
+{
+    size_t hlen;
+    size_t nlen;
+
+    if ((haystack == NULL) || (needle == NULL)) {
+        return false;
+    }
+
+    hlen = strlen(haystack);
+    nlen = strlen(needle);
+    if ((nlen == 0U) || (hlen < nlen)) {
+        return false;
+    }
+
+    for (size_t i = 0U; i <= (hlen - nlen); ++i) {
+        bool match = true;
+        for (size_t j = 0U; j < nlen; ++j) {
+            if (!btc_ascii_tolower_eq(haystack[i + j], needle[j])) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool btc_mem_contains_ascii_ci(const uint8_t *buf,
+                                      size_t len,
+                                      const char *needle)
+{
+    size_t needle_len;
+
+    if ((buf == NULL) || (needle == NULL)) {
+        return false;
+    }
+
+    needle_len = strlen(needle);
+    if ((needle_len == 0U) || (len < needle_len)) {
+        return false;
+    }
+
+    for (size_t i = 0U; i <= (len - needle_len); ++i) {
+        bool match = true;
+        for (size_t j = 0U; j < needle_len; ++j) {
+            if (!btc_ascii_tolower_eq((char)buf[i + j], needle[j])) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool btc_name_is_controller(const char *name)
+{
+    if ((name == NULL) || (name[0] == '\0')) {
+        return false;
+    }
+
+    return btc_ascii_case_contains(name, "DualSense") ||
+           btc_ascii_case_contains(name, "DualShock") ||
+           btc_ascii_case_contains(name, "Wireless Controller") ||
+           btc_ascii_case_contains(name, "Xbox Wireless") ||
+           btc_ascii_case_contains(name, "Pro Controller") ||
+           btc_ascii_case_contains(name, "Joy-Con") ||
+           btc_ascii_case_contains(name, "8BitDo") ||
+           btc_ascii_case_contains(name, "Gamepad") ||
+           btc_ascii_case_contains(name, "Controller");
+}
+
+static bool btc_eir_has_controller_name(const uint8_t *eir, size_t eir_len)
+{
+    return btc_mem_contains_ascii_ci(eir, eir_len, "DualSense") ||
+           btc_mem_contains_ascii_ci(eir, eir_len, "DualShock") ||
+           btc_mem_contains_ascii_ci(eir, eir_len, "Wireless Controller") ||
+           btc_mem_contains_ascii_ci(eir, eir_len, "Xbox Wireless") ||
+           btc_mem_contains_ascii_ci(eir, eir_len, "Pro Controller") ||
+           btc_mem_contains_ascii_ci(eir, eir_len, "Joy-Con") ||
+           btc_mem_contains_ascii_ci(eir, eir_len, "8BitDo") ||
+           btc_mem_contains_ascii_ci(eir, eir_len, "Gamepad") ||
+           btc_mem_contains_ascii_ci(eir, eir_len, "Controller");
+}
+
 static bool btc_cod_is_gamepad(uint32_t cod)
 {
     const uint32_t major = BTC_COD_MAJOR_DEVICE(cod);
     const uint32_t minor = BTC_COD_MINOR_DEVICE(cod);
 
-    return (major == 0x05U) && ((minor == 0x01U) || (minor == 0x02U));
+    /* Bluetooth Classic Class-of-Device major 0x05 = Peripheral.
+     * Minor 0x01/0x02 covers joystick/gamepad on most ESP-IDF decodes.
+     * Some Sony pads report extra minor bits, so accept the low nibble too. */
+    if (major != 0x05U) {
+        return false;
+    }
+
+    return (minor == 0x01U) ||
+           (minor == 0x02U) ||
+           ((minor & 0x0fU) == 0x01U) ||
+           ((minor & 0x0fU) == 0x02U);
 }
 
 static btc_err_t btc_open_bda(const uint8_t *bda)
@@ -1527,7 +1641,7 @@ static void btc_gap_event_handler(esp_bt_gap_cb_event_t  event,
         const uint8_t *bda = param->disc_res.bda;
         uint32_t cod = 0U;
         bool has_cod = false;
-        bool name_is_dualsense = false;
+        bool name_is_controller = false;
         char dev_name[64] = "";
         int rssi = 0;
 
@@ -1545,10 +1659,8 @@ static void btc_gap_event_handler(esp_bt_gap_cb_event_t  event,
                 (prop->val != NULL) &&
                 (prop->len > 0)) {
                 const size_t eir_len = (size_t)prop->len;
-                if (btc_mem_contains_ascii((const uint8_t *)prop->val,
-                                           eir_len,
-                                           "DualSense")) {
-                    name_is_dualsense = true;
+                if (btc_eir_has_controller_name((const uint8_t *)prop->val, eir_len)) {
+                    name_is_controller = true;
                 }
             }
 
@@ -1556,6 +1668,9 @@ static void btc_gap_event_handler(esp_bt_gap_cb_event_t  event,
                 size_t n = prop->len < (int)sizeof(dev_name)-1 ? prop->len : (int)sizeof(dev_name)-1;
                 memcpy(dev_name, prop->val, n);
                 dev_name[n] = '\0';
+                if (btc_name_is_controller(dev_name)) {
+                    name_is_controller = true;
+                }
             }
 
             if (prop->type == ESP_BT_GAP_DEV_PROP_RSSI && prop->len >= 1 && prop->val != NULL) {
@@ -1567,7 +1682,7 @@ static void btc_gap_event_handler(esp_bt_gap_cb_event_t  event,
         BTC_LOGI("BT dev: " ESP_BD_ADDR_STR " CoD=0x%06lX RSSI=%d name=\"%s\"",
                  ESP_BD_ADDR_HEX(bda), (unsigned long)cod, rssi, dev_name);
 
-        if (((has_cod && btc_cod_is_gamepad(cod)) || name_is_dualsense) &&
+        if (((has_cod && btc_cod_is_gamepad(cod)) || name_is_controller) &&
             btc_bda_is_nonzero(bda)) {
             BTC_LOGI("Controller candidato trovato: " ESP_BD_ADDR_STR,
                      ESP_BD_ADDR_HEX(bda));
@@ -1803,6 +1918,25 @@ btc_err_t btc_lib_deinit(void)
     (void)memset(&s_ctx, 0, sizeof(s_ctx));
     BTC_LOGI("bt_controller deinizializzato");
     return BTC_OK;
+}
+
+void btc_forget_last_device(void)
+{
+    nvs_handle_t h;
+
+    if (btc_lock()) {
+        (void)memset(s_ctx.last_bda, 0, sizeof(s_ctx.last_bda));
+        s_ctx.last_bda_valid = false;
+        btc_unlock();
+    }
+
+    if (nvs_open(BTC_NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+        (void)nvs_erase_key(h, BTC_NVS_KEY_LAST_BDA);
+        (void)nvs_commit(h);
+        nvs_close(h);
+    }
+
+    BTC_LOGI("Ultimo BDA salvato cancellato; prossima scan = inquiry reale");
 }
 
 /**
