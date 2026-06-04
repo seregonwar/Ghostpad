@@ -25,8 +25,8 @@ extern void renderProjectDetailScreen(App& app);
 extern void renderInputRedirectScreen(App& app);
 extern void renderControllerScreen(App& app);
 extern void renderCreditsScreen(App& app);
-extern void renderPadVisualizer(const PadStateInput& state, float size);
-extern void renderInteractivePadVisualizer(PadStateInput& state, float size);
+extern void renderPadVisualizer(App& app, const PadStateInput& state, float size);
+extern void renderInteractivePadVisualizer(App& app, PadStateInput& state, float size);
 }
 
 static GLFWwindow* g_window = nullptr;
@@ -48,7 +48,7 @@ static ImGuiKey glfwKeyToImGuiKey(int glfw_key) {
 namespace ghostpad {
 
 App::App(const std::string& data_dir)
-    : consoles(data_dir), settings(data_dir), projects(data_dir) {}
+    : consoles(data_dir), settings(data_dir), projects(data_dir), is_connecting_(false) {}
 
 App::~App() { shutdown(); }
 
@@ -127,9 +127,12 @@ void App::update(double dt) {
         current_fps_ = fps_frame_count_ / fps_update_timer_;
         fps_frame_count_ = 0; fps_update_timer_ = 0.0;
     }
-    for (auto& m : status_messages_) m.time_left -= (float)dt;
-    while (!status_messages_.empty() && status_messages_.front().time_left <= 0.0f)
-        status_messages_.pop_front();
+    {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        for (auto& m : status_messages_) m.time_left -= (float)dt;
+        while (!status_messages_.empty() && status_messages_.front().time_left <= 0.0f)
+            status_messages_.pop_front();
+    }
 
     input_flush_timer_ += dt;
     if (input_flush_timer_ >= 1.0 / 60.0) {
@@ -283,29 +286,44 @@ static void drawSidebarConnection(App& app, float x, float w) {
     auto st = app.ghostpad.getStatus();
     auto ds = app.deployer.getStatus();
 
+    /*
+     *    [  STATUS LED  ]
+     *    Connected (pulsing) or Offline
+     */
     ImGui::SetCursorPosX(x);
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ui::rgba(22, 18, 28, 220));
-    ImGui::PushStyleColor(ImGuiCol_Border, ui::rgba(70, 50, 90, 110));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ui::rgba(255, 255, 255, 8));
+    ImGui::PushStyleColor(ImGuiCol_Border, ui::rgba(255, 255, 255, 12));
     
-    float cardH = 64.0f;
+    float cardH = 50.0f;
     if (st.is_connected) cardH += 22.0f;
     if (ds.phase != "idle" && !ds.phase.empty()) cardH += 22.0f;
     
     ImGui::BeginChild("ConnectionCard", ImVec2(w - 28, cardH), true);
     
-    ImGui::SetCursorPos(ImVec2(12, 8));
-    ui::statusPill(st.is_connected ? "Connected" : "Offline", st.is_connected);
-    
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    ImVec2 led_pos(pos.x + 16.0f, pos.y + 16.0f);
+
     if (st.is_connected) {
-        ImGui::SetCursorPos(ImVec2(14, 40));
+        float t = (float)glfwGetTime();
+        float glow_r = 7.0f + 2.0f * std::sin(t * 4.0f);
+        float glow_a = 0.25f + 0.15f * std::sin(t * 4.0f);
+        dl->AddCircleFilled(led_pos, glow_r, ui::u32(ui::withAlpha(p.success, glow_a)), 16);
+        dl->AddCircleFilled(led_pos, 3.5f, ui::u32(p.success), 16);
+        dl->AddText(ImVec2(pos.x + 28.0f, pos.y + 8.0f), ui::u32(ui::rgba(220, 220, 225)), "Connected");
+        
+        ImGui::SetCursorPos(ImVec2(12, 34));
         ImGui::TextColored(p.muted, "%s  %s:%d", ICON_FA_SIGNAL, st.ip.c_str(), st.port);
+    } else {
+        dl->AddCircleFilled(led_pos, 3.5f, ui::u32(p.muted), 16);
+        dl->AddText(ImVec2(pos.x + 28.0f, pos.y + 8.0f), ui::u32(p.muted), "Offline");
     }
     
     if (ds.phase != "idle" && !ds.phase.empty()) {
         ImVec4 col = ds.phase == "error" ? p.danger :
                      ds.phase == "ready" ? p.success : p.warning;
-        ImGui::SetCursorPos(ImVec2(14, st.is_connected ? 62.0f : 40.0f));
+        ImGui::SetCursorPos(ImVec2(12, st.is_connected ? 56.0f : 34.0f));
         ImGui::TextColored(col, "%s  %s", ICON_FA_DOWNLOAD, ds.message.c_str());
     }
     
@@ -489,9 +507,13 @@ void App::drawTopBar(float x, float y, float width, float height) {
     else
         ImGui::TextColored(p.muted, "Connect a console to begin");
 
-    float r = ImGui::GetWindowWidth() - 30.0f;
+    /*
+     *    [ NAV BUTTONS ] -> aligned right
+     */
+    float r = ImGui::GetWindowWidth() - 12.0f;
+    float buttons_w = !st.is_connected ? 150.0f : (120.0f + 120.0f + ImGui::GetStyle().ItemSpacing.x);
 
-    ImGui::SetCursorPos(ImVec2(r - 360, 16));
+    ImGui::SetCursorPos(ImVec2(r - buttons_w, 16));
     if (!st.is_connected) {
         if (ui::primaryButton(ICON_FA_LINK "  Connect Console", ImVec2(150, 36)))
             current_screen = Screen::Consoles;
@@ -554,6 +576,7 @@ void App::renderScreen() {
 // ── Status ──────────────────────────────────────────────
 
 void App::addStatus(const std::string& msg, bool error) {
+    std::lock_guard<std::mutex> lock(status_mutex_);
     status_messages_.push_back({msg, 5.0f, error});
     if (status_messages_.size() > 10) status_messages_.pop_front();
 }
@@ -568,10 +591,20 @@ void App::drawStatusBar() {
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
     ImGui::SetCursorPos(ImVec2(24, 11));
-    if (!status_messages_.empty()) {
-        auto& m = status_messages_.back();
-        ImGui::TextColored(m.is_error ? p.danger : p.success, "%s  %s", 
-            m.is_error ? ICON_FA_TRIANGLE_EXCLAMATION : ICON_FA_CIRCLE_CHECK, m.text.c_str());
+    
+    StatusMessage latest_msg;
+    bool has_msg = false;
+    {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        if (!status_messages_.empty()) {
+            latest_msg = status_messages_.back();
+            has_msg = true;
+        }
+    }
+
+    if (has_msg) {
+        ImGui::TextColored(latest_msg.is_error ? p.danger : p.success, "%s  %s", 
+            latest_msg.is_error ? ICON_FA_TRIANGLE_EXCLAMATION : ICON_FA_CIRCLE_CHECK, latest_msg.text.c_str());
     } else {
         ImGui::TextColored(p.muted, "%s  Ready", ICON_FA_CIRCLE_CHECK);
     }
@@ -583,7 +616,13 @@ void App::drawStatusBar() {
     ImGui::TextColored(p.dim, "|  %s  %s", ICON_FA_GAMEPAD,
         st.is_connected ? "GPAD active" : "GPAD idle");
     ImGui::SameLine();
-    ImGui::TextColored(p.dim, "|  %s  %zu notices", ICON_FA_BELL, status_messages_.size());
+    
+    size_t num_notices = 0;
+    {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        num_notices = status_messages_.size();
+    }
+    ImGui::TextColored(p.dim, "|  %s  %zu notices", ICON_FA_BELL, num_notices);
 
     ImGui::EndChild();
     ImGui::PopStyleColor(2);

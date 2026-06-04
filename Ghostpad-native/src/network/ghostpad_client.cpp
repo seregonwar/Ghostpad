@@ -9,6 +9,8 @@
 #include <thread>
 #include <algorithm>
 #include <map>
+#include <mutex>
+#include <atomic>
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <arpa/inet.h>
@@ -71,33 +73,32 @@ GhostpadClient::~GhostpadClient() {
 }
 
 bool GhostpadClient::connect(const std::string& ip, int port, int timeout_ms) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    /*
+     *    [ NON-BLOCKING MUTEX-FREE CONNECT ]
+     *    Probes connection on a local socket descriptor first to avoid locking
+     *    the instance mutex during select(), which would freeze the GUI thread.
+     */
+    socket_t temp_sock = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (temp_sock < 0) return false;
 
-    if (connected_) disconnect();
-
-    sock_ = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (sock_ < 0) return false;
-
-    setNonBlocking(static_cast<int>(sock_), true);
+    setNonBlocking(static_cast<int>(temp_sock), true);
 
     struct sockaddr_in addr = {};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(static_cast<uint16_t>(port));
     inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
 
-    int ret = ::connect(static_cast<int>(sock_), (struct sockaddr*)&addr, sizeof(addr));
+    int ret = ::connect(static_cast<int>(temp_sock), (struct sockaddr*)&addr, sizeof(addr));
 
     if (ret < 0) {
 #ifdef _WIN32
         if (WSAGetLastError() != WSAEWOULDBLOCK) {
-            closeSocket(static_cast<int>(sock_));
-            sock_ = -1;
+            closeSocket(static_cast<int>(temp_sock));
             return false;
         }
 #else
         if (errno != EINPROGRESS) {
-            closeSocket(static_cast<int>(sock_));
-            sock_ = -1;
+            closeSocket(static_cast<int>(temp_sock));
             return false;
         }
 #endif
@@ -105,36 +106,46 @@ bool GhostpadClient::connect(const std::string& ip, int port, int timeout_ms) {
 
     fd_set fdset;
     FD_ZERO(&fdset);
-    FD_SET(static_cast<int>(sock_), &fdset);
+    FD_SET(static_cast<int>(temp_sock), &fdset);
     struct timeval tv;
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
 
-    ret = select(static_cast<int>(sock_) + 1, nullptr, &fdset, nullptr, &tv);
+    ret = select(static_cast<int>(temp_sock) + 1, nullptr, &fdset, nullptr, &tv);
     if (ret <= 0) {
-        closeSocket(static_cast<int>(sock_));
-        sock_ = -1;
+        closeSocket(static_cast<int>(temp_sock));
         return false;
     }
 
     int so_error = 0;
     socklen_t len = sizeof(so_error);
-    getsockopt(static_cast<int>(sock_), SOL_SOCKET, SO_ERROR, (char*)&so_error, &len);
+    getsockopt(static_cast<int>(temp_sock), SOL_SOCKET, SO_ERROR, (char*)&so_error, &len);
     if (so_error != 0) {
-        closeSocket(static_cast<int>(sock_));
-        sock_ = -1;
+        closeSocket(static_cast<int>(temp_sock));
         return false;
     }
 
-    setNonBlocking(static_cast<int>(sock_), false);
+    setNonBlocking(static_cast<int>(temp_sock), false);
 
     // Disable Nagle's algorithm
     int flag = 1;
-    setsockopt(static_cast<int>(sock_), IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+    setsockopt(static_cast<int>(temp_sock), IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
 
-    connected_ = true;
-    host_ = ip;
-    port_ = port;
+    // Lock the instance state mutex briefly only to commit the successfully opened socket
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (connected_) {
+            try {
+                auto disc = buildDiscPacket();
+                ::send(static_cast<int>(sock_), (const char*)disc.data(), disc.size(), 0);
+            } catch (...) {}
+            closeSocket(static_cast<int>(sock_));
+        }
+        sock_ = temp_sock;
+        connected_ = true;
+        host_ = ip;
+        port_ = port;
+    }
     return true;
 }
 
@@ -267,15 +278,35 @@ std::vector<ScanResult> GhostpadClient::scanNetwork(const std::string& subnet, i
     std::string base = subnet.empty() ? getLocalSubnet() : subnet;
     std::vector<ScanResult> scanned;
 
+    /*
+     *    [ MULTI-THREADED SUBNET SCANNER ]
+     *    Uses worker threads to check IPs concurrently.
+     */
     std::vector<ProbeResult> hits;
+    std::mutex hits_mutex;
+    std::atomic<int> next_ip{1};
 
-    for (int i = 1; i <= 254; i++) {
-        std::string host = base + "." + std::to_string(i);
-        for (int port : PROBE_PORTS) {
-            if (probeHostPort(host, port, timeout_ms)) {
-                hits.push_back({host, port, true});
+    const int NUM_THREADS = 64;
+    std::vector<std::thread> workers;
+    for (int t = 0; t < NUM_THREADS; t++) {
+        workers.emplace_back([&]() {
+            while (true) {
+                int i = next_ip++;
+                if (i > 254) break;
+                
+                std::string host = base + "." + std::to_string(i);
+                for (int port : PROBE_PORTS) {
+                    if (probeHostPort(host, port, timeout_ms)) {
+                        std::lock_guard<std::mutex> lock(hits_mutex);
+                        hits.push_back({host, port, true});
+                    }
+                }
             }
-        }
+        });
+    }
+
+    for (auto& w : workers) {
+        w.join();
     }
 
     // Group by IP

@@ -90,6 +90,7 @@ AppSettings SettingsStore::write(const AppSettings& patch) {
     current.auto_bind_via_klog = patch.auto_bind_via_klog;
     current.connect_beep_enabled = patch.connect_beep_enabled;
     current.connect_beep_type = patch.connect_beep_type;
+    current.pad_layout = patch.pad_layout;
 
     nlohmann::json j = current;
     std::ofstream file(file_path_);

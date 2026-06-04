@@ -10,7 +10,7 @@
 
 namespace ghostpad {
 
-extern void renderInteractivePadVisualizer(PadStateInput& state, float size);
+extern void renderInteractivePadVisualizer(App& app, PadStateInput& state, float size);
 
 void renderControllerScreen(App& app) {
     const auto& p = ui::colors();
@@ -27,41 +27,98 @@ void renderControllerScreen(App& app) {
     else
         ImGui::TextColored(p.danger, "%s (not connected)", ICON_FA_CIRCLE_XMARK);
 
-    ImGui::SameLine(avail_w - 210);
-    if (ui::softButton(ICON_FA_ARROW_ROTATE_LEFT "  Reset", ImVec2(90, 30)))
-        app.virtual_pad = {};
-    ImGui::SameLine();
-    if (!status.is_connected && ui::primaryButton(ICON_FA_LINK "  Connect", ImVec2(100, 30)))
-        app.current_screen = Screen::Consoles;
+    /*
+     *  ┌──────────────────────────────────────────────────────────┐
+     *  │                  ACTION BAR CONTROLS                     │
+     *  └──────────────────────────────────────────────────────────┘
+     */
+    float spacing = ImGui::GetStyle().ItemSpacing.x;
+    float edit_pencil_w = 40.0f;
+    float top_actions_w = 0.0f;
+
+    if (app.is_layout_edit_mode) {
+        top_actions_w = edit_pencil_w + spacing + 130.0f + spacing + 120.0f;
+    } else {
+        top_actions_w = edit_pencil_w + spacing + 90.0f;
+        if (!status.is_connected) {
+            top_actions_w += spacing + 100.0f;
+        }
+    }
+
+    ImGui::SameLine(avail_w - top_actions_w);
+    
+    // Pencil button (Toggles Edit Mode)
+    const char* pencil_icon = app.is_layout_edit_mode ? ICON_FA_XMARK : ICON_FA_PEN_TO_SQUARE;
+    ImU32 pencil_col = app.is_layout_edit_mode ? ui::u32(p.danger) : ui::u32(p.primary2);
+    ImGui::PushStyleColor(ImGuiCol_Text, pencil_col);
+    if (ui::softButton(pencil_icon, ImVec2(edit_pencil_w, 30))) {
+        if (!app.is_layout_edit_mode) {
+            app.is_layout_edit_mode = true;
+            app.temp_layout = app.settings.read().pad_layout;
+            app.selected_layout_component = 0;
+        } else {
+            app.is_layout_edit_mode = false;
+        }
+    }
+    ImGui::PopStyleColor();
+
+    if (app.is_layout_edit_mode) {
+        ImGui::SameLine();
+        if (ui::dangerButton(ICON_FA_ARROW_ROTATE_LEFT "  Reset Defaults", ImVec2(130, 30))) {
+            app.temp_layout = PadLayoutSettings{};
+            app.addStatus("Layout reset to defaults");
+        }
+        ImGui::SameLine();
+        if (ui::primaryButton(ICON_FA_CHECK "  Save Layout", ImVec2(120, 30))) {
+            auto s = app.settings.read();
+            s.pad_layout = app.temp_layout;
+            app.settings.write(s);
+            app.is_layout_edit_mode = false;
+            app.addStatus("Controller layout saved");
+        }
+    } else {
+        ImGui::SameLine();
+        if (ui::softButton(ICON_FA_ARROW_ROTATE_LEFT "  Reset", ImVec2(90, 30))) {
+            app.virtual_pad = {};
+        }
+        if (!status.is_connected) {
+            ImGui::SameLine();
+            if (ui::primaryButton(ICON_FA_LINK "  Connect", ImVec2(100, 30))) {
+                app.current_screen = Screen::Consoles;
+            }
+        }
+    }
 
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
 
-    // Interactive pad - center it in remaining workspace
-    float pad_size = std::min(avail_w * 0.42f, (avail_h - 100.0f) * 0.70f);
+    // ─────────────────────────────────────────────────────────────────────────────
+    //                          CONTROLLER GRAPHICS AREA
+    // ─────────────────────────────────────────────────────────────────────────────
+    float panel_w = 320.0f;
+    float pad_area_w = app.is_layout_edit_mode ? (avail_w - panel_w - 20.0f) : avail_w;
+    
+    float pad_size = std::min(pad_area_w * 0.42f, (avail_h - 100.0f) * 0.70f);
     float pad_w = pad_size * 2.0f;
     float pad_h = pad_size * 1.2f;
     
-    float offset_x = (avail_w - pad_w) * 0.5f;
+    float offset_x = (pad_area_w - pad_w) * 0.5f;
     float offset_y = std::max((avail_h - 90.0f - pad_h) * 0.4f, 10.0f);
     
+    ImGui::BeginGroup();
     if (offset_y > 0) ImGui::Dummy(ImVec2(0, offset_y));
     if (offset_x > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offset_x);
 
-    // Active input mirroring logic:
-    // If the user drags/clicks with the mouse, we bind the visualizer to app.virtual_pad.
-    // Otherwise, we bind it to a copy of the active system state so it shows real-time inputs.
     PadStateInput active_state = app.getCurrentPadState();
     bool mouse_down = ImGui::IsMouseDown(ImGuiMouseButton_Left);
     
     PadStateInput temp_state = active_state;
     PadStateInput& render_state = mouse_down ? app.virtual_pad : temp_state;
 
-    renderInteractivePadVisualizer(render_state, pad_size);
+    renderInteractivePadVisualizer(app, render_state, pad_size);
 
-    if (!mouse_down && !ImGui::IsAnyItemActive()) {
-        // Return virtual sticks to center when not being dragged
+    if (!app.is_layout_edit_mode && !mouse_down && !ImGui::IsAnyItemActive()) {
         for (int i = 0; i < 4; i++)
             app.virtual_pad.stick_states[i] = 128;
         app.virtual_pad.trigger_l2 = 0;
@@ -70,15 +127,89 @@ void renderControllerScreen(App& app) {
             app.virtual_pad.button_states[i] = false;
     }
 
-    // Centered footer tips
     ImGui::Dummy(ImVec2(0, 16));
     float text_w = ImGui::CalcTextSize("Drag sticks/triggers. Click buttons. Leave this tab open for direct touch control.").x;
-    ImGui::SetCursorPosX((avail_w - text_w) * 0.5f);
+    ImGui::SetCursorPosX((pad_area_w - text_w) * 0.5f);
     ImGui::TextColored(p.muted, "%s  Press buttons on physical controller to see them light up in real-time.", ICON_FA_CIRCLE_INFO);
     
     text_w = ImGui::CalcTextSize("Tip: Click & drag on the layout above to send virtual controller inputs.").x;
-    ImGui::SetCursorPosX((avail_w - text_w) * 0.5f);
+    ImGui::SetCursorPosX((pad_area_w - text_w) * 0.5f);
     ImGui::TextColored(p.dim, "Tip: Click & drag on the layout above to send virtual controller inputs.");
+    ImGui::EndGroup();
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    //                         PROPERTIES SIDEBAR PANEL
+    // ─────────────────────────────────────────────────────────────────────────────
+    if (app.is_layout_edit_mode) {
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(pad_area_w + 20.0f);
+        
+        ui::beginCard("EditPanel", ImVec2(panel_w, avail_h - 90.0f));
+        ui::sectionLabel("Properties", ICON_FA_PEN_TO_SQUARE);
+        ImGui::Spacing();
+        
+        static const char* comp_names[] = {
+            "None - Click a component",
+            "Left Analog Stick",
+            "Right Analog Stick",
+            "D-pad",
+            "Face Buttons",
+            "Left Shoulders (L1/L2)",
+            "Right Shoulders (R1/R2)",
+            "Touchpad",
+            "Center Buttons"
+        };
+        
+        ImGui::TextColored(p.muted, "Select Component:");
+        ImGui::PushItemWidth(-1);
+        ImGui::Combo("##edit_comp", &app.selected_layout_component, comp_names, 9);
+        ImGui::PopItemWidth();
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        
+        if (app.selected_layout_component > 0 && app.selected_layout_component < 9) {
+            ComponentLayout* comp_layout = nullptr;
+            switch (app.selected_layout_component) {
+                case 1: comp_layout = &app.temp_layout.l_stick; break;
+                case 2: comp_layout = &app.temp_layout.r_stick; break;
+                case 3: comp_layout = &app.temp_layout.dpad; break;
+                case 4: comp_layout = &app.temp_layout.face_buttons; break;
+                case 5: comp_layout = &app.temp_layout.shoulders_l; break;
+                case 6: comp_layout = &app.temp_layout.shoulders_r; break;
+                case 7: comp_layout = &app.temp_layout.touchpad; break;
+                case 8: comp_layout = &app.temp_layout.center_buttons; break;
+            }
+            
+            if (comp_layout) {
+                ImGui::TextColored(p.primary2, "%s", comp_names[app.selected_layout_component]);
+                ImGui::Spacing();
+                
+                ImGui::TextColored(p.muted, "Horizontal Position:");
+                ImGui::SliderFloat("##pos_x", &comp_layout->x_offset, -1.5f, 1.5f, "%.3f");
+                
+                ImGui::TextColored(p.muted, "Vertical Position:");
+                ImGui::SliderFloat("##pos_y", &comp_layout->y_offset, -1.5f, 1.5f, "%.3f");
+                
+                ImGui::TextColored(p.muted, "Scale:");
+                ImGui::SliderFloat("##scale", &comp_layout->scale, 0.4f, 2.5f, "%.2fx");
+                
+                ImGui::Spacing();
+                ImGui::Spacing();
+                
+                if (ui::softButton(ICON_FA_ARROW_ROTATE_LEFT "  Reset Component", ImVec2(180, 30))) {
+                    comp_layout->x_offset = 0.0f;
+                    comp_layout->y_offset = 0.0f;
+                    comp_layout->scale = 1.0f;
+                    app.addStatus("Component reset to default");
+                }
+            }
+        } else {
+            ImGui::TextWrapped("Click on any button group on the controller to edit its position and size, or drag it directly on the screen.");
+        }
+        
+        ui::endCard();
+    }
 }
 
 } // namespace ghostpad

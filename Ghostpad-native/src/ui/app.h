@@ -15,6 +15,7 @@
 #include <vector>
 #include <chrono>
 #include <deque>
+#include <atomic>
 
 #include "network/ghostpad_client.h"
 #include "network/beeper_client.h"
@@ -85,6 +86,10 @@ public:
     std::string rebind_button_name;
     int rebind_button_id = -1;
     PadStateInput virtual_pad;
+    std::atomic<bool> is_connecting_{false};
+    bool is_layout_edit_mode = false;
+    int selected_layout_component = 0;
+    PadLayoutSettings temp_layout;
 
     // Active controller state query
     PadStateInput getCurrentPadState();
@@ -103,6 +108,7 @@ private:
     // Deploy status tracking
     DeployStatus deploy_status_;
     std::deque<StatusMessage> status_messages_;
+    mutable std::mutex status_mutex_;
 
     // FPS tracking
     double fps_update_timer_ = 0.0;

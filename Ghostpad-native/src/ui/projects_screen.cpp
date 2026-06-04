@@ -9,7 +9,7 @@
 
 namespace ghostpad {
 
-extern void renderPadVisualizer(const PadStateInput& state, float size);
+extern void renderPadVisualizer(App& app, const PadStateInput& state, float size);
 
 void renderProjectsScreen(App& app) {
     const auto& p = ui::colors();
@@ -229,7 +229,7 @@ void renderProjectDetailScreen(App& app) {
         ImGui::Separator();
         ImGui::Spacing();
         ImGui::TextColored(p.success, "%s  Playing...", ICON_FA_PLAY);
-        renderPadVisualizer(app.macro_engine.getPlaybackState(), 120.0f);
+        renderPadVisualizer(app, app.macro_engine.getPlaybackState(), 120.0f);
     }
     ui::endCard();
 }

@@ -38,31 +38,44 @@ void renderConsolesScreen(App& app) {
     ImGui::PopItemWidth();
     ImGui::SameLine();
 
-    if (ui::primaryButton(ICON_FA_LINK "  Connect", ImVec2(110, 32))) {
-        std::string ip(ip_buf);
-        if (!ip.empty()) {
-            app.addStatus("Connecting to " + ip + "...");
-            auto settings = app.settings.read();
-            std::string elf = app.settings.resolvePayloadPath();
+    bool connecting = app.is_connecting_.load();
 
-            if (settings.auto_deploy_on_connect && !elf.empty()) {
-                PayloadDeployer::Options opts;
-                opts.elf_path = elf;
-                opts.auto_bind_via_klog = settings.auto_bind_via_klog;
-                opts.status_callback = [&app](const DeployStatus& s) {
-                    app.addStatus(s.message, s.phase == "error");
-                };
-                app.deployer.ensurePayloadRunning(ip, opts);
-            }
+    if (connecting) {
+        ImGui::BeginDisabled();
+        ui::softButton(ICON_FA_SPINNER "  Connecting...", ImVec2(130, 32));
+        ImGui::EndDisabled();
+    } else {
+        if (ui::primaryButton(ICON_FA_LINK "  Connect", ImVec2(110, 32))) {
+            std::string ip(ip_buf);
+            if (!ip.empty()) {
+                app.addStatus("Connecting to " + ip + "...");
+                app.is_connecting_ = true;
+                
+                std::thread([&app, ip, port = port_buf]() {
+                    auto settings = app.settings.read();
+                    std::string elf = app.settings.resolvePayloadPath();
 
-            if (app.ghostpad.connect(ip, port_buf)) {
-                app.selected_console_ip = ip;
-                app.selected_console_port = port_buf;
-                app.addStatus("Connected to " + ip);
-                if (settings.connect_beep_enabled && app.deployer.auto_adopted)
-                    BeeperClient::buzz(ip, settings.connect_beep_type);
-            } else {
-                app.addStatus("Connection failed", true);
+                    if (settings.auto_deploy_on_connect && !elf.empty()) {
+                        PayloadDeployer::Options opts;
+                        opts.elf_path = elf;
+                        opts.auto_bind_via_klog = settings.auto_bind_via_klog;
+                        opts.status_callback = [&app](const DeployStatus& s) {
+                            app.addStatus(s.message, s.phase == "error");
+                        };
+                        app.deployer.ensurePayloadRunning(ip, opts);
+                    }
+
+                    if (app.ghostpad.connect(ip, port)) {
+                        app.selected_console_ip = ip;
+                        app.selected_console_port = port;
+                        app.addStatus("Connected to " + ip);
+                        if (settings.connect_beep_enabled && app.deployer.auto_adopted)
+                            BeeperClient::buzz(ip, settings.connect_beep_type);
+                    } else {
+                        app.addStatus("Connection failed", true);
+                    }
+                    app.is_connecting_ = false;
+                }).detach();
             }
         }
     }
@@ -90,15 +103,25 @@ void renderConsolesScreen(App& app) {
 
     // Saved consoles
     ui::beginCard("ConsolesList", ImVec2(avail_w, 0));
-    ui::sectionLabel("Saved Consoles", ICON_FA_DATABASE);
+    /*
+     *    [ HEADER ]                   [ + ADD CONSOLE ]
+     *    ──────────────────────────────────────────────
+     */
+    const auto& p_hdr = ui::colors();
+    ImGui::PushStyleColor(ImGuiCol_Text, p_hdr.muted);
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 6.0f);
+    ImGui::Text("%s  Saved Consoles", ICON_FA_DATABASE);
+    ImGui::PopStyleColor();
+
+    ImGui::SameLine(ImGui::GetWindowWidth() - 130 - 18);
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 5.0f);
     
-    // Add Console float right
-    ImGui::SetCursorPosY(16);
-    ImGui::SetCursorPosX(avail_w - 150);
-    if (ui::primaryButton(ICON_FA_PLUS "  Add Console", ImVec2(130, 30)))
+    if (ui::primaryButton(ICON_FA_PLUS "  Add Console", ImVec2(130, 30))) {
         ImGui::OpenPopup("AddConsolePopup");
+    }
 
     ImGui::Spacing();
+    ImGui::Separator();
     ImGui::Spacing();
 
     auto consoles = app.consoles.list();
@@ -130,27 +153,41 @@ void renderConsolesScreen(App& app) {
 
         ImGui::SameLine(avail_w - 240);
         ImGui::SetCursorPosY(13);
-        if (ui::primaryButton(ICON_FA_LINK "  Connect", ImVec2(100, 30))) {
-            auto settings = app.settings.read();
-            std::string elf = app.settings.resolvePayloadPath();
-            if (settings.auto_deploy_on_connect && !elf.empty()) {
-                PayloadDeployer::Options opts;
-                opts.elf_path = elf;
-                opts.elf_loader_port = c.elf_loader_port;
-                opts.auto_bind_via_klog = settings.auto_bind_via_klog;
-                opts.status_callback = [&app](const DeployStatus& s) {
-                    app.addStatus(s.message, s.phase == "error");
-                };
-                app.deployer.ensurePayloadRunning(c.ip, opts);
-            }
-            if (app.ghostpad.connect(c.ip, c.port)) {
-                app.selected_console_ip = c.ip;
-                app.selected_console_port = c.port;
-                app.addStatus("Connected to " + c.name);
-                if (settings.connect_beep_enabled && app.deployer.auto_adopted)
-                    BeeperClient::buzz(c.ip, settings.connect_beep_type);
-            } else {
-                app.addStatus("Connection failed", true);
+        if (connecting) {
+            ImGui::BeginDisabled();
+            ui::softButton(ICON_FA_LINK "  Connect", ImVec2(100, 30));
+            ImGui::EndDisabled();
+        } else {
+            if (ui::primaryButton(ICON_FA_LINK "  Connect", ImVec2(100, 30))) {
+                app.addStatus("Connecting to " + c.name + "...");
+                app.is_connecting_ = true;
+                
+                std::thread([&app, ip = c.ip, port = c.port, name = c.name, elf_loader_port = c.elf_loader_port]() {
+                    auto settings = app.settings.read();
+                    std::string elf = app.settings.resolvePayloadPath();
+                    
+                    if (settings.auto_deploy_on_connect && !elf.empty()) {
+                        PayloadDeployer::Options opts;
+                        opts.elf_path = elf;
+                        opts.elf_loader_port = elf_loader_port;
+                        opts.auto_bind_via_klog = settings.auto_bind_via_klog;
+                        opts.status_callback = [&app](const DeployStatus& s) {
+                            app.addStatus(s.message, s.phase == "error");
+                        };
+                        app.deployer.ensurePayloadRunning(ip, opts);
+                    }
+                    
+                    if (app.ghostpad.connect(ip, port)) {
+                        app.selected_console_ip = ip;
+                        app.selected_console_port = port;
+                        app.addStatus("Connected to " + name);
+                        if (settings.connect_beep_enabled && app.deployer.auto_adopted)
+                            BeeperClient::buzz(ip, settings.connect_beep_type);
+                    } else {
+                        app.addStatus("Connection failed", true);
+                    }
+                    app.is_connecting_ = false;
+                }).detach();
             }
         }
         ImGui::SameLine();
@@ -166,9 +203,11 @@ void renderConsolesScreen(App& app) {
         ImGui::Spacing();
     }
 
-    ui::endCard();
-
-    // Add popup modal with padding
+    /*
+     *  ┌──────────────────────────────────────────────────────────┐
+     *  │                   ADD CONSOLE POPUP                      │
+     *  └──────────────────────────────────────────────────────────┘
+     */
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24, 20));
     if (ImGui::BeginPopupModal("AddConsolePopup", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextColored(p.primary2, "%s  Add New Console", ICON_FA_PLUS);
@@ -211,6 +250,8 @@ void renderConsolesScreen(App& app) {
         ImGui::EndPopup();
     }
     ImGui::PopStyleVar();
+    
+    ui::endCard();
 }
 
 } // namespace ghostpad
