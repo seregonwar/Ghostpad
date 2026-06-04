@@ -62,11 +62,6 @@ static void lzwInit(LzwDict& d, int codeSize) {
     d.map.clear();
     d.next_code = (1 << codeSize) + 2;
     d.max_code = (1 << (codeSize + 1));
-    for (int i = 0; i < (1 << codeSize); i++) {
-        d.map[(uint32_t)i] = i;
-    }
-    d.map[(uint32_t)(1 << codeSize)] = (1 << codeSize);
-    d.map[(uint32_t)(1 << codeSize) + 1] = (1 << codeSize) + 1;
 }
 
 struct BitWriter {

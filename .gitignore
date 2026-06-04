@@ -25,3 +25,4 @@ Ghostpad-app/react/src/.DS_Store
 /esp32-ghostpad/components
 *.old
 *.txt
+*.gif

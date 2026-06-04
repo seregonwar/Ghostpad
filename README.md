@@ -4,7 +4,7 @@
 
 https://github.com/user-attachments/assets/30c7f384-4fa8-411c-aa07-84c59eda6037
 
-> Remote-control a jailbroken PS4 or PS5 from any device: PC app, web browser, or real BLE controller — via an ESP32-P4 bridge that forwards HID input over TCP to a virtual DualSense running on the console.
+> Remote-control a jailbroken PS4 or PS5 from any device: PC app, web browser, or real BLE controller — via an ESP32-WROOM-32U bridge that forwards HID input over TCP to a virtual DualSense running on the console.
 
 Ghostpad is a **payload + bridge + GUI** system that creates a **virtual DualSense** on a jailbroken PS4/PS5 and forwards input over LAN. The shell and games see it as a real controller.
 
@@ -33,7 +33,7 @@ Ghostpad is a **payload + bridge + GUI** system that creates a **virtual DualSen
 | Component | Directory | Description |
 |-----------|-----------|-------------|
 | **PS4/PS5 Payload** | `payload/` | ELF that runs on jailbroken console, creates virtual DualSense via VDA, listens on TCP 6967 |
-| **ESP32 Bridge** | `esp32-ghostpad/` | ESP32-P4 firmware: WiFi, web UI, BLE HID host, USB HID, subnet scan, klog bridge |
+| **ESP32 Bridge** | `esp32-ghostpad/` | ESP32-WROOM-32U firmware: WiFi, web UI, BLE HID host, USB HID, subnet scan, klog bridge |
 | **VDA Probe** | `tools/vda_probe/` | Diagnostic tool to fingerprint libScePad VDA byte-pattern and enumerate MBus symbols |
 | **PC GUI** | root | Python/Qt desktop app for keyboard/mouse/gamepad input (Windows/Linux) |
 
