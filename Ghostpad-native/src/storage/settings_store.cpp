@@ -69,6 +69,22 @@ SettingsStore::SettingsStore(const std::string& data_dir) {
 AppSettings SettingsStore::read() const {
     std::ifstream file(file_path_);
     if (!file.is_open()) {
+        std::vector<std::string> candidates = {
+            app_root_ + "/ghostpad-settings.json",
+            app_root_ + "/Resources/ghostpad-settings.json",
+            app_root_ + "/../Resources/ghostpad-settings.json",
+            app_root_ + "/../../ghostpad-settings.json"
+        };
+        for (const auto& path : candidates) {
+            std::ifstream default_file(path);
+            if (default_file.is_open()) {
+                try {
+                    nlohmann::json j;
+                    default_file >> j;
+                    return j.get<AppSettings>();
+                } catch (...) {}
+            }
+        }
         return AppSettings{};
     }
 

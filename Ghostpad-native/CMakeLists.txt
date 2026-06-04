@@ -113,6 +113,12 @@ target_compile_definitions(ghostpad-native PRIVATE
 )
 target_link_libraries(ghostpad-native PRIVATE glfw OpenGL::GL nlohmann_json::nlohmann_json)
 
+configure_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/ghostpad-settings.json
+  ${CMAKE_CURRENT_BINARY_DIR}/ghostpad-settings.json
+  COPYONLY
+)
+
 if(WIN32)
   target_link_libraries(ghostpad-native PRIVATE ws2_32)
   target_sources(ghostpad-native PRIVATE ${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp)
@@ -130,4 +136,11 @@ if(APPLE)
     MACOSX_BUNDLE_BUNDLE_NAME "Ghostpad Native"
     MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
   )
+  set(RESOURCE_FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/ghostpad-settings.json
+  )
+  set_source_files_properties(${RESOURCE_FILES} PROPERTIES
+    MACOSX_PACKAGE_LOCATION Resources
+  )
+  target_sources(ghostpad-native PRIVATE ${RESOURCE_FILES})
 endif()

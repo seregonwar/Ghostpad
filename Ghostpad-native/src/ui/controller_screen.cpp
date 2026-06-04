@@ -157,28 +157,138 @@ void renderControllerScreen(App& app) {
             "Left Shoulders (L1/L2)",
             "Right Shoulders (R1/R2)",
             "Touchpad",
-            "Center Buttons"
+            "Create Button",
+            "Options Button",
+            "PS Button"
         };
         
         ImGui::TextColored(p.muted, "Select Component:");
         ImGui::PushItemWidth(-1);
-        ImGui::Combo("##edit_comp", &app.selected_layout_component, comp_names, 9);
+        ImGui::Combo("##edit_comp", &app.selected_layout_component, comp_names, 11);
         ImGui::PopItemWidth();
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
         
-        if (app.selected_layout_component > 0 && app.selected_layout_component < 9) {
+        if (app.selected_layout_component > 0 && app.selected_layout_component < 11) {
             ComponentLayout* comp_layout = nullptr;
             switch (app.selected_layout_component) {
                 case 1: comp_layout = &app.temp_layout.l_stick; break;
                 case 2: comp_layout = &app.temp_layout.r_stick; break;
-                case 3: comp_layout = &app.temp_layout.dpad; break;
+                case 3: {
+                    // D-pad selection has multiple sub-modules
+                    ImGui::TextColored(p.muted, "D-pad Module to Edit:");
+                    static int dpad_module = 0; // 0 = Whole, 1 = Up, 2 = Down, 3 = Left, 4 = Right
+                    static const char* dpad_modules[] = { "Whole D-pad", "Up Button", "Down Button", "Left Button", "Right Button" };
+                    ImGui::PushItemWidth(-1);
+                    ImGui::Combo("##dpad_mod", &dpad_module, dpad_modules, 5);
+                    ImGui::PopItemWidth();
+                    ImGui::Spacing();
+                    
+                    if (dpad_module == 0) {
+                        ComponentLayout* ref = &app.temp_layout.dpad_up;
+                        
+                        ImGui::TextColored(p.primary2, "Whole D-pad Group");
+                        ImGui::Spacing();
+                        
+                        ImGui::TextColored(p.muted, "Horizontal Position:");
+                        float x_val = ref->x_offset;
+                        if (ImGui::SliderFloat("##pos_x", &x_val, -1.5f, 1.5f, "%.3f")) {
+                            float dx = x_val - ref->x_offset;
+                            app.temp_layout.dpad_up.x_offset += dx;
+                            app.temp_layout.dpad_down.x_offset += dx;
+                            app.temp_layout.dpad_left.x_offset += dx;
+                            app.temp_layout.dpad_right.x_offset += dx;
+                        }
+                        
+                        ImGui::TextColored(p.muted, "Vertical Position:");
+                        float y_val = ref->y_offset;
+                        if (ImGui::SliderFloat("##pos_y", &y_val, -1.5f, 1.5f, "%.3f")) {
+                            float dy = y_val - ref->y_offset;
+                            app.temp_layout.dpad_up.y_offset += dy;
+                            app.temp_layout.dpad_down.y_offset += dy;
+                            app.temp_layout.dpad_left.y_offset += dy;
+                            app.temp_layout.dpad_right.y_offset += dy;
+                        }
+                        
+                        ImGui::TextColored(p.muted, "Scale:");
+                        float scale_val = ref->scale;
+                        if (ImGui::SliderFloat("##scale", &scale_val, 0.4f, 2.5f, "%.2fx")) {
+                            app.temp_layout.dpad_up.scale = scale_val;
+                            app.temp_layout.dpad_down.scale = scale_val;
+                            app.temp_layout.dpad_left.scale = scale_val;
+                            app.temp_layout.dpad_right.scale = scale_val;
+                        }
+                        
+                        ImGui::TextColored(p.muted, "Button Casing Color:");
+                        if (ImGui::ColorEdit4("##comp_color", ref->color.data(), ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar)) {
+                            app.temp_layout.dpad_down.color = ref->color;
+                            app.temp_layout.dpad_left.color = ref->color;
+                            app.temp_layout.dpad_right.color = ref->color;
+                        }
+                        
+                        ImGui::TextColored(p.muted, "Arrow Symbols Color:");
+                        if (ImGui::ColorEdit4("##comp_sec_color", ref->secondary_color.data(), ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar)) {
+                            app.temp_layout.dpad_down.secondary_color = ref->secondary_color;
+                            app.temp_layout.dpad_left.secondary_color = ref->secondary_color;
+                            app.temp_layout.dpad_right.secondary_color = ref->secondary_color;
+                        }
+                        
+                        ImGui::Spacing();
+                        ImGui::Spacing();
+                        
+                        if (ui::softButton(ICON_FA_ARROW_ROTATE_LEFT "  Reset D-pad Group", ImVec2(180, 30))) {
+                            app.temp_layout.dpad_up = ComponentLayout();
+                            app.temp_layout.dpad_down = ComponentLayout();
+                            app.temp_layout.dpad_left = ComponentLayout();
+                            app.temp_layout.dpad_right = ComponentLayout();
+                            app.addStatus("D-pad group reset to default");
+                        }
+                    } else {
+                        ComponentLayout* target = nullptr;
+                        const char* mod_name = "";
+                        if (dpad_module == 1) { target = &app.temp_layout.dpad_up; mod_name = "D-pad Up Button"; }
+                        else if (dpad_module == 2) { target = &app.temp_layout.dpad_down; mod_name = "D-pad Down Button"; }
+                        else if (dpad_module == 3) { target = &app.temp_layout.dpad_left; mod_name = "D-pad Left Button"; }
+                        else if (dpad_module == 4) { target = &app.temp_layout.dpad_right; mod_name = "D-pad Right Button"; }
+                        
+                        if (target) {
+                            ImGui::TextColored(p.primary2, "%s", mod_name);
+                            ImGui::Spacing();
+                            
+                            ImGui::TextColored(p.muted, "Horizontal Position:");
+                            ImGui::SliderFloat("##pos_x", &target->x_offset, -1.5f, 1.5f, "%.3f");
+                            
+                            ImGui::TextColored(p.muted, "Vertical Position:");
+                            ImGui::SliderFloat("##pos_y", &target->y_offset, -1.5f, 1.5f, "%.3f");
+                            
+                            ImGui::TextColored(p.muted, "Scale:");
+                            ImGui::SliderFloat("##scale", &target->scale, 0.4f, 2.5f, "%.2fx");
+                            
+                            ImGui::TextColored(p.muted, "Button Casing Color:");
+                            ImGui::ColorEdit4("##comp_color", target->color.data(), ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+                            
+                            ImGui::TextColored(p.muted, "Arrow Symbol Color:");
+                            ImGui::ColorEdit4("##comp_sec_color", target->secondary_color.data(), ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+                            
+                            ImGui::Spacing();
+                            ImGui::Spacing();
+                            
+                            if (ui::softButton(ICON_FA_ARROW_ROTATE_LEFT "  Reset Button", ImVec2(180, 30))) {
+                                *target = ComponentLayout();
+                                app.addStatus(std::string(mod_name) + " reset to default");
+                            }
+                        }
+                    }
+                    break;
+                }
                 case 4: comp_layout = &app.temp_layout.face_buttons; break;
                 case 5: comp_layout = &app.temp_layout.shoulders_l; break;
                 case 6: comp_layout = &app.temp_layout.shoulders_r; break;
                 case 7: comp_layout = &app.temp_layout.touchpad; break;
-                case 8: comp_layout = &app.temp_layout.center_buttons; break;
+                case 8: comp_layout = &app.temp_layout.create_btn; break;
+                case 9: comp_layout = &app.temp_layout.options_btn; break;
+                case 10: comp_layout = &app.temp_layout.ps_btn; break;
             }
             
             if (comp_layout) {
@@ -197,6 +307,13 @@ void renderControllerScreen(App& app) {
                 ImGui::TextColored(p.muted, "Button Color:");
                 ImGui::ColorEdit4("##comp_color", comp_layout->color.data(), ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
                 
+                // Secondary symbol/icon color picker for components containing shapes
+                if (app.selected_layout_component == 4 || app.selected_layout_component == 8 || 
+                    app.selected_layout_component == 9 || app.selected_layout_component == 10) {
+                    ImGui::TextColored(p.muted, "Symbol/Text Color:");
+                    ImGui::ColorEdit4("##comp_sec_color", comp_layout->secondary_color.data(), ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+                }
+                
                 ImGui::Spacing();
                 ImGui::Spacing();
                 
@@ -205,6 +322,7 @@ void renderControllerScreen(App& app) {
                     comp_layout->y_offset = 0.0f;
                     comp_layout->scale = 1.0f;
                     comp_layout->color = {0.725f, 0.549f, 1.0f, 1.0f};
+                    comp_layout->secondary_color = {1.0f, 1.0f, 1.0f, 1.0f};
                     app.addStatus("Component reset to default");
                 }
             }
