@@ -208,13 +208,13 @@ inline void sectionLabel(const char* label, const char* icon = nullptr) {
 // [Layout Container Cards]
 // ============================================================================
 
-inline void beginCard(const char* id, ImVec2 size = ImVec2(0, 0), bool border = true) {
+inline void beginCard(const char* id, ImVec2 size = ImVec2(0, 0), bool border = true, ImGuiWindowFlags flags = 0) {
     const auto& p = colors();
     ImGui::PushStyleColor(ImGuiCol_ChildBg, p.panel2);
     ImGui::PushStyleColor(ImGuiCol_Border, border ? p.border : withAlpha(p.border, 0.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 12.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18, 16));
-    ImGui::BeginChild(id, size, border);
+    ImGui::BeginChild(id, size, border, flags);
 }
 
 inline void endCard() {
