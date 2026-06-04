@@ -341,6 +341,7 @@ npm run compile        # package as Windows .exe
 - Payload-side klog architecture: always-on capture thread with client pool broadcasting, backlog ring buffer, thread-safe VDA candidate tracking with sequence numbers, GBND prebind loop, `ghostpad_try_klog_candidate_bind` direct MBus bind path
 - VDA probe (`tools/vda_probe/`): diagnostic tool that fingerprints libScePad VDA byte-patterns and sweeps 20 MBus symbols
 - klog parser improvements: multi-key DeviceId extraction, `GetUnassignedDeviceInfo` detection, VDA type:4/subType:2 RemotePlay recognition
+- Native CPP GUI
 
 
 ## Acknowledgements
