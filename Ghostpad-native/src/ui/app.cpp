@@ -5,6 +5,8 @@
 
 #include "ui/app.h"
 #include "ui/native_theme.h"
+#include "roboto_medium_ttf.h"
+#include "fa_solid_900_ttf.h"
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
@@ -91,25 +93,22 @@ void App::init() {
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
 
-    // Load main font (Roboto-Medium)
-#ifdef FONT_ROBOTO_PATH
-    ImFont* mainFont = io.Fonts->AddFontFromFileTTF(FONT_ROBOTO_PATH, 16.0f);
-#else
-    ImFont* mainFont = nullptr;
-#endif
+    // Load main font (Roboto-Medium) from embedded memory
+    ImFontConfig main_font_config;
+    main_font_config.FontDataOwnedByAtlas = false;
+    ImFont* mainFont = io.Fonts->AddFontFromMemoryTTF((void*)roboto_medium_ttf, roboto_medium_ttf_size, 16.0f, &main_font_config);
     if (!mainFont) {
         io.Fonts->AddFontDefault();
     }
 
-    // Load and merge FontAwesome icons
-#ifdef FONT_FA_PATH
+    // Load and merge FontAwesome icons from embedded memory
     static const ImWchar icons_ranges[] = { ICON_MIN_FA, ICON_MAX_16_FA, 0 };
     ImFontConfig icons_config;
     icons_config.MergeMode = true;
     icons_config.PixelSnapH = true;
     icons_config.GlyphMinAdvanceX = 14.0f;
-    io.Fonts->AddFontFromFileTTF(FONT_FA_PATH, 14.0f, &icons_config, icons_ranges);
-#endif
+    icons_config.FontDataOwnedByAtlas = false;
+    io.Fonts->AddFontFromMemoryTTF((void*)fa_solid_900_ttf, fa_solid_900_ttf_size, 14.0f, &icons_config, icons_ranges);
 
     ui::applyGhostpadTheme();
 

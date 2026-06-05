@@ -21,6 +21,8 @@ namespace ghostpad {
 /*
  *  TEXTURE LOADER AND CONTEXT
  */
+#include "dualsense_solid_black_png.h"
+
 static GLuint g_controller_texture = 0;
 static int g_tex_w = 0;
 static int g_tex_h = 0;
@@ -29,10 +31,10 @@ static void loadControllerTexture() {
     if (g_controller_texture != 0) return;
 
     int width, height, channels;
-    unsigned char* data = stbi_load(CONTROLLER_IMAGE_PATH, &width, &height, &channels, 4);
+    unsigned char* data = stbi_load_from_memory(dualsense_solid_black_png, dualsense_solid_black_png_size, &width, &height, &channels, 4);
     if (!data) {
-        fprintf(stderr, "[Ghostpad] Failed to load controller texture from %s: %s\n", 
-                CONTROLLER_IMAGE_PATH, stbi_failure_reason());
+        fprintf(stderr, "[Ghostpad] Failed to load controller texture from embedded memory: %s\n", 
+                stbi_failure_reason());
         return;
     }
 

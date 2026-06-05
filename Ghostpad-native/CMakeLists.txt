@@ -48,6 +48,22 @@ if(NOT EXISTS "${CMAKE_CURRENT_BINARY_DIR}/stb_image.h")
        "${CMAKE_CURRENT_BINARY_DIR}/stb_image.h" SHOW_PROGRESS)
 endif()
 
+# Generate embedded headers using Python
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+message(STATUS "Running embed_assets.py to generate header files...")
+execute_process(
+  COMMAND ${Python3_EXECUTABLE} 
+          "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_assets.py"
+          "${imgui_SOURCE_DIR}/misc/fonts/Roboto-Medium.ttf"
+          "${CMAKE_CURRENT_BINARY_DIR}/fa-solid-900.ttf"
+          "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/dualsense_solid_black.png"
+          "${CMAKE_CURRENT_BINARY_DIR}/generated_assets"
+  RESULT_VARIABLE embed_result
+)
+if(NOT embed_result EQUAL 0)
+  message(FATAL_ERROR "Failed to run embed_assets.py to generate header files")
+endif()
+
 set(IMGUI_SOURCES
   ${imgui_SOURCE_DIR}/imgui.cpp
   ${imgui_SOURCE_DIR}/imgui_demo.cpp
@@ -103,13 +119,11 @@ target_include_directories(ghostpad-native PRIVATE
   ${imgui_SOURCE_DIR}
   ${imgui_SOURCE_DIR}/backends
   ${CMAKE_CURRENT_BINARY_DIR}
+  ${CMAKE_CURRENT_BINARY_DIR}/generated_assets
   src
 )
 target_compile_definitions(ghostpad-native PRIVATE
   IMGUI_DEFINE_MATH_OPERATORS
-  FONT_ROBOTO_PATH="${imgui_SOURCE_DIR}/misc/fonts/Roboto-Medium.ttf"
-  FONT_FA_PATH="${CMAKE_CURRENT_BINARY_DIR}/fa-solid-900.ttf"
-  CONTROLLER_IMAGE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/src/ui/dualsense_solid_black.png"
 )
 target_link_libraries(ghostpad-native PRIVATE glfw OpenGL::GL nlohmann_json::nlohmann_json)
 
