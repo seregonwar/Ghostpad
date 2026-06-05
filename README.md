@@ -23,7 +23,7 @@ Ghostpad is a **payload + bridge + GUI** system that creates a **virtual DualSen
   └──────────────┘        │                            virtual DualSense
                           ▼                            @ slot 0
   ┌──────────────┐  ┌─────────────────────┐
-  │  BLE Gamepad │──│  ESP32-P4 Bridge    │──USB HID──► PS5
+  │  BLE Gamepad │──│  ESP32-WROOM-32U Bridge    │──USB HID──► PS5
   │  (DualSense) │  │  (this repo)        │
   └──────────────┘  └─────────────────────┘
 ```
@@ -83,7 +83,7 @@ cp sdkconfig.private.example sdkconfig.private.defaults
 # Edit sdkconfig.private.defaults with your SSID and password
 
 source ~/esp/esp-idf/export.sh
-idf.py set-target esp32p4
+idf.py set-target esp32
 idf.py build
 idf.py -p /dev/cu.usbmodemXXXX flash
 ```
@@ -235,14 +235,14 @@ PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk make
 
 Requirements:
 - [ESP-IDF v5.3+](https://docs.espressif.com/projects/esp-idf/)
-- Waveshare ESP32-P4-WIFI6 (with ESP32-C6 co-processor)
+- ESP32-WROOM-32U
 
 ```bash
 cd esp32-ghostpad
 cp sdkconfig.private.example sdkconfig.private.defaults
 # edit sdkconfig.private.defaults
 source ~/esp/esp-idf/export.sh
-idf.py set-target esp32p4
+idf.py set-target esp32
 idf.py build
 idf.py -p /dev/cu.usbmodemXXXX flash
 ```
@@ -336,7 +336,7 @@ npm run compile        # package as Windows .exe
 - `virtualDS5research.md` technical write-up
 
 ### SeregonWar
-- ESP32-P4 bridge firmware (`esp32-ghostpad/`): WiFi STA/AP with mDNS, embedded web UI, BLE HID host (NimBLE scan, connect, DualSense/DS4 report decoding), USB HID (TinyUSB), subnet scanner with port probing, klog TCP bridge with multi-client broadcast and backlog replay, WebSocket controller streaming, HTTP REST API, controller pulse diagnostics
+- ESP32-WROOM-32U bridge firmware (`esp32-ghostpad/`): WiFi STA/AP with mDNS, embedded web UI, BLE HID host (NimBLE scan, connect, DualSense/DS4 report decoding), USB HID (TinyUSB), subnet scanner with port probing, klog TCP bridge with multi-client broadcast and backlog replay, WebSocket controller streaming, HTTP REST API, controller pulse diagnostics
 - PS4 payload port (`__ORBIS__` target): SceShellCore injection (`shellui_pad.c`), runtime VDA patching with byte-pattern verification, libSceMbus dlopen/dlsym, VDA type handling (DualSense default, skip duplicate), PS4-specific authid/credential flow
 - Payload-side klog architecture: always-on capture thread with client pool broadcasting, backlog ring buffer, thread-safe VDA candidate tracking with sequence numbers, GBND prebind loop, `ghostpad_try_klog_candidate_bind` direct MBus bind path
 - VDA probe (`tools/vda_probe/`): diagnostic tool that fingerprints libScePad VDA byte-patterns and sweeps 20 MBus symbols
@@ -347,7 +347,7 @@ npm run compile        # package as Windows .exe
 ## Acknowledgements
 
 - `ps5-payload-sdk` / `ps4-payload-sdk` (John Törnblom et al.) — toolchain, kernel API helpers
-- ESP-IDF — ESP32-P4 framework
+- ESP-IDF — ESP32-WROOM-32U framework
 - NimBLE — BLE host stack
 - TinyUSB — USB HID device stack
 - cJSON — JSON parsing/generation

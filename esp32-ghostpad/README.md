@@ -1,23 +1,23 @@
-# Ghostpad Bridge - ESP32-P4-WIFI6
+# Ghostpad Bridge - ESP32-WROOM-32U
 
-Turns the Waveshare ESP32-P4-WIFI6 into a bridge for PS5 remote control.
+Turns the ESP32-WROOM-32U into a bridge for PS5 remote control.
 
 ## Architecture
 
 ```
-Phone (Browser) ---WiFi---> ESP32-P4 ---USB HID---> PS5
+Phone (Browser) ---WiFi---> ESP32-WROOM-32U ---USB HID---> PS5
                                     |
                           Ghostpad Payload (modified)
                           reads /dev/klog directly
 ```
 
-- **ESP32-P4**: Creates a WiFi AP, serves a web interface with virtual joysticks, translates input into DualSense HID reports via USB TinyUSB
+- **ESP32-WROOM-32U**: Creates a WiFi AP, serves a web interface with virtual joysticks, translates input into DualSense HID reports via USB TinyUSB
 - **PS5**: The modified Ghostpad payload reads /dev/klog directly (without a separate klog TCP server) using logic extracted from `klog_reader.c`
 
 ## Requirements
 
-- [ESP-IDF v5.3+](https://docs.espressif.com/projects/esp-idf/en/latest/esp32p4/get-started/)
-- Waveshare ESP32-P4-WIFI6 board
+- [ESP-IDF v5.3+](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started/)
+- ESP32-WROOM-32U board
 - USB-C <=> USB-A cable for connecting to the PS5
 
 ## Setup
@@ -28,12 +28,12 @@ mkdir -p ~/esp
 cd ~/esp
 git clone --recursive https://github.com/espressif/esp-idf.git
 cd esp-idf
-./install.sh esp32p4
+./install.sh esp32
 source export.sh
 
 # Build firmware
 cd /path/to/esp32-ghostpad
-idf.py set-target esp32p4
+idf.py set-target esp32
 idf.py menuconfig  # optional configuration
 idf.py build
 

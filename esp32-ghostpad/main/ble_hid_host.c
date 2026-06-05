@@ -6,7 +6,7 @@
 // | |_) | |___| |___  |  _  || || |_| | |  _  | (_) \__ \ |_
 // |____/|_____|_____| |_| |_|___|____/  |_| |_|\___/|___/\__|
 //
-//  BLE HID Host — connects DualSense / DualShock4 directly to the ESP32-P4.
+//  BLE HID Host — connects DualSense / DualShock4 directly to the ESP32-WROOM-32U.
 //  NimBLE host-only stack: HCI frames travel via esp-hosted VHCI over SDIO.
 //
 

@@ -34,7 +34,7 @@ void renderCreditsScreen(App& app) {
     ImGui::Spacing();
     ImGui::TextColored(p.muted, "Contributions:");
     ImGui::BulletText("Native CPP GUI: Ported the original codebase to high-performance C++ using GLFW + Dear ImGui.");
-    ImGui::BulletText("ESP32-P4 bridge firmware (esp32-ghostpad/): WiFi STA/AP with mDNS, BLE HID host, USB HID, Rest API.");
+    ImGui::BulletText("ESP32-WROOM-32U bridge firmware (esp32-ghostpad/): WiFi STA/AP with mDNS, BLE HID host, USB HID, Rest API.");
     ImGui::BulletText("PS4 payload port (__ORBIS__ target): SceShellCore injection, runtime VDA patching, and MBus dynamic loading.");
     ImGui::BulletText("Payload-side klog architecture: Capture threads, ring buffers, safe tracking, and prebind loop.");
     ImGui::BulletText("VDA probe (tools/vda_probe/): Fingerprints libScePad VDA patterns and sweeps 20 MBus symbols.");

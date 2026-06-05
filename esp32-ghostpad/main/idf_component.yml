@@ -5,9 +5,9 @@ dependencies:
   espressif/esp_hosted:
     version: '>=0.0.9'
     rules:
-      - if: "target in [esp32p4]"
+      - if: "target in [esp32]"
   espressif/esp_tinyusb:
     version: "*"
     rules:
-      - if: "target in [esp32p4]"
+      - if: "target in [esp32]"
   espressif/mdns: "*"

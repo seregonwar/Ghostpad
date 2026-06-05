@@ -213,7 +213,7 @@ static const char *INDEX_HTML =
 "<div class='ctrl-top'><button class='back' onclick='showPage(\"pageBrowser\")'>← Back</button><span class='name'>About</span><span></span></div>"
 "<div class='glass-panel' style='text-align:center;padding:24px;color:#475569;font-size:14px;line-height:1.8'>"
 "<h2 style='color:#2563eb;margin-bottom:14px;font-weight:800'>Ghostpad Bridge</h2>"
-"<p>High performance custom ESP32-P4 and ESP32-C6 SDIO Wi-Fi co-processor system.</p>"
+"<p>High performance custom ESP32-WROOM-32U system.</p>"
 "<p style='margin-top:12px'>Connected directly via USB TinyUSB stack to act as a hardware-spoofed game controller.</p>"
 "<p style=\"margin-top:16px;font-size:11px;font-family:'JetBrains Mono',monospace\">v1.1 · Waveshare P4 Board</p>"
 "</div>"
