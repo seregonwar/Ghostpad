@@ -25,14 +25,16 @@ jobs:
           git clone --recursive https://github.com/ps4-payload-dev/sdk.git ps4-payload-sdk
           cd ps4-payload-sdk
           make -j$(nproc)
-          echo "PS4_PAYLOAD_SDK=$GITHUB_WORKSPACE/ps4-payload-sdk" >> $GITHUB_ENV
+          make DESTDIR=$GITHUB_WORKSPACE/ps4-payload-sdk-install install
+          echo "PS4_PAYLOAD_SDK=$GITHUB_WORKSPACE/ps4-payload-sdk-install" >> $GITHUB_ENV
 
       - name: Clone and Build PS5 Payload SDK
         run: |
           git clone --recursive https://github.com/ps5-payload-dev/sdk.git ps5-payload-sdk
           cd ps5-payload-sdk
           make -j$(nproc)
-          echo "PS5_PAYLOAD_SDK=$GITHUB_WORKSPACE/ps5-payload-sdk" >> $GITHUB_ENV
+          make DESTDIR=$GITHUB_WORKSPACE/ps5-payload-sdk-install install
+          echo "PS5_PAYLOAD_SDK=$GITHUB_WORKSPACE/ps5-payload-sdk-install" >> $GITHUB_ENV
 
       - name: Compile PS4 Payload
         run: |
