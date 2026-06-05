@@ -87,11 +87,10 @@ inline void setNonBlocking(socket_t sock, bool nb) {
 }
 
 inline void setNoSigPipe(socket_t sock) {
+    (void)sock;
 #ifdef __APPLE__
     int opt = 1;
     ::setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
-#elif !defined(_WIN32)
-    (void)sock;
 #endif
 }
 

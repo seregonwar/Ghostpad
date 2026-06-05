@@ -153,20 +153,20 @@ inline void applyGhostpadTheme() {
 
 inline void drawBackground(ImDrawList* dl, ImVec2 pos, ImVec2 size) {
     const auto& p = colors();
-    const ImVec2 max(pos.x + size.x, pos.y + size.y);
-    dl->AddRectFilled(pos, max, u32(p.bg0));
+    const ImVec2 maxPos(pos.x + size.x, pos.y + size.y);
+    dl->AddRectFilled(pos, maxPos, u32(p.bg0));
     dl->AddRectFilledMultiColor(
-        pos, max,
+        pos, maxPos,
         u32(rgba(24, 14, 38, 245)), u32(rgba(11, 11, 14, 255)),
         u32(rgba(11, 11, 14, 255)), u32(rgba(11, 11, 14, 255)));
 
     const float grid = 48.0f;
     ImU32 grid_col = IM_COL32(145, 71, 225, 12);
-    for (float x = pos.x; x < max.x; x += grid) {
-        dl->AddLine(ImVec2(x, pos.y), ImVec2(x, max.y), grid_col, 1.0f);
+    for (float x = pos.x; x < maxPos.x; x += grid) {
+        dl->AddLine(ImVec2(x, pos.y), ImVec2(x, maxPos.y), grid_col, 1.0f);
     }
-    for (float y = pos.y; y < max.y; y += grid) {
-        dl->AddLine(ImVec2(pos.x, y), ImVec2(max.x, y), grid_col, 1.0f);
+    for (float y = pos.y; y < maxPos.y; y += grid) {
+        dl->AddLine(ImVec2(pos.x, y), ImVec2(maxPos.x, y), grid_col, 1.0f);
     }
 }
 

@@ -29,7 +29,9 @@ int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
 
+#ifndef _WIN32
     signal(SIGPIPE, SIG_IGN);
+#endif
 
     std::string data_dir = getDefaultDataDir();
     fprintf(stderr, "Ghostpad Native - Data directory: %s\n", data_dir.c_str());
