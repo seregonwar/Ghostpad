@@ -15,16 +15,18 @@ EXTRA_CFLAGS ?=
 
 # ── TARGET CONFIGURATION ──────────────────────────────────────────────────
 
-ifdef PS4_PAYLOAD_SDK
+ifeq ($(MAKECMDGOALS),clean)
+    TARGET := *.elf
+else ifdef PS4_PAYLOAD_SDK
     include $(PS4_PAYLOAD_SDK)/toolchain/orbis.mk
     CFLAGS  += -D__ORBIS__
-    TARGET  := ghostpad.elf
+    TARGET  := ghostpad-ps4.elf
     DEPLOY  := $(PS4_DEPLOY)
     HOST    := $(PS4_HOST)
 else ifdef PS5_PAYLOAD_SDK
     include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
     CFLAGS  += -D__PROSPERO__
-    TARGET  := ghostpad.elf
+    TARGET  := ghostpad-ps5.elf
     DEPLOY  := $(PS5_PAYLOAD_SDK)/bin/prospero-deploy
     HOST    := $(PS5_HOST)
 else

@@ -1,0 +1,58 @@
+name: Build Payloads
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build PS4 & PS5 Payloads
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install LLVM/Clang and Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld make cmake pkg-config
+
+      - name: Clone and Build PS4 Payload SDK
+        run: |
+          git clone --recursive https://github.com/ps4-payload-dev/sdk.git ps4-payload-sdk
+          cd ps4-payload-sdk
+          make -j$(nproc)
+          echo "PS4_PAYLOAD_SDK=$GITHUB_WORKSPACE/ps4-payload-sdk" >> $GITHUB_ENV
+
+      - name: Clone and Build PS5 Payload SDK
+        run: |
+          git clone --recursive https://github.com/ps5-payload-dev/sdk.git ps5-payload-sdk
+          cd ps5-payload-sdk
+          make -j$(nproc)
+          echo "PS5_PAYLOAD_SDK=$GITHUB_WORKSPACE/ps5-payload-sdk" >> $GITHUB_ENV
+
+      - name: Compile PS4 Payload
+        run: |
+          cd payload
+          make clean
+          make PS4_PAYLOAD_SDK=$PS4_PAYLOAD_SDK -j$(nproc)
+          mv ghostpad-ps4.elf ../
+
+      - name: Compile PS5 Payload
+        run: |
+          cd payload
+          make clean
+          make PS5_PAYLOAD_SDK=$PS5_PAYLOAD_SDK -j$(nproc)
+          mv ghostpad-ps5.elf ../
+
+      - name: Upload Built Payloads
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghostpad-payloads
+          path: |
+            ghostpad-ps4.elf
+            ghostpad-ps5.elf

@@ -137,7 +137,11 @@ std::string SettingsStore::resolvePayloadPath() const {
 
     // Check default locations
     std::vector<std::string> candidates = {
+        app_root_ + "/Ghostpad/payload/ghostpad-ps4.elf",
+        app_root_ + "/Ghostpad/payload/ghostpad-ps5.elf",
         app_root_ + "/Ghostpad/payload/ghostpad.elf",
+        app_root_ + "/../Ghostpad/payload/ghostpad-ps4.elf",
+        app_root_ + "/../Ghostpad/payload/ghostpad-ps5.elf",
         app_root_ + "/../Ghostpad/payload/ghostpad.elf",
         app_root_ + "/Ghostpad/payloadExamples/ghostpadOGpartial/payload/ghostpad.elf",
     };
