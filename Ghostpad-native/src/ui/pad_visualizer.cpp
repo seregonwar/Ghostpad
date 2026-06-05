@@ -44,7 +44,7 @@ static void loadControllerTexture() {
         unsigned char r = data[i * 4 + 0];
         unsigned char g = data[i * 4 + 1];
         unsigned char b = data[i * 4 + 2];
-        unsigned char max_val = std::max({r, g, b});
+        unsigned char max_val = (std::max)({r, g, b});
         data[i * 4 + 3] = max_val;
     }
 

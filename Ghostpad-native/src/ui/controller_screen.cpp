@@ -113,12 +113,12 @@ void renderControllerScreen(App& app) {
     float panel_w = 320.0f;
     float pad_area_w = app.is_layout_edit_mode ? (avail_w - panel_w - 20.0f) : avail_w;
     
-    float pad_size = std::min(pad_area_w * 0.42f, (avail_h - 100.0f) * 0.70f);
+    float pad_size = (std::min)(pad_area_w * 0.42f, (avail_h - 100.0f) * 0.70f);
     float pad_w = pad_size * 2.0f;
     float pad_h = pad_size * 1.2f;
     
     float offset_x = (pad_area_w - pad_w) * 0.5f;
-    float offset_y = std::max((avail_h - 90.0f - pad_h) * 0.4f, 10.0f);
+    float offset_y = (std::max)((avail_h - 90.0f - pad_h) * 0.4f, 10.0f);
     
     ImGui::BeginGroup();
     if (offset_y > 0) ImGui::Dummy(ImVec2(0, offset_y));

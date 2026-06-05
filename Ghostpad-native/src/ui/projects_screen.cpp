@@ -15,6 +15,11 @@
 #include <cstring>
 #include <fstream>
 
+#ifdef _WIN32
+#define popen _popen
+#define pclose _pclose
+#endif
+
 namespace ghostpad {
 
 extern void renderPadVisualizer(App& app, const PadStateInput& state, float size);

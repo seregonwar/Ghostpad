@@ -74,7 +74,10 @@ std::vector<NetworkInterface> NetworkScanner::getInterfaces() {
                     
                     NetworkInterface iface;
                     std::wstring wname(currAddresses->FriendlyName);
-                    iface.name = std::string(wname.begin(), wname.end());
+                    iface.name.reserve(wname.length());
+                    for (wchar_t wc : wname) {
+                        iface.name.push_back(static_cast<char>(wc));
+                    }
                     iface.internal = internal;
                     iface.address = buf;
                     result.push_back(iface);
