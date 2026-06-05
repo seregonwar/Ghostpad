@@ -127,7 +127,7 @@ else()
 endif()
 
 if(WIN32)
-  target_link_libraries(ghostpad-native PRIVATE ws2_32)
+  target_link_libraries(ghostpad-native PRIVATE ws2_32 iphlpapi)
   target_sources(ghostpad-native PRIVATE ${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp)
 elseif(APPLE)
   find_library(COCOA_FRAMEWORK Cocoa REQUIRED)
