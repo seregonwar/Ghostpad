@@ -58,17 +58,18 @@ public:
 
     void setKeyPressed(int glfw_key, bool ctrl, bool shift, bool alt, bool pressed);
     PadStateInput getPadState() const;
+    void update(double dt_ms);
 
     // Key bindings management
     void setButtonBinding(int button_id, int glfw_key, bool ctrl = false, bool shift = false, bool alt = false);
     KeyBinding getButtonBinding(int button_id) const;
-    std::map<int, KeyBinding> getAllBindings() const;
+    const std::map<int, KeyBinding>& getAllBindings() const;
     void clearBinding(int button_id);
 
     // Stick bindings
     void setStickBinding(const std::string& direction, int key);
     int getStickBinding(const std::string& direction) const;
-    StickBindings getStickBindings() const;
+    const StickBindings& getStickBindings() const;
 
     // Mouse look
     void setMouseLook(bool enabled);
@@ -81,7 +82,7 @@ public:
 
     // Auto-clicker
     void setAutoClicker(const AutoClickerSettings& settings);
-    AutoClickerSettings getAutoClicker() const;
+    const AutoClickerSettings& getAutoClicker() const;
 
     // Default bindings (WASD layout)
     void loadDefaultBindings();
@@ -107,10 +108,12 @@ private:
     bool alt_held_ = false;
 
     MouseLookSettings mouse_look_;
-    float mouse_dx_ = 0.0f;
-    float mouse_dy_ = 0.0f;
+    mutable float mouse_dx_ = 0.0f;
+    mutable float mouse_dy_ = 0.0f;
 
     AutoClickerSettings auto_clicker_;
+    double clicker_timer_ = 0.0;
+    bool clicker_state_pressed_ = false;
 };
 
 } // namespace ghostpad

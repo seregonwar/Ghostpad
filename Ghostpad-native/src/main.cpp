@@ -6,11 +6,9 @@
 #include "ui/app.h"
 #include <cstdio>
 #include <cstdlib>
-#include <sys/stat.h>
-#include <unistd.h>
-#include <libgen.h>
 #include <string>
 #include <signal.h>
+#include <filesystem>
 #include <GLFW/glfw3.h>
 
 #ifdef __APPLE__
@@ -22,9 +20,9 @@ static std::string getDefaultDataDir() {
     if (!home) home = getenv("USERPROFILE");
     if (!home) home = ".";
 
-    std::string dir = std::string(home) + "/.ghostpad";
-    mkdir(dir.c_str(), 0755);
-    return dir;
+    std::filesystem::path dir = std::filesystem::path(home) / ".ghostpad";
+    std::filesystem::create_directories(dir);
+    return dir.string();
 }
 
 int main(int argc, char** argv) {

@@ -4,6 +4,8 @@
 // Licensed under the GNU General Public License v3.0. See LICENSE file for details.
 
 #include "network/ghostpad_client.h"
+#include "network/network_scanner.h"
+#include "network/socket_util.h"
 #include <cstring>
 #include <vector>
 #include <thread>
@@ -11,24 +13,6 @@
 #include <map>
 #include <mutex>
 #include <atomic>
-#include <ifaddrs.h>
-#include <net/if.h>
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <sys/select.h>
-
-#ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#pragma comment(lib, "ws2_32.lib")
-#else
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#endif
 
 namespace ghostpad {
 
@@ -41,36 +25,6 @@ static void initSockets() {
     WSAStartup(MAKEWORD(2, 2), &wsa);
 #endif
     sockets_initialized = true;
-}
-
-static void setNonBlocking(int sock, bool nb) {
-#ifdef _WIN32
-    u_long mode = nb ? 1 : 0;
-    ioctlsocket(sock, FIONBIO, &mode);
-#else
-    int flags = fcntl(sock, F_GETFL, 0);
-    if (nb) flags |= O_NONBLOCK;
-    else flags &= ~O_NONBLOCK;
-    fcntl(sock, F_SETFL, flags);
-#endif
-}
-
-static void setNoSigPipe(int sock) {
-#ifdef __APPLE__
-    int opt = 1;
-    setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
-#elif !defined(_WIN32)
-    (void)sock;
-#endif
-}
-
-static void closeSocket(int sock) {
-    if (sock < 0) return;
-#ifdef _WIN32
-    closesocket(sock);
-#else
-    close(sock);
-#endif
 }
 
 GhostpadClient::GhostpadClient() {
@@ -88,27 +42,27 @@ bool GhostpadClient::connect(const std::string& ip, int port, int timeout_ms) {
      *    the instance mutex during select(), which would freeze the GUI thread.
      */
     socket_t temp_sock = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (temp_sock < 0) return false;
+    if (temp_sock == INVALID_SOCKET_VAL) return false;
 
-    setNoSigPipe(static_cast<int>(temp_sock));
-    setNonBlocking(static_cast<int>(temp_sock), true);
+    setNoSigPipe(temp_sock);
+    setNonBlocking(temp_sock, true);
 
     struct sockaddr_in addr = {};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(static_cast<uint16_t>(port));
     inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
 
-    int ret = ::connect(static_cast<int>(temp_sock), (struct sockaddr*)&addr, sizeof(addr));
+    int ret = ::connect(temp_sock, (struct sockaddr*)&addr, sizeof(addr));
 
     if (ret < 0) {
 #ifdef _WIN32
         if (WSAGetLastError() != WSAEWOULDBLOCK) {
-            closeSocket(static_cast<int>(temp_sock));
+            closeSocket(temp_sock);
             return false;
         }
 #else
         if (errno != EINPROGRESS) {
-            closeSocket(static_cast<int>(temp_sock));
+            closeSocket(temp_sock);
             return false;
         }
 #endif
@@ -116,40 +70,40 @@ bool GhostpadClient::connect(const std::string& ip, int port, int timeout_ms) {
 
     fd_set fdset;
     FD_ZERO(&fdset);
-    FD_SET(static_cast<int>(temp_sock), &fdset);
+    FD_SET(temp_sock, &fdset);
     struct timeval tv;
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
 
     ret = select(static_cast<int>(temp_sock) + 1, nullptr, &fdset, nullptr, &tv);
     if (ret <= 0) {
-        closeSocket(static_cast<int>(temp_sock));
+        closeSocket(temp_sock);
         return false;
     }
 
     int so_error = 0;
     socklen_t len = sizeof(so_error);
-    getsockopt(static_cast<int>(temp_sock), SOL_SOCKET, SO_ERROR, (char*)&so_error, &len);
+    getsockopt(temp_sock, SOL_SOCKET, SO_ERROR, (char*)&so_error, &len);
     if (so_error != 0) {
-        closeSocket(static_cast<int>(temp_sock));
+        closeSocket(temp_sock);
         return false;
     }
 
-    setNonBlocking(static_cast<int>(temp_sock), false);
+    setNonBlocking(temp_sock, false);
 
     // Disable Nagle's algorithm
     int flag = 1;
-    setsockopt(static_cast<int>(temp_sock), IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+    setsockopt(temp_sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
 
     // Lock the instance state mutex briefly only to commit the successfully opened socket
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (connected_) {
+        if (connected_ && sock_ != INVALID_SOCKET_VAL) {
             try {
                 auto disc = buildDiscPacket();
-                ::send(static_cast<int>(sock_), (const char*)disc.data(), disc.size(), 0);
+                ::send(sock_, (const char*)disc.data(), static_cast<int>(disc.size()), 0);
             } catch (...) {}
-            closeSocket(static_cast<int>(sock_));
+            closeSocket(sock_);
         }
         sock_ = temp_sock;
         connected_ = true;
@@ -163,13 +117,15 @@ void GhostpadClient::disconnect() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!connected_) return;
 
-    try {
-        auto disc = buildDiscPacket();
-        ::send(static_cast<int>(sock_), (const char*)disc.data(), disc.size(), 0);
-    } catch (...) {}
+    if (sock_ != INVALID_SOCKET_VAL) {
+        try {
+            auto disc = buildDiscPacket();
+            ::send(sock_, (const char*)disc.data(), static_cast<int>(disc.size()), 0);
+        } catch (...) {}
 
-    closeSocket(static_cast<int>(sock_));
-    sock_ = -1;
+        closeSocket(sock_);
+        sock_ = INVALID_SOCKET_VAL;
+    }
     connected_ = false;
     host_.clear();
     port_ = GPAD_PORT;
@@ -177,14 +133,14 @@ void GhostpadClient::disconnect() {
 
 bool GhostpadClient::sendPadState(const GpadNetworkState& state) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!connected_ || sock_ < 0) return false;
+    if (!connected_ || sock_ == INVALID_SOCKET_VAL) return false;
 
     auto packet = buildGpadPacket(state);
-    int sent = ::send(static_cast<int>(sock_), (const char*)packet.data(), packet.size(), 0);
+    int sent = ::send(sock_, (const char*)packet.data(), static_cast<int>(packet.size()), 0);
     if (sent == static_cast<int>(packet.size())) return true;
 
-    closeSocket(static_cast<int>(sock_));
-    sock_ = -1;
+    closeSocket(sock_);
+    sock_ = INVALID_SOCKET_VAL;
     connected_ = false;
     return false;
 }
@@ -201,19 +157,15 @@ GhostpadStatus GhostpadClient::getStatus() const {
 CtrlResult GhostpadClient::sendCtrlPacket(const std::string& ip, const uint8_t* data, size_t len, int timeout_ms) {
     CtrlResult result;
 
-    int sock = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
+    socket_t sock = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (sock == INVALID_SOCKET_VAL) {
         result.error = "Socket creation failed";
         return result;
     }
 
     setNoSigPipe(sock);
-
-    struct timeval tv;
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+    setSocketTimeout(sock, SO_SNDTIMEO, timeout_ms);
+    setSocketTimeout(sock, SO_RCVTIMEO, timeout_ms);
 
     struct sockaddr_in addr = {};
     addr.sin_family = AF_INET;
@@ -221,7 +173,7 @@ CtrlResult GhostpadClient::sendCtrlPacket(const std::string& ip, const uint8_t* 
     inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
 
     if (::connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        result.error = "Connection failed: " + std::string(strerror(errno));
+        result.error = "Connection failed: " + getLastSocketErrorString();
         closeSocket(sock);
         return result;
     }
@@ -229,7 +181,7 @@ CtrlResult GhostpadClient::sendCtrlPacket(const std::string& ip, const uint8_t* 
     int flag = 1;
     setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
 
-    int sent = ::send(sock, (const char*)data, len, 0);
+    int sent = ::send(sock, (const char*)data, static_cast<int>(len), 0);
     closeSocket(sock);
 
     if (sent == static_cast<int>(len)) {
@@ -262,10 +214,9 @@ CtrlResult GhostpadClient::terminatePayload(const std::string& ip, int timeout_m
     return sendCtrlPacket(ip, packet.data(), packet.size(), timeout_ms);
 }
 
-
 bool GhostpadClient::probeHostPort(const std::string& ip, int port, int timeout_ms) {
-    int sock = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) return false;
+    socket_t sock = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (sock == INVALID_SOCKET_VAL) return false;
 
     setNonBlocking(sock, true);
 
@@ -283,7 +234,7 @@ bool GhostpadClient::probeHostPort(const std::string& ip, int port, int timeout_
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
 
-    int ret = select(sock + 1, nullptr, &fdset, nullptr, &tv);
+    int ret = select(static_cast<int>(sock) + 1, nullptr, &fdset, nullptr, &tv);
 
     bool reachable = false;
     if (ret > 0) {
@@ -360,25 +311,7 @@ std::vector<ScanResult> GhostpadClient::scanNetwork(const std::string& subnet, i
 }
 
 std::string GhostpadClient::getLocalSubnet() {
-    struct ifaddrs* ifaddr = nullptr;
-    if (getifaddrs(&ifaddr) != 0) return "192.168.1";
-
-    std::string subnet = "192.168.1";
-    for (struct ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
-        if (ifa->ifa_flags & IFF_LOOPBACK) continue;
-
-        char buf[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &((struct sockaddr_in*)ifa->ifa_addr)->sin_addr, buf, sizeof(buf));
-        std::string addr(buf);
-        auto pos = addr.rfind('.');
-        if (pos != std::string::npos) {
-            subnet = addr.substr(0, pos);
-        }
-    }
-
-    freeifaddrs(ifaddr);
-    return subnet;
+    return NetworkScanner::getLocalSubnet();
 }
 
 } // namespace ghostpad

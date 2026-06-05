@@ -192,6 +192,9 @@ void App::update(double dt) {
         if (macro_engine.isPlaying()) {
             macro_engine.updatePlayback(16.667);
         }
+
+        // Update keyboard clickers and timings
+        keyboard.update(16.667);
         
         // Fetch current active input state
         PadStateInput ps = getCurrentPadState();

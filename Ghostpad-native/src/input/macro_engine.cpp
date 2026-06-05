@@ -65,7 +65,7 @@ void MacroEngine::updatePlayback(double delta_ms) {
     // Apply all signals that are due
     while (playback_index_ < playback_signals_.size() &&
            playback_signals_[playback_index_].time_ms <= elapsed) {
-        auto& signal = playback_signals_[playback_index_];
+        const auto& signal = playback_signals_[playback_index_];
         if (signal.button_id < 18) {
             current_state_.button_states[signal.button_id] = (signal.value > 0);
         } else if (signal.button_id == 18) {
@@ -89,11 +89,11 @@ void MacroEngine::updatePlayback(double delta_ms) {
     }
 }
 
-PadStateInput MacroEngine::getPlaybackState() const {
+const PadStateInput& MacroEngine::getPlaybackState() const {
     return current_state_;
 }
 
-std::vector<MacroSignal> MacroEngine::getRecordedSignals() const {
+const std::vector<MacroSignal>& MacroEngine::getRecordedSignals() const {
     return recorded_signals_;
 }
 
@@ -128,7 +128,7 @@ std::string MacroEngine::exportAsPython(const std::vector<MacroSignal>& signals,
     oss << "    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)\n\n";
     oss << "    signals = [\n";
 
-    for (auto& sig : signals) {
+    for (const auto& sig : signals) {
         oss << "        (" << sig.time_ms << ", " << sig.button_id << ", " << sig.value << "),\n";
     }
 
@@ -157,7 +157,7 @@ std::vector<MacroSignal> MacroEngine::importSignalsFromJson(const std::string& j
     try {
         nlohmann::json j = nlohmann::json::parse(json);
         if (j.is_array()) {
-            for (auto& item : j) {
+            for (const auto& item : j) {
                 MacroSignal sig;
                 sig.button_id = item.value("button_id", 0);
                 sig.value = item.value("value", 0);

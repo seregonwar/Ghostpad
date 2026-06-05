@@ -12,6 +12,8 @@
 #include <mutex>
 #include "protocol/gpad_packet.h"
 
+#include "network/socket_util.h"
+
 namespace ghostpad {
 
 struct GhostpadStatus {
@@ -65,12 +67,7 @@ public:
     static std::string getLocalSubnet();
 
 private:
-#ifdef _WIN32
-    using socket_t = unsigned long long;
-#else
-    using socket_t = int;
-#endif
-    socket_t sock_ = -1;
+    socket_t sock_ = INVALID_SOCKET_VAL;
     bool connected_ = false;
     std::string host_;
     int port_ = GPAD_PORT;

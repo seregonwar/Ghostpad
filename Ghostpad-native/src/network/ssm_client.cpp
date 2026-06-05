@@ -4,46 +4,23 @@
 // Licensed under the GNU General Public License v3.0. See LICENSE file for details.
 
 #include "network/ssm_client.h"
+#include "network/socket_util.h"
 #include <cstring>
 #include <fstream>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <errno.h>
-
-#ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#else
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#endif
+#include <vector>
 
 namespace ghostpad {
-
-static void closeSocket(int sock) {
-    if (sock < 0) return;
-#ifdef _WIN32
-    closesocket(sock);
-#else
-    close(sock);
-#endif
-}
 
 SsmResult SsmClient::sendCommand(const std::string& ip, const std::string& cmd, int timeout_ms) {
     SsmResult result;
 
-    int sock = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
+    socket_t sock = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (sock == INVALID_SOCKET_VAL) {
         result.response = "ERR socket creation failed";
         return result;
     }
 
-    struct timeval tv;
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+    setSocketTimeout(sock, SO_RCVTIMEO, timeout_ms);
 
     struct sockaddr_in addr = {};
     addr.sin_family = AF_INET;
@@ -51,13 +28,13 @@ SsmResult SsmClient::sendCommand(const std::string& ip, const std::string& cmd, 
     inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
 
     if (::connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        result.response = "ERR connect: " + std::string(strerror(errno));
+        result.response = "ERR connect: " + getLastSocketErrorString();
         closeSocket(sock);
         return result;
     }
 
     std::string full_cmd = cmd + "\n";
-    ::send(sock, full_cmd.c_str(), full_cmd.size(), 0);
+    ::send(sock, full_cmd.c_str(), static_cast<int>(full_cmd.size()), 0);
 
     char buf[256] = {};
     int n = ::recv(sock, buf, sizeof(buf) - 1, 0);
@@ -115,16 +92,13 @@ SsmResult SsmClient::deployElf(const std::string& ip, const std::string& elf_pat
         return result;
     }
 
-    int sock = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
+    socket_t sock = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (sock == INVALID_SOCKET_VAL) {
         result.response = "Socket creation failed";
         return result;
     }
 
-    struct timeval tv;
-    tv.tv_sec = 10;
-    tv.tv_usec = 0;
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+    setSocketTimeout(sock, SO_SNDTIMEO, 10000);
 
     struct sockaddr_in addr = {};
     addr.sin_family = AF_INET;
@@ -132,7 +106,7 @@ SsmResult SsmClient::deployElf(const std::string& ip, const std::string& elf_pat
     inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
 
     if (::connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        result.response = "Connect failed: " + std::string(strerror(errno));
+        result.response = "Connect failed: " + getLastSocketErrorString();
         closeSocket(sock);
         return result;
     }
@@ -140,7 +114,7 @@ SsmResult SsmClient::deployElf(const std::string& ip, const std::string& elf_pat
     int flag = 1;
     setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
 
-    ::send(sock, data.data(), data.size(), 0);
+    ::send(sock, data.data(), static_cast<int>(data.size()), 0);
     closeSocket(sock);
 
     result.ok = true;

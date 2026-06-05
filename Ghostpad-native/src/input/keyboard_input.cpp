@@ -58,6 +58,35 @@ void KeyboardInput::loadDefaultBindings() {
     mouse_look_.sensitivity = 3.0f;
 }
 
+void KeyboardInput::update(double dt_ms) {
+    if (!auto_clicker_.enabled) {
+        clicker_timer_ = 0.0;
+        clicker_state_pressed_ = false;
+        return;
+    }
+
+    // Is the key bound to the target button_id held down?
+    auto it = button_bindings_.find(auto_clicker_.button_id);
+    bool trigger_held = false;
+    if (it != button_bindings_.end()) {
+        auto it_state = key_states_.find(it->second.glfw_key);
+        trigger_held = (it_state != key_states_.end() && it_state->second);
+    }
+
+    if (!trigger_held) {
+        clicker_timer_ = 0.0;
+        clicker_state_pressed_ = false;
+        return;
+    }
+
+    clicker_timer_ += dt_ms;
+    double threshold = clicker_state_pressed_ ? auto_clicker_.hold_ms : auto_clicker_.gap_ms;
+    if (clicker_timer_ >= threshold) {
+        clicker_timer_ -= threshold;
+        clicker_state_pressed_ = !clicker_state_pressed_;
+    }
+}
+
 void KeyboardInput::setKeyPressed(int glfw_key, bool ctrl, bool shift, bool alt, bool pressed) {
     key_states_[glfw_key] = pressed;
     ctrl_held_ = ctrl;
@@ -75,7 +104,7 @@ KeyBinding KeyboardInput::getButtonBinding(int button_id) const {
     return {};
 }
 
-std::map<int, KeyBinding> KeyboardInput::getAllBindings() const {
+const std::map<int, KeyBinding>& KeyboardInput::getAllBindings() const {
     return button_bindings_;
 }
 
@@ -106,7 +135,7 @@ int KeyboardInput::getStickBinding(const std::string& direction) const {
     return 0;
 }
 
-StickBindings KeyboardInput::getStickBindings() const {
+const StickBindings& KeyboardInput::getStickBindings() const {
     return stick_bindings_;
 }
 
@@ -135,7 +164,7 @@ void KeyboardInput::setAutoClicker(const AutoClickerSettings& settings) {
     auto_clicker_ = settings;
 }
 
-AutoClickerSettings KeyboardInput::getAutoClicker() const {
+const AutoClickerSettings& KeyboardInput::getAutoClicker() const {
     return auto_clicker_;
 }
 
@@ -149,11 +178,15 @@ PadStateInput KeyboardInput::getPadState() const {
     PadStateInput pad = {};
 
     // Button bindings
-    for (auto& [id, binding] : button_bindings_) {
+    for (const auto& [id, binding] : button_bindings_) {
         bool match = isKeyHeld(key_states_, binding.glfw_key);
-        // Also check ctrl/shift/alt modifiers
         if (match) {
-            pad.button_states[id] = true;
+            // Apply auto-clicker state override if active and matched
+            if (auto_clicker_.enabled && id == auto_clicker_.button_id) {
+                pad.button_states[id] = clicker_state_pressed_;
+            } else {
+                pad.button_states[id] = true;
+            }
         }
     }
 
@@ -180,11 +213,13 @@ PadStateInput KeyboardInput::getPadState() const {
                                          float(MIN), float(MAX)));
         ry = static_cast<int>(std::clamp(CENTER + mouse_dy_ * mouse_look_.sensitivity * 10.0f,
                                          float(MIN), float(MAX)));
+        // Decay/reset mouse deltas so they don't stick forever
+        mouse_dx_ = 0.0f;
+        mouse_dy_ = 0.0f;
     }
 
     // Trigger keys (L2/R2 as analog values)
     if (isKeyHeld(key_states_, stick_bindings_.lx_neg) && isKeyHeld(key_states_, stick_bindings_.lx_pos)) {
-        // Both directions held = center
         lx = CENTER;
     }
     if (isKeyHeld(key_states_, stick_bindings_.ly_neg) && isKeyHeld(key_states_, stick_bindings_.ly_pos)) {
@@ -205,11 +240,6 @@ PadStateInput KeyboardInput::getPadState() const {
     return pad;
 }
 
-/*
- *  +--------------------------------------------------------+
- *  |                 PROFILE SERIALIZATION                  |
- *  +--------------------------------------------------------+
- */
 void KeyboardInput::loadFromProfile(const ProfileBindingEntry& profile) {
     button_bindings_.clear();
     for (const auto& b : profile.button_bindings) {

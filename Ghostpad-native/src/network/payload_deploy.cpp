@@ -5,43 +5,13 @@
 
 #include "network/payload_deploy.h"
 #include "protocol/gpad_packet.h"
+#include "network/socket_util.h"
 #include <cstring>
 #include <fstream>
 #include <regex>
 #include <thread>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <errno.h>
-
-#ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#else
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#endif
 
 namespace ghostpad {
-
-static void closeSocket(int sock) {
-    if (sock < 0) return;
-#ifdef _WIN32
-    closesocket(sock);
-#else
-    close(sock);
-#endif
-}
-
-static void setNoSigPipe(int sock) {
-#ifdef __APPLE__
-    int opt = 1;
-    setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
-#elif !defined(_WIN32)
-    (void)sock;
-#endif
-}
 
 PayloadDeployer::PayloadDeployer() {
     status_.phase = "idle";
@@ -72,13 +42,10 @@ DeployStatus PayloadDeployer::getStatus() const {
 }
 
 bool PayloadDeployer::portOpen(const std::string& host, int port, int timeout_ms) {
-    int sock = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) return false;
+    socket_t sock = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (sock == INVALID_SOCKET_VAL) return false;
 
-    struct timeval tv;
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+    setSocketTimeout(sock, SO_SNDTIMEO, timeout_ms);
 
     struct sockaddr_in addr = {};
     addr.sin_family = AF_INET;
@@ -108,15 +75,11 @@ bool PayloadDeployer::deployElf(const std::string& host, const std::string& elf_
     std::vector<char> data(size);
     if (!file.read(data.data(), size)) return false;
 
-    int sock = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) return false;
+    socket_t sock = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (sock == INVALID_SOCKET_VAL) return false;
 
     setNoSigPipe(sock);
-
-    struct timeval tv;
-    tv.tv_sec = 30;
-    tv.tv_usec = 0;
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+    setSocketTimeout(sock, SO_SNDTIMEO, 30000);
 
     struct sockaddr_in addr = {};
     addr.sin_family = AF_INET;
@@ -131,7 +94,7 @@ bool PayloadDeployer::deployElf(const std::string& host, const std::string& elf_
     int flag = 1;
     setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
 
-    ssize_t sent = ::send(sock, data.data(), data.size(), 0);
+    ssize_t sent = ::send(sock, data.data(), static_cast<int>(data.size()), 0);
     closeSocket(sock);
     return sent == static_cast<ssize_t>(data.size());
 }
@@ -139,15 +102,11 @@ bool PayloadDeployer::deployElf(const std::string& host, const std::string& elf_
 bool PayloadDeployer::sendGbnd(const std::string& host, uint64_t virt, uint64_t phys, uint32_t user) {
     auto packet = buildGbndPacket(user, virt, phys);
 
-    int sock = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) return false;
+    socket_t sock = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (sock == INVALID_SOCKET_VAL) return false;
 
     setNoSigPipe(sock);
-
-    struct timeval tv;
-    tv.tv_sec = 3;
-    tv.tv_usec = 0;
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+    setSocketTimeout(sock, SO_SNDTIMEO, 3000);
 
     struct sockaddr_in addr = {};
     addr.sin_family = AF_INET;
@@ -162,7 +121,7 @@ bool PayloadDeployer::sendGbnd(const std::string& host, uint64_t virt, uint64_t 
     int flag = 1;
     setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
 
-    ::send(sock, (const char*)packet.data(), packet.size(), 0);
+    ::send(sock, (const char*)packet.data(), static_cast<int>(packet.size()), 0);
     closeSocket(sock);
     return true;
 }
@@ -171,74 +130,74 @@ void PayloadDeployer::processKlogLine(const std::string& line) {
     fprintf(stderr, "[klog] %s\n", line.c_str());
     fflush(stderr);
     try {
-    // Match physical device
-    static std::regex re_dev_phys(
-        R"(DEVICE_ADDED|DeviceAdded.*?(?:DeviceId|DeviceID|deviceId|deviceID|device id)[:=]\s*0x([0-9a-fA-F]+))",
-        std::regex::icase
-    );
-    static std::regex re_dev_virt(
-        R"(DEVICE_ADDED|DeviceAdded|GetUnassignedDeviceInfo.*?(?:DeviceId|DeviceID|deviceId|deviceID|device id)[:=]\s*0x([0-9a-fA-F]+))",
-        std::regex::icase
-    );
-    static std::regex re_owner(
-        R"(DEVICE_OWNER_CHANGED.*?deviceId=0x([0-9a-fA-F]+).*?userId=0x([0-9a-fA-F]+))",
-        std::regex::icase
-    );
-    static std::regex re_adopted(R"(VDI active|padHandle)", std::regex::icase);
-    static std::regex re_bind_ok(R"(force_bind.*ret=0|MBusBindDeviceWithUserId.*ret=0)", std::regex::icase);
+        static std::regex re_dev_phys(
+            R"(DEVICE_ADDED|DeviceAdded.*?(?:DeviceId|DeviceID|deviceId|deviceID|device id)[:=]\s*0x([0-9a-fA-F]+))",
+            std::regex::icase
+        );
+        static std::regex re_dev_virt(
+            R"(DEVICE_ADDED|DeviceAdded|GetUnassignedDeviceInfo.*?(?:DeviceId|DeviceID|deviceId|deviceID|device id)[:=]\s*0x([0-9a-fA-F]+))",
+            std::regex::icase
+        );
+        static std::regex re_owner(
+            R"(DEVICE_OWNER_CHANGED.*?deviceId=0x([0-9a-fA-F]+).*?userId=0x([0-9a-fA-F]+))",
+            std::regex::icase
+        );
+        static std::regex re_adopted(R"(VDI active|padHandle)", std::regex::icase);
+        static std::regex re_bind_ok(R"(force_bind.*ret=0|MBusBindDeviceWithUserId.*ret=0)", std::regex::icase);
 
-    std::smatch match;
+        std::smatch match;
 
-    if (std::regex_search(line, match, re_dev_phys) && match.size() > 1) {
-        uint64_t dev = 0;
-        try { dev = std::stoull(match[1].str(), nullptr, 16); } catch (...) {}
-        if (dev > 0 && (line.find("capabilityBattery:1") != std::string::npos ||
-                         line.find("Physical") != std::string::npos)) {
-            auto_phys = dev;
-            emitStatus("klog", "Physical controller: 0x" + match[1].str());
+        if (std::regex_search(line, match, re_dev_phys) && match.size() > 1) {
+            uint64_t dev = 0;
+            try { dev = std::stoull(match[1].str(), nullptr, 16); } catch (...) {}
+            if (dev > 0 && (line.find("capabilityBattery:1") != std::string::npos ||
+                             line.find("Physical") != std::string::npos)) {
+                auto_phys = dev;
+                emitStatus("klog", "Physical controller: 0x" + match[1].str());
+            }
         }
-    }
 
-    if (!auto_sent_gbnd_ && std::regex_search(line, match, re_dev_virt) && match.size() > 1) {
-        uint64_t dev = 0;
-        try { dev = std::stoull(match[1].str(), nullptr, 16); } catch (...) {}
-        bool is_virtual = line.find("capabilityBattery:0") != std::string::npos ||
-                          line.find("userId=0xffffffff") != std::string::npos ||
-                          line.find("UserId:0xffffffff") != std::string::npos ||
-                          line.find("remoteplay") != std::string::npos ||
-                          line.find("RemotePlay") != std::string::npos ||
-                          line.find("type:4") != std::string::npos ||
-                          line.find("VDA candidate") != std::string::npos;
-        if (is_virtual && dev > 0) {
-            auto_virt = dev;
-            auto_sent_gbnd_ = true;
-            emitStatus("klog", "Virtual device 0x" + match[1].str() + " detected - sending GBND");
+        if (!auto_sent_gbnd_ && std::regex_search(line, match, re_dev_virt) && match.size() > 1) {
+            uint64_t dev = 0;
+            try { dev = std::stoull(match[1].str(), nullptr, 16); } catch (...) {}
+            bool is_virtual = line.find("capabilityBattery:0") != std::string::npos ||
+                              line.find("userId=0xffffffff") != std::string::npos ||
+                              line.find("UserId:0xffffffff") != std::string::npos ||
+                              line.find("remoteplay") != std::string::npos ||
+                              line.find("RemotePlay") != std::string::npos ||
+                              line.find("type:4") != std::string::npos ||
+                              line.find("VDA candidate") != std::string::npos;
+            if (is_virtual && dev > 0) {
+                auto_virt = dev;
+                auto_sent_gbnd_ = true;
+                emitStatus("klog", "Virtual device 0x" + match[1].str() + " detected - sending GBND");
 
-            std::thread([this, dev]() {
-                std::this_thread::sleep_for(std::chrono::milliseconds(400));
-                sendGbnd(klog_host_, auto_virt, auto_phys, 0);
-            }).detach();
+                std::thread([this]() {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+                    sendGbnd(klog_host_, auto_virt, auto_phys, 0);
+                }).detach();
+            }
         }
-    }
 
-    if (std::regex_search(line, match, re_owner)) {
-        auto_bound = true;
-        emitStatus("klog", "Controller bound: dev=0x" + match[1].str());
-    }
+        if (std::regex_search(line, match, re_owner)) {
+            auto_bound = true;
+            emitStatus("klog", "Controller bound: dev=0x" + match[1].str());
+        }
 
-    if (std::regex_search(line, re_adopted)) {
-        auto_adopted = true;
-        emitStatus("klog", "VDI active - GPAD input should work");
-    }
+        if (std::regex_search(line, re_adopted)) {
+            auto_adopted = true;
+            emitStatus("klog", "VDI active - GPAD input should work");
+        }
 
-    if (std::regex_search(line, re_bind_ok)) {
-        auto_bound = true;
-        emitStatus("klog", "MBus bind OK");
-    }
+        if (std::regex_search(line, re_bind_ok)) {
+            auto_bound = true;
+            emitStatus("klog", "MBus bind OK");
+        }
     } catch (...) {}
 }
 
-void PayloadDeployer::processKlogData(const std::string& host, int sock) {
+void PayloadDeployer::processKlogData(const std::string& host, socket_t sock) {
+    (void)host;
     static std::string buffer;
     char buf[4096];
 
@@ -250,7 +209,7 @@ void PayloadDeployer::processKlogData(const std::string& host, int sock) {
         tv.tv_sec = 0;
         tv.tv_usec = 500000;
 
-        int ret = select(sock + 1, &fds, nullptr, nullptr, &tv);
+        int ret = select(static_cast<int>(sock) + 1, &fds, nullptr, nullptr, &tv);
         if (ret < 0) break;
         if (ret == 0) continue;
 
@@ -271,9 +230,9 @@ void PayloadDeployer::processKlogData(const std::string& host, int sock) {
 void PayloadDeployer::stopKlogWatcher() {
     if (klog_running_) {
         klog_running_ = false;
-        if (klog_sock_ >= 0) {
+        if (klog_sock_ != INVALID_SOCKET_VAL) {
             closeSocket(klog_sock_);
-            klog_sock_ = -1;
+            klog_sock_ = INVALID_SOCKET_VAL;
         }
         if (klog_thread_.joinable()) {
             klog_thread_.join();
@@ -298,7 +257,7 @@ PayloadDeployer::Result PayloadDeployer::ensurePayloadRunning(const std::string&
     // Start Klog watcher if auto-bind enabled
     if (options.auto_bind_via_klog) {
         klog_sock_ = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (klog_sock_ >= 0) {
+        if (klog_sock_ != INVALID_SOCKET_VAL) {
             struct sockaddr_in addr = {};
             addr.sin_family = AF_INET;
             addr.sin_port = htons(KLOG_PORT);
@@ -307,11 +266,11 @@ PayloadDeployer::Result PayloadDeployer::ensurePayloadRunning(const std::string&
             if (::connect(klog_sock_, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
                 klog_host_ = host;
                 klog_running_ = true;
-                klog_thread_ = std::thread(&PayloadDeployer::processKlogData, this, host, static_cast<int>(klog_sock_));
+                klog_thread_ = std::thread(&PayloadDeployer::processKlogData, this, host, klog_sock_);
                 emitStatus("klog", "Klog watcher started");
             } else {
                 closeSocket(klog_sock_);
-                klog_sock_ = -1;
+                klog_sock_ = INVALID_SOCKET_VAL;
                 emitStatus("klog", "Klog port unavailable - continuing without auto-bind");
             }
         }

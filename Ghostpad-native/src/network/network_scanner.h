@@ -20,8 +20,6 @@ class NetworkScanner {
 public:
     static std::string getLocalSubnet();
     static std::vector<NetworkInterface> getInterfaces();
-
-private:
     static std::string getSubnetFromAddress(const std::string& addr);
 };
 

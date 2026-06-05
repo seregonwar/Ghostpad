@@ -50,7 +50,7 @@ class App {
 public:
     static constexpr int MAX_CONTROLLER_SLOTS = 4;
 
-    App(const std::string& data_dir);
+    explicit App(const std::string& data_dir);
     ~App();
 
     void init();

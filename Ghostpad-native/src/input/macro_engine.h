@@ -26,9 +26,9 @@ public:
     void stopPlayback();
     bool isPlaying() const;
     void updatePlayback(double delta_ms);
-    PadStateInput getPlaybackState() const;
+    const PadStateInput& getPlaybackState() const;
 
-    std::vector<MacroSignal> getRecordedSignals() const;
+    const std::vector<MacroSignal>& getRecordedSignals() const;
     void loadSignals(const std::vector<MacroSignal>& signals);
 
     static std::vector<MacroSignal> normalizeSignals(const std::vector<MacroSignal>& signals);

@@ -119,6 +119,13 @@ configure_file(
   COPYONLY
 )
 
+# Compiler warning flags
+if(MSVC)
+  target_compile_options(ghostpad-native PRIVATE /W4)
+else()
+  target_compile_options(ghostpad-native PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 if(WIN32)
   target_link_libraries(ghostpad-native PRIVATE ws2_32)
   target_sources(ghostpad-native PRIVATE ${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp)
@@ -144,3 +151,38 @@ if(APPLE)
   )
   target_sources(ghostpad-native PRIVATE ${RESOURCE_FILES})
 endif()
+
+# ============================================================================
+#                                 TESTS TARGET
+# ============================================================================
+
+set(TEST_SOURCES
+  src/tests/test_main.cpp
+  src/storage/console_store.cpp
+  src/storage/settings_store.cpp
+  src/storage/profile_store.cpp
+  src/storage/project_store.cpp
+  src/network/network_scanner.cpp
+)
+
+add_executable(ghostpad-tests ${TEST_SOURCES})
+target_include_directories(ghostpad-tests PRIVATE
+  ${CMAKE_CURRENT_BINARY_DIR}
+  src
+)
+set_target_properties(ghostpad-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON
+)
+target_link_libraries(ghostpad-tests PRIVATE nlohmann_json::nlohmann_json)
+
+if(MSVC)
+  target_compile_options(ghostpad-tests PRIVATE /W4)
+else()
+  target_compile_options(ghostpad-tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(WIN32)
+  target_link_libraries(ghostpad-tests PRIVATE ws2_32 iphlpapi)
+endif()
+

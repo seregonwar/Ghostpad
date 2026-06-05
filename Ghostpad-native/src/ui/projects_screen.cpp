@@ -264,11 +264,6 @@ void renderProjectsScreen(App& app) {
     ui::endCard();
 }
 
-/*
- *  +--------------------------------------------------------+
- *  |           IMPORT SIGNALS POPUP (shared)                |
- *  +--------------------------------------------------------+
- */
 static void renderImportSignalsPopup(App& app, std::vector<MacroSignal>& targetSignals) {
     const auto& p = ui::colors();
 
@@ -349,11 +344,6 @@ static void renderImportSignalsPopup(App& app, std::vector<MacroSignal>& targetS
     ImGui::PopStyleVar();
 }
 
-/*
- *  +--------------------------------------------------------+
- *  |      PYTHON EXPORT POPUP (shared)                      |
- *  +--------------------------------------------------------+
- */
 static void renderPythonExportPopup(App& app, const std::string& pyCode, const std::string& defName) {
     const auto& p = ui::colors();
 
@@ -404,11 +394,6 @@ static void renderPythonExportPopup(App& app, const std::string& pyCode, const s
     ImGui::PopStyleVar();
 }
 
-/*
- *  +--------------------------------------------------------+
- *  |           VISUAL MACRO SIGNAL TIMELINE EDITOR          |
- *  +--------------------------------------------------------+
- */
 static void renderSignalEditor(App& app, const Project& proj) {
     const auto& p = ui::colors();
     float avail_w = ImGui::GetContentRegionAvail().x;

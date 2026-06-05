@@ -34,7 +34,7 @@ public:
 
     void setRemap(int from_button, int to_button);
     void clearRemaps();
-    std::vector<GamepadRemap> getAllRemaps() const;
+    const std::vector<GamepadRemap>& getAllRemaps() const;
 
 private:
     std::vector<GamepadRemap> remaps_;

@@ -13,6 +13,8 @@
 #include <vector>
 #include <chrono>
 
+#include "network/socket_util.h"
+
 namespace ghostpad {
 
 struct DeployStatus {
@@ -62,13 +64,13 @@ private:
     static bool sendGbnd(const std::string& host, uint64_t virt, uint64_t phys, uint32_t user = 0);
 
     void processKlogLine(const std::string& line);
-    void processKlogData(const std::string& host, int sock);
+    void processKlogData(const std::string& host, socket_t sock);
 
     DeployStatus status_;
     mutable std::mutex mutex_;
     std::thread klog_thread_;
     std::atomic<bool> klog_running_{false};
-    int klog_sock_ = -1;
+    socket_t klog_sock_ = INVALID_SOCKET_VAL;
     std::string klog_host_;
     DeployStatusCallback status_callback_;
     bool auto_sent_gbnd_ = false;

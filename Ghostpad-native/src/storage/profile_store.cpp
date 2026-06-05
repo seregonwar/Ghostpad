@@ -10,7 +10,7 @@
 #include <random>
 #include <sstream>
 #include <iomanip>
-#include <sys/stat.h>
+#include <filesystem>
 #include <algorithm>
 
 namespace ghostpad {
@@ -36,7 +36,7 @@ static std::string generateUUID() {
 }
 
 ProfileStore::ProfileStore(const std::string& data_dir) {
-    mkdir(data_dir.c_str(), 0755);
+    std::filesystem::create_directories(data_dir);
     file_path_ = data_dir + "/ghostpad-profiles.json";
 
     std::ifstream test(file_path_);

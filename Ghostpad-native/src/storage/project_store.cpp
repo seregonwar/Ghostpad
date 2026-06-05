@@ -9,7 +9,7 @@
 #include <random>
 #include <sstream>
 #include <iomanip>
-#include <sys/stat.h>
+#include <filesystem>
 
 namespace ghostpad {
 
@@ -42,7 +42,7 @@ static std::string nowISO() {
 }
 
 ProjectStore::ProjectStore(const std::string& data_dir) {
-    mkdir(data_dir.c_str(), 0755);
+    std::filesystem::create_directories(data_dir);
     file_path_ = data_dir + "/ghostpad-projects.json";
 }
 
@@ -135,11 +135,6 @@ bool ProjectStore::addCommand(const std::string& project_id, const MacroCommand&
     return false;
 }
 
-/*
- *  +--------------------------------------------------------+
- *  |                 UPDATE MACRO SIGNAL LIST               |
- *  +--------------------------------------------------------+
- */
 bool ProjectStore::updateCommand(const std::string& project_id, const MacroCommand& cmd) {
     auto entries = readAll();
     for (auto& e : entries) {

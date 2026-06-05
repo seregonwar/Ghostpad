@@ -103,7 +103,7 @@ PadStateInput GamepadInput::getPadState(int device_index) const {
     }
 
     // Apply remaps
-    for (auto& remap : remaps_) {
+    for (const auto& remap : remaps_) {
         if (pad.button_states[remap.from_button]) {
             pad.button_states[remap.from_button] = false;
             pad.button_states[remap.to_button] = true;
@@ -152,7 +152,7 @@ void GamepadInput::clearRemaps() {
     remaps_.clear();
 }
 
-std::vector<GamepadRemap> GamepadInput::getAllRemaps() const {
+const std::vector<GamepadRemap>& GamepadInput::getAllRemaps() const {
     return remaps_;
 }
 
