@@ -122,7 +122,7 @@ Ghostpad is designed for local-network control, diagnostics, development, and co
 | ESP32 bridge | `esp32-ghostpad/` | Firmware for WiFi, web UI, BLE HID host, USB HID, subnet scan, API, and WebSocket streaming. |
 | Desktop GUI | `Ghostpad-native/` | Native C++17 (GLFW/ImGui) cross-platform client with advanced controller, macro, deployment, and console-management features. |
 | VDA probe | `tools/vda_probe/` | Diagnostic payload for fingerprinting VDA byte patterns and MBus symbols. |
-| Research notes | `virtualDS5research.md` | Technical write-up for the virtual DualSense research and implementation. |
+| Research notes | `docs/virtualDS5research.md` | Technical write-up for the virtual DualSense research and implementation. |
 
 ---
 
@@ -512,7 +512,8 @@ tools/
 git-patch/
 └── Development patches
 
-virtualDS5research.md
+docs/
+└── virtualDS5research.md
 ```
 
 ---
