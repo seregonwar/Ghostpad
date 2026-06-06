@@ -1,358 +1,583 @@
-<img width="580" height="601" alt="icon" src="https://github.com/user-attachments/assets/cfdbc55a-60f9-498d-b166-8613a19ab3a0" />
+<p align="center">
+  <img width="180" alt="Ghostpad icon" src="https://github.com/user-attachments/assets/cfdbc55a-60f9-498d-b166-8613a19ab3a0" />
+</p>
 
-# Ghostpad — PS4/PS5 Virtual Controller Bridge
+<h1 align="center">Ghostpad</h1>
+
+<p align="center">
+  <strong>PS4/PS5 Virtual Controller Bridge</strong>
+</p>
+
+<p align="center">
+  Remote-control a jailbroken PS4 or PS5 from a desktop app, web browser, or BLE controller through an ESP32-WROOM-32U bridge.
+</p>
+
+<p align="center">
+  <a href="#overview">Overview</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="#protocol-reference">Protocol Reference</a> ·
+  <a href="#credits">Credits</a>
+</p>
+
+---
 
 https://github.com/user-attachments/assets/30c7f384-4fa8-411c-aa07-84c59eda6037
 
-> Remote-control a jailbroken PS4 or PS5 from any device: PC app, web browser, or real BLE controller — via an ESP32-WROOM-32U bridge that forwards HID input over TCP to a virtual DualSense running on the console.
+## Overview
 
-Ghostpad is a **payload + bridge + GUI** system that creates a **virtual DualSense** on a jailbroken PS4/PS5 and forwards input over LAN. The shell and games see it as a real controller.
+Ghostpad is a **payload + bridge + client** system that creates a virtual DualSense-compatible controller on a jailbroken PS4 or PS5 and forwards controller input over the local network.
+
+The console shell and games see the injected device as a real controller. Input can come from:
+
+- the **Ghostpad Desktop App**;
+- the embedded **ESP32 web controller**;
+- a physical **BLE gamepad** such as DualSense or DualShock 4;
+- keyboard, mouse, XInput, or browser-based controls, depending on the client.
+
+Ghostpad is designed for local-network control, diagnostics, development, and controller redirection workflows.
+
+> **Compatibility note**  
+> Ghostpad targets jailbroken PS4/PS5 environments. Firmware-specific byte patterns may require validation or updates through `tools/vda_probe`.
+
+---
+
+## Features
+
+### Console payload
+
+- Creates a virtual DualSense through the console virtual device API.
+- Receives fixed-size GPAD input packets over TCP.
+- Inserts controller reports into the virtual device stream.
+- Supports runtime VDA patching for self and `SceShellCore`.
+- Provides optional `/dev/klog` capture and TCP streaming.
+- Supports MBus-based virtual/physical device binding.
+
+### ESP32 bridge
+
+- Runs on ESP32-WROOM-32U using ESP-IDF.
+- Provides WiFi STA mode with AP fallback.
+- Hosts an embedded web controller UI.
+- Scans the subnet for PS4/PS5 services.
+- Bridges GPAD input to the console over TCP.
+- Scans, classifies, and connects to BLE HID controllers.
+- Supports TinyUSB HID output for direct USB HID use cases.
+- Streams klog data to dashboard clients through WebSocket.
+
+### Desktop app
+
+- Electron + React Windows client.
+- Virtual controller UI.
+- Keyboard and mouse input.
+- XInput gamepad passthrough.
+- Macro recording and playback.
+- Console manager with LAN scan and auto-deploy workflow.
+- System actions such as reboot, shutdown, rest mode, and disc eject.
+- Optional beeper and LED control when the companion server is available.
+
+---
 
 ## Architecture
 
-```
-                          TCP 6967 (GPAD input)
-  ┌──────────┐  ──────────────────────────────────►  ┌─────────────────┐
-  │  PC GUI   │                                       │  PS4/PS5        │
-  │  (Python) │  ◄─────── klog TCP 3434 ────────────  │  ghostpad.elf   │
-  └──────────┘                                       └─────────────────┘
-                                                              │
-  ┌──────────────┐                                    scePadVirtualDevice
-  │  Browser     │──WiFi──┐                           InsertData (VDI)
-  │  (Web UI)    │        │                                   │
-  └──────────────┘        │                            virtual DualSense
-                          ▼                            @ slot 0
-  ┌──────────────┐  ┌─────────────────────┐
-  │  BLE Gamepad │──│  ESP32-WROOM-32U Bridge    │──USB HID──► PS5
-  │  (DualSense) │  │  (this repo)        │
-  └──────────────┘  └─────────────────────┘
+```text
+                                      TCP 6967
+                               GPAD controller input
+  ┌─────────────────┐      ───────────────────────────►      ┌─────────────────────┐
+  │  Desktop App    │                                       │  PS4 / PS5 Console   │
+  │  Electron/React │      ◄──────── TCP 3434 ────────────  │  ghostpad.elf        │
+  └─────────────────┘             klog stream               └──────────┬──────────┘
+                                                                        │
+                                                                        │
+                                                                        ▼
+                                                              Virtual DualSense
+                                                              via VDA / VDI
+
+  ┌─────────────────┐
+  │  Browser UI     │
+  │  Web Controller │
+  └────────┬────────┘
+           │ WiFi
+           ▼
+  ┌─────────────────┐         TCP 6967          ┌─────────────────────┐
+  │  ESP32 Bridge   │ ────────────────────────► │  PS4 / PS5 Console   │
+  │  Web + BLE HID  │                           │  ghostpad.elf        │
+  └────────┬────────┘                           └─────────────────────┘
+           │
+           │ BLE
+           ▼
+  ┌─────────────────┐
+  │  BLE Gamepad    │
+  │  DS5 / DS4 etc. │
+  └─────────────────┘
+
+
 ```
 
 ### Components
 
-| Component | Directory | Description |
-|-----------|-----------|-------------|
-| **PS4/PS5 Payload** | `payload/` | ELF that runs on jailbroken console, creates virtual DualSense via VDA, listens on TCP 6967 |
-| **ESP32 Bridge** | `esp32-ghostpad/` | ESP32-WROOM-32U firmware: WiFi, web UI, BLE HID host, USB HID, subnet scan, klog bridge |
-| **VDA Probe** | `tools/vda_probe/` | Diagnostic tool to fingerprint libScePad VDA byte-pattern and enumerate MBus symbols |
-| **PC GUI** | root | Python/Qt desktop app for keyboard/mouse/gamepad input (Windows/Linux) |
-
-### How it works
-
-The PS4/PS5 `scePadVirtualDeviceAddDevice` (VDA) normally requires a human user to confirm the virtual device through the shell UI. Ghostpad bypasses this with a **code-cave patch** of `libScePad.sprx` inside `SceShellCore`:
-
-1. Find VDA's IPC dispatch call, redirect through a cave in the function's tail-padding
-2. The cave calls the original dispatcher, pops the leftover return address, returns 0
-3. The device is now real; the assignment screen is dismissed via MBus bind:
-   ```
-   sceMbusDisconnectDevice(physical) → sceMbusBindDeviceWithUserId(virtual, user)
-   ```
-4. Every 16-byte GPAD packet received over TCP is forwarded into `scePadVirtualDeviceInsertData`
-
-Full technical write-up: **[virtualDS5research.md](virtualDS5research.md)**.
+| Component | Path | Purpose |
+|---|---:|---|
+| Console payload | `payload/` | ELF payload for PS4/PS5. Creates the virtual controller, accepts GPAD input, handles VDA/VDI and optional klog streaming. |
+| ESP32 bridge | `esp32-ghostpad/` | Firmware for WiFi, web UI, BLE HID host, USB HID, subnet scan, API, and WebSocket streaming. |
+| Desktop app | `Ghostpad-app/` | Electron + React Windows client with advanced controller, macro, deployment, and console-management features. |
+| VDA probe | `tools/vda_probe/` | Diagnostic payload for fingerprinting VDA byte patterns and MBus symbols. |
+| Research notes | `virtualDS5research.md` | Technical write-up for the virtual DualSense research and implementation. |
 
 ---
 
 ## Quick Start
 
-### Payload (PS4/PS5)
+### 1. Build the console payload
+
+#### PS4
 
 ```bash
 cd payload
-# PS4
+
 make PS4_PAYLOAD_SDK=/path/to/ps4-payload-sdk
-# PS5  
+```
+
+#### PS5
+
+```bash
+cd payload
+
 make PS5_PAYLOAD_SDK=/path/to/ps5-payload-sdk
 ```
 
-Deploy `ghostpad.elf` to the console (port 9021). Build flags:
+Deploy the generated `ghostpad.elf` to the console through the ELF loader, typically on port `9021`.
 
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `GHOSTPAD_ENABLE_INTERNAL_KLOG` | 1 | In-payload /dev/klog reader + TCP bridge |
-| `GHOSTPAD_KLOG_PORT` | 3434 | TCP port for klog streaming |
-| `GHOSTPAD_ENABLE_RUNTIME_VDA_PATCH` | 1 | Patch libScePad VDA in self and SceShellCore |
-| `GHOSTPAD_ENABLE_KLOG_AUTOBIND` | 0 | Auto-bind virtual device from klog DEVICE_ADDED events |
+#### Payload build flags
 
-### ESP32 Bridge
+| Flag | Default | Description |
+|---|---:|---|
+| `GHOSTPAD_ENABLE_INTERNAL_KLOG` | `1` | Enables the in-payload `/dev/klog` reader and TCP bridge. |
+| `GHOSTPAD_KLOG_PORT` | `3434` | TCP port used for klog streaming. |
+| `GHOSTPAD_ENABLE_RUNTIME_VDA_PATCH` | `1` | Enables runtime patching of libScePad VDA paths in self and `SceShellCore`. |
+| `GHOSTPAD_ENABLE_KLOG_AUTOBIND` | `0` | Enables automatic virtual-device binding from klog `DEVICE_ADDED` events. |
+
+---
+
+### 2. Build and flash the ESP32 bridge
 
 ```bash
 cd esp32-ghostpad
-# Copy and fill in your WiFi credentials
+
 cp sdkconfig.private.example sdkconfig.private.defaults
-# Edit sdkconfig.private.defaults with your SSID and password
+# Edit sdkconfig.private.defaults with your WiFi SSID and password.
 
 source ~/esp/esp-idf/export.sh
+
 idf.py set-target esp32
 idf.py build
 idf.py -p /dev/cu.usbmodemXXXX flash
 ```
 
-The ESP32 connects to your WiFi and serves a web UI at `http://ghostpad.local` (mDNS) or via its IP.
+After boot, the ESP32 bridge is available at:
+
+```text
+http://ghostpad.local
+```
+
+If mDNS is unavailable, use the device IP shown by your router or serial monitor.
 
 ---
 
-## ESP32 Bridge Features
+### 3. Start the desktop app
+
+```bash
+cd Ghostpad-app
+
+npm install
+npm run build:react
+npm run start
+```
+
+For a packaged Windows build:
+
+```bash
+npm run compile
+```
+
+First-time desktop workflow:
+
+1. Start the ELF loader on the console.
+2. Open the Ghostpad desktop app.
+3. Add the console IP in **Settings**.
+4. Click **Deploy Payload**.
+5. Click **Connect**.
+
+---
+
+## Usage Modes
+
+| Mode | Input source | Transport | Output target | Best for |
+|---|---|---|---|---|
+| Desktop app → Console | Keyboard, mouse, XInput, virtual controller | TCP `6967` | Virtual DualSense | Full-featured Windows control |
+| Browser → ESP32 → Console | Web UI | WebSocket + TCP `6967` | Virtual DualSense | Lightweight LAN control |
+| BLE gamepad → ESP32 → Console | DualSense, DualShock 4, compatible BLE HID devices | BLE + TCP `6967` | Virtual DualSense | Wireless controller relay |
+| Browser → ESP32 → USB | Web UI | WebSocket + USB HID | PS5 USB HID | Direct wired control experiments |
+| Payload → Client | Console klog | TCP `3434` / WebSocket | GUI dashboard | Diagnostics and binding analysis |
+
+---
+
+## ESP32 Bridge
 
 ### Web UI
-- **Device Browser** — auto-discovers PS4/PS5 on the subnet, shows open ports (6967 GPAD, 3434 Klog, 9021 ELF loader)
-- **Virtual Controller** — on-screen gamepad with keyboard bindings and touch support
-- **Klog Viewer** — live streaming of console kernel log over WebSocket
-- **BLE Scanner** — discover nearby DualSense/DS4 controllers with classification (model, score, appearance, HID flags)
-- **Settings** — WiFi config, payload deploy, firmware info
 
-### BLE HID Host
-- Scans for DualSense (0x054C:0x0CE6), DualShock 4 (0x054C:0x09CC/0x05C4), Xbox, Nintendo, 8BitDo controllers
-- 30-second active scan window with classification scoring
-- Decodes DualSense report 0x01 and DualShock 4 report 0x11
-- Stores backlog of klog data for late-connecting dashboard clients
+The embedded dashboard includes:
 
-### Connection Modes
-| Mode | Input Source | Output | Use Case |
-|------|-------------|--------|----------|
-| **WiFi → PS4/PS5** | Web UI / Browser | TCP 6967 to console | Remote play over LAN |
-| **BLE → PS4/PS5** | DualSense/DS4 via BLE | TCP 6967 to console | Wireless controller relay |
-| **USB HID → PS5** | Web UI | TinyUSB HID to PS5 USB | Direct wired control |
+- **Device Browser** — scans the subnet and detects open Ghostpad-related ports.
+- **Virtual Controller** — browser-based controller with keyboard and touch support.
+- **Klog Viewer** — live klog stream through WebSocket.
+- **BLE Scanner** — detects and classifies nearby controllers.
+- **Settings** — WiFi, payload deployment, and firmware information.
+
+### BLE HID host
+
+The bridge can scan and classify common controllers, including:
+
+- DualSense `0x054C:0x0CE6`;
+- DualShock 4 `0x054C:0x09CC` / `0x054C:0x05C4`;
+- Xbox, Nintendo, and 8BitDo-compatible HID devices.
+
+BLE support includes:
+
+- 30-second active scan window;
+- classification scoring by model, appearance, and HID flags;
+- DualSense report `0x01` decoding;
+- DualShock 4 report `0x11` decoding;
+- klog backlog replay for late-connecting dashboard clients.
 
 ### Networking
-- WiFi STA (connect to existing network) with mDNS
-- WiFi AP fallback (`Ghostpad-ESP32` / `ghostpad123`)
-- Subnet scanner with port probing (6967, 3434, 9021, 9090)
-- Klog TCP bridge (port 3434) with multi-client broadcast
-- Private WiFi credentials via `sdkconfig.private.defaults` (gitignored)
+
+- WiFi station mode.
+- AP fallback: `Ghostpad-ESP32` / `ghostpad123`.
+- mDNS hostname: `ghostpad.local`.
+- Subnet scanner with probes for ports `6967`, `3434`, `9021`, and `9090`.
+- Multi-client klog broadcast.
+- Private WiFi credentials stored in `sdkconfig.private.defaults` and excluded from Git.
 
 ---
 
-## Wire Protocol
+## Protocol Reference
 
-### `6967/tcp` — GPAD input stream
+### TCP `6967` — GPAD input stream
 
-Fixed 16-byte packet:
+Each input report is a fixed 16-byte packet.
 
 | Offset | Type | Field |
-|--------|------|-------|
-| 0..3 | char[4] | `"GPAD"` magic |
-| 4..7 | uint32 BE | Button bitmask |
-| 8 | uint8 | Left stick X (0..255, 128 = center) |
-| 9 | uint8 | Left stick Y |
-| 10 | uint8 | Right stick X |
-| 11 | uint8 | Right stick Y |
-| 12 | uint8 | L2 analog (0..255) |
-| 13 | uint8 | R2 analog |
-| 14..15 | uint16 | Reserved |
+|---:|---|---|
+| `0..3` | `char[4]` | Magic value: `GPAD` |
+| `4..7` | `uint32 BE` | Button bitmask |
+| `8` | `uint8` | Left stick X, `0..255`, center `128` |
+| `9` | `uint8` | Left stick Y |
+| `10` | `uint8` | Right stick X |
+| `11` | `uint8` | Right stick Y |
+| `12` | `uint8` | L2 analog value, `0..255` |
+| `13` | `uint8` | R2 analog value, `0..255` |
+| `14..15` | `uint16` | Reserved |
 
-### `6970/tcp` — Control / Diagnostic
+---
+
+### TCP `6970` — Control and diagnostics
 
 | Magic | Payload | Effect |
-|-------|---------|--------|
-| `GBND` | uint32 userId + uint64 virtualDeviceId + uint64 physicalDeviceId | MBus disconnect + bind |
-| `HVDI` | uint32 padHandle | Diagnostic VDI Cross press |
-| `TYPE` | uint32 type (0=DS4, 3=DualSense) | Reconfigure VDA type |
-| `DISC` | (empty) | Disconnect virtual device |
+|---|---|---|
+| `GBND` | `uint32 userId` + `uint64 virtualDeviceId` + `uint64 physicalDeviceId` | Disconnects the physical device and binds the virtual device to the user. |
+| `HVDI` | `uint32 padHandle` | Sends a diagnostic VDI Cross press. |
+| `TYPE` | `uint32 type` where `0 = DS4`, `3 = DualSense` | Reconfigures the virtual-device type. |
+| `DISC` | Empty | Disconnects the virtual device. |
 
-### WebSocket `/ws` — Web UI controller stream
+---
 
-Browser sends JSON frames at ~30 Hz:
+### WebSocket `/ws` — Controller stream
+
+Browser clients send JSON frames at approximately 30 Hz:
+
 ```json
-{"buttons": 0, "lx": 128, "ly": 128, "rx": 128, "ry": 128, "l2": 0, "r2": 0,
- "target_ip": "192.168.1.x", "seq": 1, "ts": 1717430000000}
+{
+  "buttons": 0,
+  "lx": 128,
+  "ly": 128,
+  "rx": 128,
+  "ry": 128,
+  "l2": 0,
+  "r2": 0,
+  "target_ip": "192.168.1.x",
+  "seq": 1,
+  "ts": 1717430000000
+}
 ```
 
-ESP32 responds with status ACKs (every 30th frame):
+The ESP32 bridge returns periodic status frames:
+
 ```json
-{"event": "state", "connected": true, "tx": 1500, "err": 0}
+{
+  "event": "state",
+  "connected": true,
+  "tx": 1500,
+  "err": 0
+}
 ```
+
+---
 
 ### HTTP API
 
 | Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/status` | GET | System status (WiFi, controller, scan results) |
-| `/api/scan` | GET | Trigger subnet scan for consoles |
-| `/api/ble/scan` | GET | BLE scan for controllers |
-| `/api/ble/status` | GET | BLE connection state |
-| `/api/ble/connect` | POST | Connect to BLE controller `{"addr":"xx:xx:xx:xx:xx:xx"}` |
-| `/api/ble/disconnect` | POST | Disconnect BLE controller |
-| `/api/controller/pulse` | GET | Diagnostic Cross press test `?ip=192.168.1.x` |
-| `/api/settings/deploy` | POST | Deploy ELF payload to console |
-| `/ws` | WS | WebSocket for controller streaming |
-| `/ws/klog` | WS | WebSocket for klog streaming |
+|---|---|---|
+| `/api/status` | `GET` | Returns system status, WiFi state, controller state, and scan results. |
+| `/api/scan` | `GET` | Starts a subnet scan for consoles. |
+| `/api/ble/scan` | `GET` | Starts a BLE scan for controllers. |
+| `/api/ble/status` | `GET` | Returns BLE connection state. |
+| `/api/ble/connect` | `POST` | Connects to a BLE controller using `{"addr":"xx:xx:xx:xx:xx:xx"}`. |
+| `/api/ble/disconnect` | `POST` | Disconnects the active BLE controller. |
+| `/api/controller/pulse` | `GET` | Sends a diagnostic Cross press test to `?ip=192.168.1.x`. |
+| `/api/settings/deploy` | `POST` | Deploys the ELF payload to the selected console. |
+| `/ws` | `WS` | WebSocket stream for controller input. |
+| `/ws/klog` | `WS` | WebSocket stream for klog output. |
 
 ---
 
-## VDA Probe (`tools/vda_probe`)
+## Building from Source
 
-Diagnostic payload for reverse-engineering the VDA patch on PS4/PS5:
+### Requirements
 
-- Enumerates libScePad exports to find the VDA dispatch function
-- Sweeps MBus symbols (20 functions) to map the binding API
-- Reports instruction bytes for pattern-matching in `shellui_pad.c`
+#### Console payload
 
-```bash
-cd tools/vda_probe
-make PS4_PAYLOAD_SDK=/path/to/sdk
-# Deploy vda_probe.elf, check klog for results
-```
+- `ps4-payload-sdk` or `ps5-payload-sdk`;
+- LLVM toolchain;
+- `LLVM_CONFIG` pointing to a compatible `llvm-config`, when required by your SDK setup.
 
----
+#### ESP32 bridge
 
-## Keyboard Bindings (PC GUI)
+- ESP-IDF `v5.3+`;
+- ESP32-WROOM-32U board;
+- USB serial adapter or native USB flashing path supported by your board.
 
-| Key | Button | Key | Button |
-|-----|--------|-----|--------|
-| W A S D | D-pad | I J K L | Triangle / Square / Cross / Circle |
-| U / O | L1 / R1 | Q / E | L2 / R2 |
-| Enter | Options | Space | PS |
-| BackSpace | Share/Create | T | Touchpad |
+#### Desktop app
+
+- Node.js;
+- npm;
+- Windows for packaged `.exe` builds.
 
 ---
 
-## Building
-
-### Payload (PS4)
-
-Requirements:
-- [ps4-payload-sdk](https://github.com/ps4-payload-sdk) with LLVM toolchain
-- `LLVM_CONFIG` pointing to a compatible `llvm-config`
+### PS4 payload example
 
 ```bash
 cd payload
+
 LLVM_CONFIG=/opt/homebrew/opt/llvm/bin/llvm-config \
-  PS4_PAYLOAD_SDK=../external/ps4-payload-sdk \
-  make
+PS4_PAYLOAD_SDK=../external/ps4-payload-sdk \
+make
 ```
 
-Output: `payload/ghostpad.elf`
+Output:
 
-### Payload (PS5)
+```text
+payload/ghostpad.elf
+```
+
+---
+
+### PS5 payload example
 
 ```bash
 cd payload
+
 PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk make
 ```
 
-### ESP32 Bridge
+Output:
 
-Requirements:
-- [ESP-IDF v5.3+](https://docs.espressif.com/projects/esp-idf/)
-- ESP32-WROOM-32U
+```text
+payload/ghostpad.elf
+```
+
+---
+
+### ESP32 bridge example
 
 ```bash
 cd esp32-ghostpad
+
 cp sdkconfig.private.example sdkconfig.private.defaults
-# edit sdkconfig.private.defaults
+# Edit sdkconfig.private.defaults.
+
 source ~/esp/esp-idf/export.sh
+
 idf.py set-target esp32
 idf.py build
 idf.py -p /dev/cu.usbmodemXXXX flash
 ```
+
+---
+
+### Desktop app example
+
+```bash
+cd Ghostpad-app
+
+npm install
+npm run build:react
+npm run start
+```
+
+Package for Windows:
+
+```bash
+npm run compile
+```
+
+---
+
+## VDA Probe
+
+`tools/vda_probe` is a diagnostic payload used to validate firmware-specific VDA assumptions.
+
+It can:
+
+- enumerate libScePad exports;
+- identify the VDA dispatch function;
+- sweep MBus symbols used by the binding flow;
+- report instruction bytes for pattern matching in `shellui_pad.c`.
+
+Build:
+
+```bash
+cd tools/vda_probe
+
+make PS4_PAYLOAD_SDK=/path/to/sdk
+```
+
+Deploy `vda_probe.elf` and inspect the console klog output.
+
+---
+
+## Keyboard Bindings
+
+| Key | Action | Key | Action |
+|---|---|---|---|
+| `W` / `A` / `S` / `D` | D-pad | `I` / `J` / `K` / `L` | Triangle / Square / Cross / Circle |
+| `U` / `O` | L1 / R1 | `Q` / `E` | L2 / R2 |
+| `Enter` | Options | `Backspace` | Share / Create |
+| `Space` | PS button | `T` | Touchpad |
 
 ---
 
 ## Project Structure
 
-```
+```text
 payload/
-├── main.c              # PS4/PS5 payload: VDA, klog, TCP server, GBND
-├── shellui_pad.c/h     # SceShellCore injection, VDA patching, MBus helpers
+├── main.c
+├── shellui_pad.c
+├── shellui_pad.h
 └── Makefile
 
 esp32-ghostpad/
 ├── main/
-│   ├── main.c          # ESP32 entry point: WiFi, web server, USB HID
-│   ├── wifi_ap.c/h     # WiFi STA/AP with mDNS
-│   ├── web_server.c/h  # HTTP server, WebSocket, API endpoints
-│   ├── web_gui.h       # Embedded HTML/JS controller UI
-│   ├── ble_hid_host.c/h # BLE HID host: scan, connect, decode reports
-│   ├── hid_gamepad.c/h # TinyUSB DualSense HID emulation
-│   ├── klog_reader.c/h # /dev/klog TCP reader (legacy, for PS5 payload)
+│   ├── main.c
+│   ├── wifi_ap.c
+│   ├── wifi_ap.h
+│   ├── web_server.c
+│   ├── web_server.h
+│   ├── web_gui.h
+│   ├── ble_hid_host.c
+│   ├── ble_hid_host.h
+│   ├── hid_gamepad.c
+│   ├── hid_gamepad.h
+│   ├── klog_reader.c
+│   ├── klog_reader.h
 │   └── CMakeLists.txt
-├── sdkconfig.defaults           # Public ESP-IDF config
-├── sdkconfig.private.example    # Template for private WiFi credentials
-├── sdkconfig.private.defaults   # Your WiFi credentials (gitignored)
+├── sdkconfig.defaults
+├── sdkconfig.private.example
+├── sdkconfig.private.defaults
 └── CMakeLists.txt
+
+Ghostpad-app/
+└── Electron + React desktop client
 
 tools/
 └── vda_probe/
-    └── vda_probe.c     # VDA pattern / MBus symbol diagnostic
+    └── vda_probe.c
 
-git-patch/               # Patches applied during development
+git-patch/
+└── Development patches
+
+virtualDS5research.md
 ```
 
 ---
 
 ## Known Limitations
 
-- **Firmware-specific byte patterns.** The VDA patch scans for specific instruction sequences in libScePad. Other firmware builds need the scan updated via `vda_probe`.
-- **Single virtual device.** One virtual controller at a time.
-- **No haptics / rumble feedback** from PS4/PS5 → client.
-- **BLE-only on ESP32.** The ESP32-C6 co-processor is BLE-only; no Bluetooth Classic (BR/EDR).
-- **DualSense BLE pairing** requires manual PS+Create button combo and has a narrow ~30s advertising window.
+- **Firmware-specific VDA patterns** — unsupported firmware builds may require new scan patterns generated with `vda_probe`.
+- **Single virtual device** — Ghostpad currently manages one virtual controller at a time.
+- **No haptics or rumble feedback** — feedback from PS4/PS5 to the client is not currently forwarded.
+- **BLE-only controller relay on ESP32** — Bluetooth Classic / BR/EDR is not supported.
+- **DualSense BLE pairing window** — pairing requires the manual PS + Create sequence and a short advertising window.
 
 ---
-
-## Ghostpad Desktop App (Windows)
-
-The **Ghostpad-app** (`Ghostpad-app/`) is an Electron + React desktop application for Windows that provides the most complete control experience:
-
-- **Input Redirection** — on-screen virtual controller, XInput gamepad passthrough, keyboard bindings, mouse look
-- **Macro Recording** — record and replay sequences of button presses, stick movements, and trigger pressure
-- **Console Manager** — add, edit, and auto-scan PS4/PS5 consoles on LAN
-- **System State** — reboot, shutdown, rest mode, and disc eject commands
-- **Beeper & LED** — control PS5 beeper/LED (requires `beeper_server.elf`)
-- **Auto-Deploy** — automatically deploy the payload ELF when connecting
-
-### First-Time Setup (Desktop App)
-1. Start the ELF loader on your PS4/PS5 (port 9021)
-2. Open Ghostpad-app
-3. Go to **Settings →** add your console IP
-4. Click **Deploy Payload** (sends `ghostpad.elf`)
-5. Click **Connect**
-
-### Building the Desktop App
-```bash
-cd Ghostpad-app
-npm install
-npm run build:react
-npm run start          # development
-npm run compile        # package as Windows .exe
-```
-
-### Default Keyboard Bindings
-
-| Key | Button | Key | Button |
-|-----|--------|-----|--------|
-| W A S D | D-pad | I J K L | Triangle / Square / Cross / Circle |
-| U / O | L1 / R1 | Q / E | L2 / R2 |
-| Enter | Options | Backspace | Share/Create |
-| Space | PS button | T | Touchpad |
 
 ## Credits
 
 ### StonedModder
-- Ghostpad-app (`Ghostpad-app/`): Electron + React desktop GUI for Windows with virtual controller, XInput passthrough, keyboard/mouse input, macro recording/playback, console manager, auto-deploy, system state controls, beeper/LED, and video capture overlay
-- Original PS5 payload: VDA research, `scePadVirtualDeviceAddDevice` code-cave patch, `sceMbusBindDeviceWithUserId` / `sceMbusDisconnectDevice` MBus binding flow, credential elevation, process injection into SceShellCore
-- hidDumper companion tool for reverse-engineering unknown controllers
-- `virtualDS5research.md` technical write-up
+
+- Ghostpad desktop app: Electron + React GUI for Windows with virtual controller, XInput passthrough, keyboard/mouse input, macro recording/playback, console manager, auto-deploy, system-state controls, beeper/LED controls, and video-capture overlay.
+- Original PS5 payload and VDA research.
+- `scePadVirtualDeviceAddDevice` code-cave patch.
+- `sceMbusBindDeviceWithUserId` / `sceMbusDisconnectDevice` MBus binding flow.
+- Credential elevation and `SceShellCore` process injection.
+- `hidDumper` companion tool.
+- `virtualDS5research.md` technical write-up.
 
 ### SeregonWar
-- ESP32-WROOM-32U bridge firmware (`esp32-ghostpad/`): WiFi STA/AP with mDNS, embedded web UI, BLE HID host (NimBLE scan, connect, DualSense/DS4 report decoding), USB HID (TinyUSB), subnet scanner with port probing, klog TCP bridge with multi-client broadcast and backlog replay, WebSocket controller streaming, HTTP REST API, controller pulse diagnostics
-- PS4 payload port (`__ORBIS__` target): SceShellCore injection (`shellui_pad.c`), runtime VDA patching with byte-pattern verification, libSceMbus dlopen/dlsym, VDA type handling (DualSense default, skip duplicate), PS4-specific authid/credential flow
-- Payload-side klog architecture: always-on capture thread with client pool broadcasting, backlog ring buffer, thread-safe VDA candidate tracking with sequence numbers, GBND prebind loop, `ghostpad_try_klog_candidate_bind` direct MBus bind path
-- VDA probe (`tools/vda_probe/`): diagnostic tool that fingerprints libScePad VDA byte-patterns and sweeps 20 MBus symbols
-- klog parser improvements: multi-key DeviceId extraction, `GetUnassignedDeviceInfo` detection, VDA type:4/subType:2 RemotePlay recognition
-- Native CPP GUI
 
+- ESP32-WROOM-32U bridge firmware.
+- WiFi STA/AP with mDNS.
+- Embedded web UI.
+- BLE HID host using NimBLE scan/connect/classification.
+- DualSense and DualShock 4 report decoding.
+- TinyUSB HID support.
+- Subnet scanner and port probing.
+- Klog TCP bridge with multi-client broadcast and backlog replay.
+- WebSocket controller streaming and HTTP REST API.
+- Controller pulse diagnostics.
+- PS4 payload port under `__ORBIS__`.
+- Runtime VDA patching with byte-pattern verification.
+- libSceMbus `dlopen` / `dlsym` integration.
+- Payload-side klog architecture.
+- GBND prebind loop and direct MBus bind path.
+- VDA probe diagnostic tool.
+- Klog parser improvements.
+- Native C++ GUI.
+
+---
 
 ## Acknowledgements
 
-- `ps5-payload-sdk` / `ps4-payload-sdk` (John Törnblom et al.) — toolchain, kernel API helpers
-- ESP-IDF — ESP32-WROOM-32U framework
-- NimBLE — BLE host stack
-- TinyUSB — USB HID device stack
-- cJSON — JSON parsing/generation
-- The PS4/PS5 dev community
+- `ps5-payload-sdk` and `ps4-payload-sdk`, including work by John Törnblom and contributors.
+- ESP-IDF.
+- NimBLE.
+- TinyUSB.
+- cJSON.
+- The PS4/PS5 development community.
+
+---
 
 ## License
 
-Payload C sources: GPL-3.0-or-later. ESP32 firmware: GPL-3.0-or-later. PC GUI scripts: MIT.
+| Area | License |
+|---|---|
+| Payload C sources | GPL-3.0-or-later |
+| ESP32 firmware | GPL-3.0-or-later |
+| PC GUI scripts | MIT |
+
+---
+
+## Disclaimer
+
+Ghostpad is intended for development, research, and local-network experimentation on hardware you own or are authorized to work with. Use it responsibly and in accordance with applicable laws, platform terms, and local regulations.
