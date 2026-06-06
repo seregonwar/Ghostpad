@@ -135,17 +135,21 @@ void test_stores() {
         SettingsStore store(temp_dir);
         auto current = store.read();
         ASSERT_TRUE(current.payload_elf_path.empty());
+        ASSERT_EQ(current.ui_scale, 1.0f);
 
         AppSettings patch;
         patch.payload_elf_path = "some_elf.elf";
         patch.auto_deploy_on_connect = true;
+        patch.ui_scale = 1.75f;
         auto updated = store.write(patch);
         ASSERT_EQ(updated.payload_elf_path, "some_elf.elf");
         ASSERT_TRUE(updated.auto_deploy_on_connect);
+        ASSERT_EQ(updated.ui_scale, 1.75f);
 
         current = store.read();
         ASSERT_EQ(current.payload_elf_path, "some_elf.elf");
         ASSERT_TRUE(current.auto_deploy_on_connect);
+        ASSERT_EQ(current.ui_scale, 1.75f);
     }
 
     // ProfileStore

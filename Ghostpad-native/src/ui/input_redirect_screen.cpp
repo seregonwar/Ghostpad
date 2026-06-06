@@ -46,7 +46,7 @@ void renderInputRedirectScreen(App& app) {
     ImGui::SameLine(0, 10);
     ImGui::TextColored(p.muted, "Slot:");
     ImGui::SameLine(0, 4);
-    ImGui::PushItemWidth(55);
+    ImGui::PushItemWidth(75);
     int slot = app.activeSlot();
     if (ImGui::Combo("##IRSlot", &slot, "P1\0P2\0P3\0P4\0")) {
         app.setActiveSlot(slot);

@@ -29,6 +29,7 @@ static void writeGCE(FILE* f, int delay_cs, int transparent_idx) {
     writeByte(f, 0xF9);  // Graphic Control Label
     writeByte(f, 0x04);  // Block size
     uint8_t flags = 0;
+    flags |= (2 << 2);   // Disposal method: Restore to Background (2)
     if (transparent_idx >= 0) flags |= 0x01;  // Transparent color flag
     writeByte(f, flags);
     writeShort(f, delay_cs);
@@ -159,9 +160,10 @@ static void writeNetscapeExt(FILE* f) {
     writeByte(f, 0xFF);  // Application Extension Label
     writeByte(f, 0x0B);  // Block size (11)
     fwrite("NETSCAPE2.0", 1, 11, f);
-    writeByte(f, 0x03);  // Sub-block size
-    writeByte(f, 0x00);  // Loop count lo (0 = infinite)
-    writeByte(f, 0x00);  // Loop count hi
+    writeByte(f, 0x03);  // Sub-block size (3 bytes)
+    writeByte(f, 0x01);  // Sub-block type (always 1 for looping)
+    writeByte(f, 0x00);  // Loop count LSB (0 = infinite)
+    writeByte(f, 0x00);  // Loop count MSB
     writeByte(f, 0x00);  // Block terminator
 }
 
@@ -216,9 +218,7 @@ void GifExporter::cancel() {
     width_ = height_ = 0;
 }
 
-bool GifExporter::isKeyColor(uint8_t r, uint8_t g, uint8_t b) const {
-    return (r > 220 && g < 80 && b > 220);
-}
+// Deleted isKeyColor
 
 uint32_t GifExporter::sampleColor(const std::vector<uint8_t>& rgba, int x, int y) const {
     int idx = (y * width_ + x) * 4;
@@ -234,7 +234,6 @@ void GifExporter::quantizeFrame(const std::vector<uint8_t>& rgba, Frame& out) {
     // Collect unique colors (sample up to 16K pixels)
     std::map<uint32_t, int> colorCount;
     int sample_step = std::max(1, total / 16384);
-    int key_color_count = 0;
 
     for (int i = 0; i < total; i += sample_step) {
         uint8_t r = rgba[i * 4 + 0];
@@ -242,8 +241,7 @@ void GifExporter::quantizeFrame(const std::vector<uint8_t>& rgba, Frame& out) {
         uint8_t b = rgba[i * 4 + 2];
         uint8_t a = rgba[i * 4 + 3];
 
-        if (a < 10 || isKeyColor(r, g, b)) {
-            key_color_count++;
+        if (a < 10) {
             continue;
         }
         colorCount[packRgba(r, g, b, 255)]++;
@@ -283,7 +281,7 @@ void GifExporter::quantizeFrame(const std::vector<uint8_t>& rgba, Frame& out) {
         uint8_t b = rgba[i * 4 + 2];
         uint8_t a = rgba[i * 4 + 3];
 
-        if (a < 10 || isKeyColor(r, g, b)) {
+        if (a < 10) {
             out.indexed[i] = 0;
             continue;
         }

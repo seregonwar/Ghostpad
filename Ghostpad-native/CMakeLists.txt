@@ -111,6 +111,7 @@ set(SOURCES
   src/input/gamepad_input.cpp
   src/input/macro_engine.cpp
   src/ui/gif_export.cpp
+  src/ui/file_picker.cpp
   ${IMGUI_SOURCES}
 )
 
@@ -141,7 +142,7 @@ else()
 endif()
 
 if(WIN32)
-  target_link_libraries(ghostpad-native PRIVATE ws2_32 iphlpapi)
+  target_link_libraries(ghostpad-native PRIVATE ws2_32 iphlpapi comdlg32)
   target_sources(ghostpad-native PRIVATE ${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp)
 elseif(APPLE)
   find_library(COCOA_FRAMEWORK Cocoa REQUIRED)

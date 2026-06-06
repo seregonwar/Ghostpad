@@ -8,6 +8,7 @@
 #include "roboto_medium_ttf.h"
 #include "fa_solid_900_ttf.h"
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 #include "GLFW/glfw3.h"
@@ -87,6 +88,10 @@ void App::init() {
         auto* ap = static_cast<App*>(glfwGetWindowUserPointer(w));
         if (ap) ap->onScroll(xo, yo);
     });
+    glfwSetWindowRefreshCallback(g_window, [](GLFWwindow* w) {
+        auto* ap = static_cast<App*>(glfwGetWindowUserPointer(w));
+        if (ap) ap->render();
+    });
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -132,8 +137,8 @@ void App::startGifExport(const std::string& output_path, float vis_size, int fps
     gif_output_path_ = output_path;
     gif_vis_size_ = vis_size;
     gif_fps_ = fps;
-    gif_capture_width_ = (int)(vis_size * 2.2f);
-    gif_capture_height_ = (int)(vis_size * 1.5f);
+    gif_capture_width_ = (int)(vis_size * 2.4f);
+    gif_capture_height_ = (int)(vis_size * 2.4f);
     gif_frame_timer_ = 0.0;
     gif_frame_idx_ = 0;
     gif_exporter_.beginCapture(gif_capture_width_, gif_capture_height_, fps);
@@ -281,10 +286,44 @@ PadStateInput App::getCurrentPadState() {
 
 void App::render() {
     if (glfwWindowShouldClose(g_window)) { should_close = true; return; }
-    glfwPollEvents();
+
+    static bool in_poll = false;
+    if (!in_poll) {
+        in_poll = true;
+        glfwPollEvents();
+        in_poll = false;
+    }
 
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
+
+    float scale = 1.0f;
+    if (!gif_export_active_) {
+        int w, h;
+        glfwGetWindowSize(g_window, &w, &h);
+        float base_scale = w / 1400.0f;
+        if (base_scale < 0.5f) base_scale = 0.5f;
+        scale = base_scale * settings.read().ui_scale;
+        if (scale <= 0.1f) scale = 1.0f;
+    }
+
+    ImGuiIO& io = ImGui::GetIO();
+    if (scale != 1.0f) {
+        io.DisplaySize.x /= scale;
+        io.DisplaySize.y /= scale;
+        io.DisplayFramebufferScale.x *= scale;
+        io.DisplayFramebufferScale.y *= scale;
+
+        ImGuiContext& g = *GImGui;
+        for (int i = 0; i < g.InputEventsQueue.Size; i++) {
+            ImGuiInputEvent& e = g.InputEventsQueue[i];
+            if (e.Type == ImGuiInputEventType_MousePos) {
+                e.MousePos.PosX /= scale;
+                e.MousePos.PosY /= scale;
+            }
+        }
+    }
+
     ImGui::NewFrame();
 
     ImVec2 vis_screen_base;
@@ -353,7 +392,7 @@ void App::render() {
     glViewport(0, 0, dw, dh);
 
     if (gif_export_active_) {
-        glClearColor(1.0f, 0.0f, 1.0f, 1.0f);
+        glClearColor(0.07f, 0.07f, 0.08f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
@@ -361,25 +400,61 @@ void App::render() {
             gif_frame_ready_ = false;
             int cap_w = gif_capture_width_;
             int cap_h = gif_capture_height_;
-            float cx_offs = vis_screen_size * 0.1f;
-            float cy_offs = vis_screen_size * 0.15f;
-            int read_x = (int)(vis_screen_base.x - cx_offs);
-            int read_y = dh - (int)(vis_screen_base.y + gif_vis_size_ * 1.3f + cy_offs);
-            int read_w = cap_w;
-            int read_h = cap_h;
 
-            if (read_x < 0) { read_w += read_x; read_x = 0; }
-            if (read_y < 0) { read_h += read_y; read_y = 0; }
-            if (read_x + read_w > dw) read_w = dw - read_x;
-            if (read_y + read_h > dh) read_h = dh - read_y;
+            int ww, wh;
+            glfwGetWindowSize(g_window, &ww, &wh);
+            float fb_scale_x = (float)dw / (float)ww;
+            float fb_scale_y = (float)dh / (float)wh;
+
+            // Calculate the exact center of the visualizer on screen
+            float cx = vis_screen_base.x + vis_screen_size;
+            float cy = vis_screen_base.y + vis_screen_size * 0.65f;
+
+            // Define the capture box centered around the visualizer center
+            int sc_read_x = (int)(cx - cap_w * 0.5f);
+            int sc_read_y = wh - (int)(cy + cap_h * 0.5f);
+            int sc_read_w = cap_w;
+            int sc_read_h = cap_h;
+
+            int orig_sc_read_x = sc_read_x;
+            int orig_sc_read_y = sc_read_y;
+
+            if (sc_read_x < 0) { sc_read_w += sc_read_x; sc_read_x = 0; }
+            if (sc_read_y < 0) { sc_read_h += sc_read_y; sc_read_y = 0; }
+            if (sc_read_x + sc_read_w > ww) sc_read_w = ww - sc_read_x;
+            if (sc_read_y + sc_read_h > wh) sc_read_h = wh - sc_read_y;
+
+            int read_x = (int)(sc_read_x * fb_scale_x);
+            int read_y = (int)(sc_read_y * fb_scale_y);
+            int read_w = (int)(sc_read_w * fb_scale_x);
+            int read_h = (int)(sc_read_h * fb_scale_y);
 
             std::vector<uint8_t> frame(cap_w * cap_h * 4, 0);
             if (read_w > 0 && read_h > 0) {
-                std::vector<uint8_t> row(read_w * 4);
-                for (int row_y = 0; row_y < read_h; row_y++) {
-                    glReadPixels(read_x, read_y + row_y, read_w, 1, GL_RGBA, GL_UNSIGNED_BYTE, row.data());
-                    int dst_start = ((cap_h - 1 - row_y) * cap_w + (read_x > 0 ? cap_w - read_w : 0)) * 4;
-                    memcpy(frame.data() + dst_start, row.data(), read_w * 4);
+                std::vector<uint8_t> fb_pixels(read_w * read_h * 4, 0);
+                glReadPixels(read_x, read_y, read_w, read_h, GL_RGBA, GL_UNSIGNED_BYTE, fb_pixels.data());
+
+                int dest_x_offset = (orig_sc_read_x < 0) ? -orig_sc_read_x : 0;
+                int dest_y_offset = (orig_sc_read_y < 0) ? -orig_sc_read_y : 0;
+
+                for (int y = 0; y < cap_h; y++) {
+                    int src_y = (int)((y - dest_y_offset) * fb_scale_y);
+                    if (src_y < 0 || src_y >= read_h) continue;
+
+                    int flipped_y = cap_h - 1 - y;
+
+                    for (int x = 0; x < cap_w; x++) {
+                        int src_x = (int)((x - dest_x_offset) * fb_scale_x);
+                        if (src_x < 0 || src_x >= read_w) continue;
+
+                        int src_idx = (src_y * read_w + src_x) * 4;
+                        int dst_idx = (flipped_y * cap_w + x) * 4;
+                        
+                        frame[dst_idx + 0] = fb_pixels[src_idx + 0];
+                        frame[dst_idx + 1] = fb_pixels[src_idx + 1];
+                        frame[dst_idx + 2] = fb_pixels[src_idx + 2];
+                        frame[dst_idx + 3] = fb_pixels[src_idx + 3];
+                    }
                 }
             }
             gif_exporter_.addFrame(frame);
@@ -404,6 +479,31 @@ void App::shutdown() {
 }
 
 void App::onKey(int key, int scancode, int action, int mods) {
+    bool ctrl_or_cmd = (mods & GLFW_MOD_CONTROL) || (mods & GLFW_MOD_SUPER);
+    if (ctrl_or_cmd && action == GLFW_PRESS && rebind_button_id < 0) {
+        if (key == GLFW_KEY_EQUAL || key == GLFW_KEY_KP_ADD) {
+            auto s = settings.read();
+            s.ui_scale += 0.1f;
+            if (s.ui_scale > 5.0f) s.ui_scale = 5.0f;
+            settings.write(s);
+            addStatus("Zoom: " + std::to_string((int)(s.ui_scale * 100)) + "%");
+            return;
+        } else if (key == GLFW_KEY_MINUS || key == GLFW_KEY_KP_SUBTRACT) {
+            auto s = settings.read();
+            s.ui_scale -= 0.1f;
+            if (s.ui_scale < 0.5f) s.ui_scale = 0.5f;
+            settings.write(s);
+            addStatus("Zoom: " + std::to_string((int)(s.ui_scale * 100)) + "%");
+            return;
+        } else if (key == GLFW_KEY_0 || key == GLFW_KEY_KP_0) {
+            auto s = settings.read();
+            s.ui_scale = 1.0f;
+            settings.write(s);
+            addStatus("Zoom reset");
+            return;
+        }
+    }
+
     if (rebind_button_id >= 0 && action == GLFW_PRESS && key != GLFW_KEY_ESCAPE) {
         keyboard.setButtonBinding(rebind_button_id, key,
             (mods & GLFW_MOD_CONTROL), (mods & GLFW_MOD_SHIFT), (mods & GLFW_MOD_ALT));

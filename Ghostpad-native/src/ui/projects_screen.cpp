@@ -218,25 +218,44 @@ void renderProjectsScreen(App& app) {
             ImGui::BeginChild("ProjRow", ImVec2(avail_w - 36, 54), true,
                               ImGuiWindowFlags_NoScrollbar);
 
+            /*
+             *  +-------------------------------------------------------+
+             *  |            DYNAMIC COLUMN GRID CALCULATOR             |
+             *  +-------------------------------------------------------+
+             */
+            float child_w = ImGui::GetContentRegionAvail().x;
+            
+            float actions_x = child_w - 200.0f;
+            if (actions_x < 468.0f) actions_x = 468.0f;
+            
+            float date_x = child_w - 320.0f;
+            if (date_x < 360.0f) date_x = 360.0f;
+            
+            float commands_x = child_w - 460.0f;
+            if (commands_x < 252.0f) commands_x = 252.0f;
+            
+            float game_x = child_w - 600.0f;
+            if (game_x < 144.0f) game_x = 144.0f;
+            
+            float name_w = game_x - 16.0f - 8.0f;
+
             ImGui::SetCursorPos(ImVec2(16, 12));
             bool sel = (app.selected_project_id == proj.id);
             std::string proj_lbl = std::string(ICON_FA_FOLDER) + "  " + proj.name;
-            if (ImGui::Selectable(proj_lbl.c_str(), &sel, 0, ImVec2(avail_w * 0.25f, 30))) {
+            if (ImGui::Selectable(proj_lbl.c_str(), &sel, 0, ImVec2(name_w, 30))) {
                 app.selected_project_id = proj.id;
             }
             
-            ImGui::SameLine(avail_w * 0.3f);
-            ImGui::SetCursorPosY(14);
+            ImGui::SetCursorPos(ImVec2(game_x, 14));
             ImGui::TextColored(p.muted, "%s  %s", ICON_FA_GAMEPAD, proj.game.c_str());
             
-            ImGui::SameLine(avail_w * 0.5f);
+            ImGui::SetCursorPos(ImVec2(commands_x, 14));
             ImGui::TextColored(p.dim, "%s  %zu commands", ICON_FA_CODE, proj.commands.size());
             
-            ImGui::SameLine(avail_w * 0.68f);
+            ImGui::SetCursorPos(ImVec2(date_x, 14));
             ImGui::TextColored(p.dim, "%s  %s", ICON_FA_CALENDAR, proj.updated_at.substr(0, 10).c_str());
 
-            ImGui::SameLine(avail_w - 280);
-            ImGui::SetCursorPosY(11);
+            ImGui::SetCursorPos(ImVec2(actions_x, 11));
             if (ui::primaryButton(ICON_FA_FOLDER_OPEN "  Open", ImVec2(80, 30))) {
                 app.selected_project_id = proj.id;
                 app.current_screen = Screen::ProjectDetail;
@@ -451,7 +470,16 @@ static void renderSignalEditor(App& app, const Project& proj) {
     }
     ImGui::PopItemWidth();
 
-    ImGui::SameLine(avail_w - 660);
+    /*
+     *  +-------------------------------------------------------+
+     *  |             DYNAMIC BUTTON ALIGNMENT                  |
+     *  +-------------------------------------------------------+
+     */
+    float buttons_w = 130.0f + 130.0f + 130.0f + 110.0f + 140.0f + 4.0f * ImGui::GetStyle().ItemSpacing.x;
+    float right_buttons_x = avail_w - buttons_w;
+    if (right_buttons_x < 320.0f) right_buttons_x = 320.0f;
+
+    ImGui::SameLine(right_buttons_x);
     if (ui::primaryButton(ICON_FA_CHECK "  Save Changes", ImVec2(130, 32))) {
         if (app.projects.updateCommand(proj.id, editing_cmd)) {
             app.addStatus("Macro command updated successfully");
@@ -639,7 +667,24 @@ void renderProjectDetailScreen(App& app) {
     bool rec = app.macro_engine.isRecording();
     bool play = app.macro_engine.isPlaying();
 
-    ImGui::SameLine(avail_w - 500);
+    /*
+     *  +-------------------------------------------------------+
+     *  |             DYNAMIC BUTTON ALIGNMENT                  |
+     *  +-------------------------------------------------------+
+     */
+    float buttons_w = 170.0f;
+    if (rec) {
+        buttons_w += 150.0f + ImGui::GetStyle().ItemSpacing.x;
+    } else if (!play) {
+        buttons_w += 160.0f + ImGui::GetStyle().ItemSpacing.x;
+    }
+    if (play) {
+        buttons_w += 80.0f + ImGui::GetStyle().ItemSpacing.x;
+    }
+    float right_buttons_x = avail_w - buttons_w;
+    if (right_buttons_x < 420.0f) right_buttons_x = 420.0f;
+
+    ImGui::SameLine(right_buttons_x);
     if (rec) {
         if (ui::dangerButton(ICON_FA_STOP "  Stop Recording", ImVec2(150, 30))) {
             app.macro_engine.stopRecording();
@@ -681,7 +726,7 @@ void renderProjectDetailScreen(App& app) {
     ImGui::Spacing();
 
     // Import signals button at top of commands section
-    if (ui::softButton(ICON_FA_FILE_IMPORT "  Import Signals to New Command", ImVec2(240, 30))) {
+    if (ui::softButton(ICON_FA_FILE_IMPORT "  Import Signals to New Command", ImVec2(0, 30))) {
         ImGui::OpenPopup("ImportSignalsPopup");
     }
 
@@ -719,20 +764,20 @@ void renderProjectDetailScreen(App& app) {
             ImGui::TableSetColumnIndex(3);
             ImGui::PushID(cmd.id.c_str());
             
-            if (ui::primaryButton(ICON_FA_PLAY, ImVec2(32, 26))) {
+            if (ui::primaryButton(ICON_FA_PLAY, ImVec2(34, 30))) {
                 app.macro_engine.startPlayback(cmd.signals);
                 app.addStatus("Playing: " + cmd.name);
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Play Macro");
             ImGui::SameLine();
             
-            if (ui::softButton(ICON_FA_PEN_TO_SQUARE, ImVec2(32, 26))) {
+            if (ui::softButton(ICON_FA_PEN_TO_SQUARE, ImVec2(34, 30))) {
                 app.selected_command_id = cmd.id;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Edit Timeline");
             ImGui::SameLine();
             
-            if (ui::softButton(ICON_FA_FILE_EXPORT, ImVec2(32, 26))) {
+            if (ui::softButton(ICON_FA_FILE_EXPORT, ImVec2(34, 30))) {
                 s_pyExportCode = MacroEngine::exportAsPython(cmd.signals, proj.name + "_" + cmd.name);
                 s_pyExportName = proj.name + "_" + cmd.name;
                 ImGui::OpenPopup("PythonExportPopup");
@@ -740,7 +785,7 @@ void renderProjectDetailScreen(App& app) {
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Export to Python");
             ImGui::SameLine();
             
-            if (ui::softButton(ICON_FA_FILE_VIDEO, ImVec2(32, 26))) {
+            if (ui::softButton(ICON_FA_FILE_VIDEO, ImVec2(34, 30))) {
                 if (!app.isGifExportActive()) {
                     char savePath[512] = {};
                     std::string defName = proj.name + "_" + cmd.name + ".gif";
@@ -756,7 +801,7 @@ void renderProjectDetailScreen(App& app) {
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Export as GIF");
             ImGui::SameLine();
             
-            if (ui::dangerButton(ICON_FA_TRASH, ImVec2(32, 26))) {
+            if (ui::dangerButton(ICON_FA_TRASH, ImVec2(34, 30))) {
                 app.projects.removeCommand(proj.id, cmd.id);
                 app.addStatus("Command deleted");
             }

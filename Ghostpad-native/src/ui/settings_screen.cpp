@@ -5,6 +5,7 @@
 
 #include "ui/app.h"
 #include "ui/native_theme.h"
+#include "ui/file_picker.h"
 #include "imgui.h"
 #include <cstdio>
 #include <memory>
@@ -13,33 +14,7 @@
 #include <atomic>
 #include <cstring>
 
-#ifdef _WIN32
-#define popen _popen
-#define pclose _pclose
-#endif
-
 namespace ghostpad {
-
-/*
- *  ┌──────────────────────────────────────────────────────────┐
- *  │             SHELL EXECUTION HELPER (macOS)               │
- *  └──────────────────────────────────────────────────────────┘
- */
-static std::string execCommand(const char* cmd) {
-    std::array<char, 128> buffer;
-    std::string result;
-    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd, "r"), pclose);
-    if (!pipe) {
-        return "";
-    }
-    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-        result += buffer.data();
-    }
-    if (!result.empty() && result.back() == '\n') {
-        result.pop_back();
-    }
-    return result;
-}
 
 void renderSettingsScreen(App& app) {
     const auto& p = ui::colors();
@@ -47,19 +22,33 @@ void renderSettingsScreen(App& app) {
     float spacing = ImGui::GetStyle().ItemSpacing.x;
 
     static std::atomic<bool> is_browsing{false};
+    static std::atomic<bool> settings_loaded{false};
+    static Screen last_screen = Screen::Home;
+    static bool auto_deploy = true, auto_bind = true, beep_on = false;
+    static int beep_type = 1;
+    static char elf_path[1024] = {};
+
+    if (app.current_screen != last_screen) {
+        app.settings.invalidateCache();
+        settings_loaded = false;
+        last_screen = app.current_screen;
+    }
+
+    if (!settings_loaded.load()) {
+        auto s = app.settings.read();
+        auto_deploy = s.auto_deploy_on_connect;
+        auto_bind = s.auto_bind_via_klog;
+        beep_on = s.connect_beep_enabled;
+        beep_type = s.connect_beep_type;
+        strncpy(elf_path, s.payload_elf_path.c_str(), sizeof(elf_path) - 1);
+        settings_loaded = true;
+    }
 
     // ─────────────────────────────────────────────────────────────────────────────
     //                          PAYLOAD CONFIGURATION CARD
     // ─────────────────────────────────────────────────────────────────────────────
     ui::beginCard("PayloadCard", ImVec2(avail_w, 120), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ui::sectionLabel("Payload Configuration");
-
-    static char elf_path[1024] = {};
-    if (elf_path[0] == '\0') {
-        auto s = app.settings.read();
-        if (!s.payload_elf_path.empty())
-            strncpy(elf_path, s.payload_elf_path.c_str(), sizeof(elf_path) - 1);
-    }
 
     bool browsing_active = is_browsing.load();
     if (browsing_active) {
@@ -80,14 +69,13 @@ void renderSettingsScreen(App& app) {
             is_browsing = true;
             app.addStatus("Opening file picker...");
             std::thread([&app]() {
-                std::string res = execCommand("osascript -e 'POSIX path of (choose file with prompt \"Select ghostpad.elf\")' 2>/dev/null");
+                std::string res = ghostpad::ui::pickFile("Select ghostpad.elf", "ELF Files", "*.elf");
                 if (!res.empty()) {
                     auto s = app.settings.read();
                     s.payload_elf_path = res;
                     app.settings.write(s);
                     app.addStatus("Selected payload: " + res);
-                    // Clear the buffer to force reload on the next frame
-                    elf_path[0] = '\0';
+                    settings_loaded = false;
                 }
                 is_browsing = false;
             }).detach();
@@ -129,18 +117,8 @@ void renderSettingsScreen(App& app) {
     // ─────────────────────────────────────────────────────────────────────────────
     //                              BEHAVIOR OPTIONS CARD
     // ─────────────────────────────────────────────────────────────────────────────
-    ui::beginCard("OptionsCard", ImVec2(avail_w, 230), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ui::beginCard("OptionsCard", ImVec2(avail_w, 260), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ui::sectionLabel("Behavior");
-
-    static bool auto_deploy = true, auto_bind = true, beep_on = false;
-    static int beep_type = 1;
-    {
-        auto s = app.settings.read();
-        auto_deploy = s.auto_deploy_on_connect;
-        auto_bind = s.auto_bind_via_klog;
-        beep_on = s.connect_beep_enabled;
-        beep_type = s.connect_beep_type;
-    }
 
     ImGui::Checkbox("Auto-deploy payload on connect", &auto_deploy);
     ImGui::Checkbox("Auto-bind via klog monitoring", &auto_bind);
@@ -150,14 +128,15 @@ void renderSettingsScreen(App& app) {
     ImGui::Combo("Beep Type", &beep_type, "Silent\0Single Beep\0Error Pattern\0Long Beep\0");
 
     ImGui::Spacing();
+    ImGui::Spacing();
     if (ui::primaryButton("Save Settings", ImVec2(140, 34))) {
-        AppSettings patch;
-        patch.payload_elf_path = elf_path;
-        patch.auto_deploy_on_connect = auto_deploy;
-        patch.auto_bind_via_klog = auto_bind;
-        patch.connect_beep_enabled = beep_on;
-        patch.connect_beep_type = beep_type;
-        app.settings.write(patch);
+        auto s = app.settings.read();
+        s.payload_elf_path = elf_path;
+        s.auto_deploy_on_connect = auto_deploy;
+        s.auto_bind_via_klog = auto_bind;
+        s.connect_beep_enabled = beep_on;
+        s.connect_beep_type = beep_type;
+        app.settings.write(s);
         app.addStatus("Settings saved");
     }
     ui::endCard();

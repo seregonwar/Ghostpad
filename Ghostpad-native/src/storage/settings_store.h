@@ -161,6 +161,7 @@ struct AppSettings {
     int connect_beep_type = 1;
     PadLayoutSettings pad_layout;
     std::string active_profile_id;
+    float ui_scale = 1.0f;
 };
 
 inline void to_json(nlohmann::json& j, const AppSettings& s) {
@@ -171,7 +172,8 @@ inline void to_json(nlohmann::json& j, const AppSettings& s) {
         {"connect_beep_enabled", s.connect_beep_enabled},
         {"connect_beep_type", s.connect_beep_type},
         {"pad_layout", s.pad_layout},
-        {"active_profile_id", s.active_profile_id}
+        {"active_profile_id", s.active_profile_id},
+        {"ui_scale", s.ui_scale}
     };
 }
 
@@ -185,6 +187,7 @@ inline void from_json(const nlohmann::json& j, AppSettings& s) {
         j.at("pad_layout").get_to(s.pad_layout);
     }
     s.active_profile_id = j.value("active_profile_id", "");
+    s.ui_scale = j.value("ui_scale", 1.0f);
 }
 
 class SettingsStore {
@@ -193,10 +196,18 @@ public:
     AppSettings read() const;
     AppSettings write(const AppSettings& patch);
     std::string resolvePayloadPath() const;
+    void setUiScaleInMemory(float scale) {
+        cache_.ui_scale = scale;
+    }
+    void invalidateCache() {
+        loaded_ = false;
+    }
 
 private:
     std::string file_path_;
     std::string app_root_;
+    mutable AppSettings cache_;
+    mutable bool loaded_ = false;
 };
 
 } // namespace ghostpad

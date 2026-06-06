@@ -41,11 +41,8 @@ private:
     };
     std::vector<Frame> frames_;
 
-    static constexpr uint32_t KEY_COLOR = 0xFF00FFFF;  // magenta key
-
     void quantizeFrame(const std::vector<uint8_t>& rgba, Frame& out);
     uint32_t sampleColor(const std::vector<uint8_t>& rgba, int x, int y) const;
-    bool isKeyColor(uint8_t r, uint8_t g, uint8_t b) const;
     bool writeGifFile(const std::string& filepath);
 };
 

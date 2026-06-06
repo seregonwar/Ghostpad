@@ -79,6 +79,10 @@ SettingsStore::SettingsStore(const std::string& data_dir) {
 }
 
 AppSettings SettingsStore::read() const {
+    if (loaded_) {
+        return cache_;
+    }
+
     std::ifstream file(file_path_);
     if (!file.is_open()) {
         std::vector<std::string> candidates = {
@@ -93,20 +97,28 @@ AppSettings SettingsStore::read() const {
                 try {
                     nlohmann::json j;
                     default_file >> j;
-                    return j.get<AppSettings>();
+                    cache_ = j.get<AppSettings>();
+                    loaded_ = true;
+                    return cache_;
                 } catch (...) {}
             }
         }
-        return AppSettings{};
+        cache_ = AppSettings{};
+        loaded_ = true;
+        return cache_;
     }
 
     try {
         nlohmann::json j;
         file >> j;
-        return j.get<AppSettings>();
+        cache_ = j.get<AppSettings>();
+        loaded_ = true;
+        return cache_;
     } catch (...) {}
 
-    return AppSettings{};
+    cache_ = AppSettings{};
+    loaded_ = true;
+    return cache_;
 }
 
 AppSettings SettingsStore::write(const AppSettings& patch) {
@@ -119,10 +131,14 @@ AppSettings SettingsStore::write(const AppSettings& patch) {
     current.connect_beep_type = patch.connect_beep_type;
     current.pad_layout = patch.pad_layout;
     if (!patch.active_profile_id.empty()) current.active_profile_id = patch.active_profile_id;
+    current.ui_scale = patch.ui_scale;
 
     nlohmann::json j = current;
     std::ofstream file(file_path_);
     file << j.dump(2);
+
+    cache_ = current;
+    loaded_ = true;
     return current;
 }
 

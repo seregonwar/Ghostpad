@@ -170,21 +170,38 @@ void renderConsolesScreen(App& app) {
         ImGui::BeginChild("ConsoleRow", ImVec2(avail_w - 36, item_h), true,
                           ImGuiWindowFlags_NoScrollbar);
 
+        /*
+         *  +-------------------------------------------------------+
+         *  |            DYNAMIC COLUMN GRID CALCULATOR             |
+         *  +-------------------------------------------------------+
+         */
+        float child_w = ImGui::GetContentRegionAvail().x;
+        
+        float actions_x = child_w - 200.0f;
+        if (actions_x < 468.0f) actions_x = 468.0f;
+        
+        float date_x = child_w - 320.0f;
+        if (date_x < 360.0f) date_x = 360.0f;
+        
+        float loader_x = child_w - 460.0f;
+        if (loader_x < 252.0f) loader_x = 252.0f;
+        
+        float connection_x = child_w - 600.0f;
+        if (connection_x < 144.0f) connection_x = 144.0f;
+
         ImGui::SetCursorPos(ImVec2(16, 14));
         ImGui::TextColored(p.text, "%s  %s", ICON_FA_DESKTOP, c.name.c_str());
         
-        ImGui::SameLine(avail_w * 0.26f);
-        ImGui::SetCursorPosY(14);
+        ImGui::SetCursorPos(ImVec2(connection_x, 14));
         ImGui::TextColored(p.muted, "%s  %s:%d", ICON_FA_SIGNAL, c.ip.c_str(), c.port);
         
-        ImGui::SameLine(avail_w * 0.48f);
+        ImGui::SetCursorPos(ImVec2(loader_x, 14));
         ImGui::TextColored(p.dim, "%s  Loader: %d", ICON_FA_DOWNLOAD, c.elf_loader_port);
         
-        ImGui::SameLine(avail_w * 0.66f);
+        ImGui::SetCursorPos(ImVec2(date_x, 14));
         ImGui::TextColored(p.dim, "%s  %s", ICON_FA_CALENDAR, c.updated_at.substr(0, 10).c_str());
 
-        ImGui::SameLine(avail_w - 240);
-        ImGui::SetCursorPosY(13);
+        ImGui::SetCursorPos(ImVec2(actions_x, 13));
         if (connecting) {
             ImGui::BeginDisabled();
             ui::softButton(ICON_FA_LINK "  Connect", ImVec2(100, 30));

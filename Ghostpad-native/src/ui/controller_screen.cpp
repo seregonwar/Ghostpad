@@ -34,24 +34,27 @@ void renderControllerScreen(App& app) {
      */
     float spacing = ImGui::GetStyle().ItemSpacing.x;
     float edit_pencil_w = 40.0f;
-    float top_actions_w = 0.0f;
+    float total_width = 0.0f;
+    
+    float slot_sel_w = 14.0f + spacing + 75.0f;
+    total_width += slot_sel_w;
+    total_width += spacing + edit_pencil_w;
 
     if (app.is_layout_edit_mode) {
-        top_actions_w = edit_pencil_w + spacing + 130.0f + spacing + 120.0f;
+        total_width += spacing + 130.0f + spacing + 120.0f;
     } else {
-        top_actions_w = edit_pencil_w + spacing + 90.0f;
+        total_width += spacing + 90.0f;
         if (!status.is_connected) {
-            top_actions_w += spacing + 100.0f;
+            total_width += spacing + 100.0f;
         }
     }
 
-    // Slot selector
-    top_actions_w += spacing + 60.0f;
-    ImGui::SameLine(avail_w - top_actions_w);
+    ImGui::SameLine(avail_w - total_width);
+
     ImGui::AlignTextToFramePadding();
     ImGui::TextColored(p.muted, "%s", ICON_FA_USER);
     ImGui::SameLine();
-    ImGui::PushItemWidth(55);
+    ImGui::PushItemWidth(75);
     int slot = app.activeSlot();
     if (ImGui::Combo("##CtrlSlot", &slot, "P1\0P2\0P3\0P4\0")) {
         app.setActiveSlot(slot);
@@ -59,8 +62,6 @@ void renderControllerScreen(App& app) {
     ImGui::PopItemWidth();
     ImGui::SameLine();
 
-    ImGui::SameLine(avail_w - top_actions_w);
-    
     // Pencil button (Toggles Edit Mode)
     const char* pencil_icon = app.is_layout_edit_mode ? ICON_FA_XMARK : ICON_FA_PEN_TO_SQUARE;
     ImU32 pencil_col = app.is_layout_edit_mode ? ui::u32(p.danger) : ui::u32(p.primary2);
