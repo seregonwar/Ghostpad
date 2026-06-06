@@ -87,11 +87,11 @@ Ghostpad is designed for local-network control, diagnostics, development, and co
   │  Desktop App    │                                       │  PS4 / PS5 Console  │
   │  C++ / ImGui    │      ◄──────── TCP 3434 ────────────  │  ghostpad.elf       │
   └─────────────────┘             klog stream               └──────────┬──────────┘
-                                                                        │
-                                                                        │
-                                                                        ▼
-                                                              Virtual DualSense
-                                                              via VDA / VDI
+                                                                       │
+                                                                       │
+                                                                       ▼
+                                                                Virtual DualSense
+                                                                via VDA / VDI
 
   ┌─────────────────┐
   │  Browser UI     │
