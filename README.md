@@ -83,9 +83,9 @@ Ghostpad is designed for local-network control, diagnostics, development, and co
 ```text
                                       TCP 6967
                                GPAD controller input
-  ┌─────────────────┐      ───────────────────────────►      ┌─────────────────────┐
-  │  Desktop App    │                                       │  PS4 / PS5 Console   │
-  │  C++ / ImGui    │      ◄──────── TCP 3434 ────────────  │  ghostpad.elf        │
+  ┌─────────────────┐      ───────────────────────────►     ┌─────────────────────┐
+  │  Desktop App    │                                       │  PS4 / PS5 Console  │
+  │  C++ / ImGui    │      ◄──────── TCP 3434 ────────────  │  ghostpad.elf       │
   └─────────────────┘             klog stream               └──────────┬──────────┘
                                                                         │
                                                                         │
@@ -97,12 +97,14 @@ Ghostpad is designed for local-network control, diagnostics, development, and co
   │  Browser UI     │
   │  Web Controller │
   └────────┬────────┘
+           ▲
            │ WiFi
            ▼
   ┌─────────────────┐         TCP 6967          ┌─────────────────────┐
   │  ESP32 Bridge   │ ────────────────────────► │  PS4 / PS5 Console  │
   │  Web + BLE HID  │                           │  ghostpad.elf       │
   └────────┬────────┘                           └─────────────────────┘
+           ▲
            │
            │ BLE
            ▼
