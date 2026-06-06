@@ -34,24 +34,36 @@ FetchContent_Declare(
   GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(imgui)
+if(APPLE AND EXISTS "${imgui_SOURCE_DIR}")
+  execute_process(COMMAND xattr -cr "${imgui_SOURCE_DIR}" 2>/dev/null)
+endif()
 
 # Download IconsFontAwesome6.h and fa-solid-900.ttf
 if(NOT EXISTS "${CMAKE_CURRENT_BINARY_DIR}/IconsFontAwesome6.h")
   message(STATUS "Downloading IconsFontAwesome6.h...")
   file(DOWNLOAD "https://raw.githubusercontent.com/juliettef/IconFontCppHeaders/main/IconsFontAwesome6.h"
        "${CMAKE_CURRENT_BINARY_DIR}/IconsFontAwesome6.h" SHOW_PROGRESS)
+  if(APPLE)
+    execute_process(COMMAND xattr -cr "${CMAKE_CURRENT_BINARY_DIR}/IconsFontAwesome6.h" 2>/dev/null)
+  endif()
 endif()
 
 if(NOT EXISTS "${CMAKE_CURRENT_BINARY_DIR}/fa-solid-900.ttf")
   message(STATUS "Downloading fa-solid-900.ttf...")
   file(DOWNLOAD "https://github.com/FortAwesome/Font-Awesome/raw/6.5.1/webfonts/fa-solid-900.ttf"
        "${CMAKE_CURRENT_BINARY_DIR}/fa-solid-900.ttf" SHOW_PROGRESS)
+  if(APPLE)
+    execute_process(COMMAND xattr -cr "${CMAKE_CURRENT_BINARY_DIR}/fa-solid-900.ttf" 2>/dev/null)
+  endif()
 endif()
 
 if(NOT EXISTS "${CMAKE_CURRENT_BINARY_DIR}/stb_image.h")
   message(STATUS "Downloading stb_image.h...")
   file(DOWNLOAD "https://raw.githubusercontent.com/nothings/stb/master/stb_image.h"
        "${CMAKE_CURRENT_BINARY_DIR}/stb_image.h" SHOW_PROGRESS)
+  if(APPLE)
+    execute_process(COMMAND xattr -cr "${CMAKE_CURRENT_BINARY_DIR}/stb_image.h" 2>/dev/null)
+  endif()
 endif()
 
 # Generate embedded headers using Python
@@ -68,6 +80,9 @@ execute_process(
 )
 if(NOT embed_result EQUAL 0)
   message(FATAL_ERROR "Failed to run embed_assets.py to generate header files")
+endif()
+if(APPLE)
+  execute_process(COMMAND xattr -cr "${CMAKE_CURRENT_BINARY_DIR}/generated_assets" 2>/dev/null)
 endif()
 
 set(IMGUI_SOURCES
@@ -97,6 +112,9 @@ FetchContent_Declare(
   GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(json)
+if(APPLE AND EXISTS "${json_SOURCE_DIR}")
+  execute_process(COMMAND xattr -cr "${json_SOURCE_DIR}" 2>/dev/null)
+endif()
 
 if(NOT IOS)
   find_package(OpenGL REQUIRED)
@@ -124,7 +142,7 @@ set(SOURCES
   src/storage/profile_store.cpp
   src/storage/project_store.cpp
   src/input/keyboard_input.cpp
-  src/input/gamepad_input.cpp
+  src/input/gamepad_input.mm
   src/input/macro_engine.cpp
   src/ui/gif_export.cpp
   src/ui/file_picker.cpp
@@ -136,6 +154,7 @@ if(IOS)
     src/ui/ios/main.ios.mm
     src/ui/ios/AppDelegate.mm
     src/ui/ios/ViewController.mm
+    src/ui/file_picker_ios.mm
     ImGuiIOSKeyboardBridge.mm
   )
 else()
@@ -190,6 +209,8 @@ elseif(APPLE)
       "-framework Foundation"
       "-framework CoreGraphics"
       "-framework QuartzCore"
+      "-framework GameController"
+      "-framework UniformTypeIdentifiers"
     )
   else()
     find_library(COCOA_FRAMEWORK Cocoa REQUIRED)

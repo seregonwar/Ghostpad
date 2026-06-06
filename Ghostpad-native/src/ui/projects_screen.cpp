@@ -6,6 +6,7 @@
 #include "ui/app.h"
 #include "ui/native_theme.h"
 #include "ui/gif_export.h"
+#include "ui/file_picker.h"
 #include "imgui.h"
 #include <cstdio>
 #include <memory>
@@ -15,6 +16,7 @@
 #include <cstring>
 #include <fstream>
 
+#ifndef GHOSTPAD_IOS
 #ifdef _WIN32
 #define popen _popen
 #define pclose _pclose
@@ -60,6 +62,35 @@ static void browseSavePath(char* buf, size_t bufsz, const char* prompt, const ch
     }
 }
 
+#else
+
+namespace ghostpad {
+
+extern void renderPadVisualizer(App& app, const PadStateInput& state, float size);
+
+static void browseFilePath(char* buf, size_t bufsz, const char* prompt, const char* types) {
+    std::string ext = types ? types : "*.*";
+    std::string res = ghostpad::ui::pickFile(prompt, "Files", ext);
+    if (!res.empty()) {
+        strncpy(buf, res.c_str(), bufsz - 1);
+        buf[bufsz - 1] = '\0';
+    }
+}
+
+static void browseSavePath(char* buf, size_t bufsz, const char* /*prompt*/, const char* defName) {
+    // On iOS, use a default path in Documents directory
+    const char* home = getenv("HOME");
+    if (home) {
+        std::string path = std::string(home) + "/Documents/" + (defName ? defName : "export.json");
+        strncpy(buf, path.c_str(), bufsz - 1);
+        buf[bufsz - 1] = '\0';
+    } else {
+        buf[0] = '\0';
+    }
+}
+
+#endif
+
 static bool writeFile(const std::string& path, const std::string& content) {
     std::ofstream out(path);
     if (!out.is_open()) return false;
@@ -79,29 +110,39 @@ void renderProjectsScreen(App& app) {
     float avail_w = ImGui::GetContentRegionAvail().x;
     bool recording = app.macro_engine.isRecording();
     bool playing = app.macro_engine.isPlaying();
+    bool compact = app.is_compact_device;
 
     // Controls bar
+    float ctrl_btn_w = compact ? (avail_w - 36.0f) : 160.0f;
+    float ctrl_btn_h = compact ? 38.0f : 34.0f;
+
     if (recording) {
-        if (ui::dangerButton(ICON_FA_STOP "  Stop Recording", ImVec2(160, 34))) {
+        if (ui::dangerButton(ICON_FA_STOP "  Stop Recording", ImVec2(ctrl_btn_w, ctrl_btn_h))) {
             app.macro_engine.stopRecording();
             auto sigs = app.macro_engine.getRecordedSignals();
             app.addStatus("Recorded " + std::to_string(sigs.size()) + " signals");
         }
     } else if (!playing) {
-        if (ui::primaryButton(ICON_FA_CIRCLE "  Start Recording", ImVec2(160, 34)))
+        if (ui::primaryButton(ICON_FA_CIRCLE "  Start Recording", ImVec2(ctrl_btn_w, ctrl_btn_h)))
             app.macro_engine.startRecording();
     }
     
-    ImGui::SameLine();
-    if (playing && ui::dangerButton(ICON_FA_STOP "  Stop Playback", ImVec2(140, 34)))
+    if (!compact) ImGui::SameLine();
+    else ImGui::Spacing();
+    
+    if (playing && ui::dangerButton(ICON_FA_STOP "  Stop Playback", ImVec2(ctrl_btn_w, ctrl_btn_h)))
         app.macro_engine.stopPlayback();
         
-    ImGui::SameLine();
-    if (ui::softButton(ICON_FA_PLUS "  New Project", ImVec2(140, 34)))
+    if (!compact) ImGui::SameLine();
+    else ImGui::Spacing();
+    
+    if (ui::softButton(ICON_FA_PLUS "  New Project", ImVec2(ctrl_btn_w, ctrl_btn_h)))
         ImGui::OpenPopup("NewProjectPopup");
 
-    ImGui::SameLine();
-    if (ui::softButton(ICON_FA_FILE_IMPORT "  Import Project", ImVec2(160, 34)))
+    if (!compact) ImGui::SameLine();
+    else ImGui::Spacing();
+    
+    if (ui::softButton(ICON_FA_FILE_IMPORT "  Import Project", ImVec2(ctrl_btn_w, ctrl_btn_h)))
         ImGui::OpenPopup("ImportProjectPopup");
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24, 20));
@@ -148,7 +189,7 @@ void renderProjectsScreen(App& app) {
         static bool pathHasChanged = false;
 
         ImGui::TextColored(p.muted, "JSON File Path:");
-        ImGui::SetNextItemWidth(380);
+        ImGui::SetNextItemWidth(-90);
         if (ImGui::InputText("##ImportPath", importPath, sizeof(importPath))) {
             pathHasChanged = true;
         }
@@ -172,7 +213,7 @@ void renderProjectsScreen(App& app) {
             ImGui::Spacing();
             ImGui::TextColored(p.muted, "Preview (%zu bytes):", importPreview.size());
             ImGui::PushStyleColor(ImGuiCol_ChildBg, p.bg1);
-            ImGui::BeginChild("PreviewBox", ImVec2(460, 100), true);
+            ImGui::BeginChild("PreviewBox", ImVec2(0, 100), true);
             ImGui::TextWrapped("%s", importPreview.substr(0, 600).c_str());
             ImGui::EndChild();
             ImGui::PopStyleColor();
@@ -210,73 +251,114 @@ void renderProjectsScreen(App& app) {
     if (all.empty()) {
         ImGui::TextColored(p.muted, "No projects yet. Create one above.");
     } else {
+        bool compact = app.is_compact_device;
         for (auto& proj : all) {
             ImGui::PushID(proj.id.c_str());
             
             ImGui::PushStyleColor(ImGuiCol_ChildBg, p.bg1);
             ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
-            ImGui::BeginChild("ProjRow", ImVec2(avail_w - 36, 54), true,
+            float row_h = compact ? 70.0f : 54.0f;
+            ImGui::BeginChild("ProjRow", ImVec2(avail_w - 36, row_h), true,
                               ImGuiWindowFlags_NoScrollbar);
 
-            /*
-             *  +-------------------------------------------------------+
-             *  |            DYNAMIC COLUMN GRID CALCULATOR             |
-             *  +-------------------------------------------------------+
-             */
             float child_w = ImGui::GetContentRegionAvail().x;
             
-            float actions_x = child_w - 200.0f;
-            if (actions_x < 468.0f) actions_x = 468.0f;
-            
-            float date_x = child_w - 320.0f;
-            if (date_x < 360.0f) date_x = 360.0f;
-            
-            float commands_x = child_w - 460.0f;
-            if (commands_x < 252.0f) commands_x = 252.0f;
-            
-            float game_x = child_w - 600.0f;
-            if (game_x < 144.0f) game_x = 144.0f;
-            
-            float name_w = game_x - 16.0f - 8.0f;
+            if (compact) {
+                // Compact: stack info vertically
+                ImGui::SetCursorPos(ImVec2(16, 8));
+                bool sel = (app.selected_project_id == proj.id);
+                std::string proj_lbl = std::string(ICON_FA_FOLDER) + "  " + proj.name;
+                if (ImGui::Selectable(proj_lbl.c_str(), &sel, 0, ImVec2(child_w - 32, 24))) {
+                    app.selected_project_id = proj.id;
+                }
+                
+                ImGui::SetCursorPos(ImVec2(16, 36));
+                ImGui::TextColored(p.muted, "%s  %s  |  %zu cmds  |  %s", 
+                    ICON_FA_GAMEPAD, proj.game.c_str(), proj.commands.size(),
+                    proj.updated_at.substr(0, 10).c_str());
 
-            ImGui::SetCursorPos(ImVec2(16, 12));
-            bool sel = (app.selected_project_id == proj.id);
-            std::string proj_lbl = std::string(ICON_FA_FOLDER) + "  " + proj.name;
-            if (ImGui::Selectable(proj_lbl.c_str(), &sel, 0, ImVec2(name_w, 30))) {
-                app.selected_project_id = proj.id;
-            }
-            
-            ImGui::SetCursorPos(ImVec2(game_x, 14));
-            ImGui::TextColored(p.muted, "%s  %s", ICON_FA_GAMEPAD, proj.game.c_str());
-            
-            ImGui::SetCursorPos(ImVec2(commands_x, 14));
-            ImGui::TextColored(p.dim, "%s  %zu commands", ICON_FA_CODE, proj.commands.size());
-            
-            ImGui::SetCursorPos(ImVec2(date_x, 14));
-            ImGui::TextColored(p.dim, "%s  %s", ICON_FA_CALENDAR, proj.updated_at.substr(0, 10).c_str());
-
-            ImGui::SetCursorPos(ImVec2(actions_x, 11));
-            if (ui::primaryButton(ICON_FA_FOLDER_OPEN "  Open", ImVec2(80, 30))) {
-                app.selected_project_id = proj.id;
-                app.current_screen = Screen::ProjectDetail;
-            }
-            ImGui::SameLine();
-            if (ui::softButton(ICON_FA_FILE_EXPORT, ImVec2(36, 30))) {
-                std::string json = app.projects.exportJson(proj.id);
-                if (!json.empty()) {
-                    char savePath[512] = {};
-                    snprintf(savePath, sizeof(savePath), "%s.json", proj.name.c_str());
-                    browseSavePath(savePath, sizeof(savePath), "Export Project JSON", savePath);
-                    if (savePath[0] && writeFile(savePath, json)) {
-                        app.addStatus("Exported to " + std::string(savePath));
+                // Buttons on the right
+                float btn_x = child_w - 130.0f;
+                if (btn_x < child_w * 0.5f) btn_x = child_w * 0.5f;
+                ImGui::SetCursorPos(ImVec2(btn_x, 20));
+                if (ui::primaryButton(ICON_FA_FOLDER_OPEN "  Open", ImVec2(70, 32))) {
+                    app.selected_project_id = proj.id;
+                    app.current_screen = Screen::ProjectDetail;
+                }
+                ImGui::SameLine();
+                if (ui::softButton(ICON_FA_FILE_EXPORT, ImVec2(32, 32))) {
+                    std::string json = app.projects.exportJson(proj.id);
+                    if (!json.empty()) {
+                        char savePath[512] = {};
+                        snprintf(savePath, sizeof(savePath), "%s.json", proj.name.c_str());
+                        browseSavePath(savePath, sizeof(savePath), "Export Project JSON", savePath);
+                        if (savePath[0] && writeFile(savePath, json)) {
+                            app.addStatus("Exported to " + std::string(savePath));
+                        }
                     }
                 }
-            }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Export JSON");
-            ImGui::SameLine();
-            if (ui::dangerButton(ICON_FA_TRASH "  Del", ImVec2(70, 30))) {
-                app.projects.remove(proj.id);
-                if (app.selected_project_id == proj.id) app.selected_project_id.clear();
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Export JSON");
+                ImGui::SameLine();
+                if (ui::dangerButton(ICON_FA_TRASH, ImVec2(32, 32))) {
+                    app.projects.remove(proj.id);
+                    if (app.selected_project_id == proj.id) app.selected_project_id.clear();
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete Project");
+            } else {
+                // Desktop/iPad: horizontal layout
+                float actions_x = child_w - 200.0f;
+                if (actions_x < 468.0f) actions_x = 468.0f;
+                
+                float date_x = child_w - 320.0f;
+                if (date_x < 360.0f) date_x = 360.0f;
+                
+                float commands_x = child_w - 460.0f;
+                if (commands_x < 252.0f) commands_x = 252.0f;
+                
+                float game_x = child_w - 600.0f;
+                if (game_x < 144.0f) game_x = 144.0f;
+                
+                float name_w = game_x - 16.0f - 8.0f;
+
+                ImGui::SetCursorPos(ImVec2(16, 12));
+                bool sel = (app.selected_project_id == proj.id);
+                std::string proj_lbl = std::string(ICON_FA_FOLDER) + "  " + proj.name;
+                if (ImGui::Selectable(proj_lbl.c_str(), &sel, 0, ImVec2(name_w, 30))) {
+                    app.selected_project_id = proj.id;
+                }
+                
+                ImGui::SetCursorPos(ImVec2(game_x, 14));
+                ImGui::TextColored(p.muted, "%s  %s", ICON_FA_GAMEPAD, proj.game.c_str());
+                
+                ImGui::SetCursorPos(ImVec2(commands_x, 14));
+                ImGui::TextColored(p.dim, "%s  %zu commands", ICON_FA_CODE, proj.commands.size());
+                
+                ImGui::SetCursorPos(ImVec2(date_x, 14));
+                ImGui::TextColored(p.dim, "%s  %s", ICON_FA_CALENDAR, proj.updated_at.substr(0, 10).c_str());
+
+                ImGui::SetCursorPos(ImVec2(actions_x, 11));
+                if (ui::primaryButton(ICON_FA_FOLDER_OPEN "  Open", ImVec2(80, 30))) {
+                    app.selected_project_id = proj.id;
+                    app.current_screen = Screen::ProjectDetail;
+                }
+                ImGui::SameLine();
+                if (ui::softButton(ICON_FA_FILE_EXPORT, ImVec2(36, 30))) {
+                    std::string json = app.projects.exportJson(proj.id);
+                    if (!json.empty()) {
+                        char savePath[512] = {};
+                        snprintf(savePath, sizeof(savePath), "%s.json", proj.name.c_str());
+                        browseSavePath(savePath, sizeof(savePath), "Export Project JSON", savePath);
+                        if (savePath[0] && writeFile(savePath, json)) {
+                            app.addStatus("Exported to " + std::string(savePath));
+                        }
+                    }
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Export JSON");
+                ImGui::SameLine();
+                if (ui::dangerButton(ICON_FA_TRASH "  Del", ImVec2(70, 30))) {
+                    app.projects.remove(proj.id);
+                    if (app.selected_project_id == proj.id) app.selected_project_id.clear();
+                }
             }
             ImGui::EndChild();
             ImGui::PopStyleVar();
@@ -302,7 +384,7 @@ static void renderImportSignalsPopup(App& app, std::vector<MacroSignal>& targetS
         static bool parsed = false;
 
         ImGui::TextColored(p.muted, "File Path (.json or .py):");
-        ImGui::SetNextItemWidth(380);
+        ImGui::SetNextItemWidth(-90);
         ImGui::InputText("##ImportSigPath", pathBuf, sizeof(pathBuf));
         ImGui::SameLine();
         if (ui::softButton("Browse...", ImVec2(80, 28))) {
@@ -378,7 +460,7 @@ static void renderPythonExportPopup(App& app, const std::string& pyCode, const s
         ImGui::Spacing();
 
         ImGui::PushStyleColor(ImGuiCol_ChildBg, p.bg1);
-        ImGui::BeginChild("PyPreview", ImVec2(500, 180), true);
+        ImGui::BeginChild("PyPreview", ImVec2(0, 180), true);
         ImGui::TextWrapped("%s", pyCode.c_str());
         ImGui::EndChild();
         ImGui::PopStyleColor();
@@ -390,7 +472,7 @@ static void renderPythonExportPopup(App& app, const std::string& pyCode, const s
         }
 
         ImGui::TextColored(p.muted, "Save to:");
-        ImGui::SetNextItemWidth(380);
+        ImGui::SetNextItemWidth(-90);
         ImGui::InputText("##PySavePath2", savePath2, sizeof(savePath2));
         ImGui::SameLine();
         if (ui::softButton("Browse...", ImVec2(80, 28))) {

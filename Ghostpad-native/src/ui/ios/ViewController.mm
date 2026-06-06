@@ -56,6 +56,33 @@ ImTextureID createControllerTexture(const unsigned char* pixels, int width, int 
 
 @implementation ViewController
 
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    return UIInterfaceOrientationMaskAll;
+}
+
+- (BOOL)shouldAutorotate {
+    return YES;
+}
+
+- (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
+    return UIInterfaceOrientationLandscapeLeft;
+}
+
+- (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
+    [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
+    if (_mtkView) {
+        _mtkView.contentScaleFactor = [UIScreen mainScreen].nativeScale;
+    }
+}
+
+- (BOOL)prefersStatusBarHidden {
+    return YES;
+}
+
+- (BOOL)prefersHomeIndicatorAutoHidden {
+    return YES;
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     
@@ -91,6 +118,20 @@ ImTextureID createControllerTexture(const unsigned char* pixels, int width, int 
     ImGui_ImplMetal_Init(g_metal_device);
 }
 
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    // Adjust MTKView frame to respect safe areas (notch, home indicator)
+    if (_mtkView) {
+        UIEdgeInsets safeArea = self.view.safeAreaInsets;
+        CGRect frame = self.view.bounds;
+        frame.origin.x += safeArea.left;
+        frame.origin.y += safeArea.top;
+        frame.size.width -= (safeArea.left + safeArea.right);
+        frame.size.height -= (safeArea.top + safeArea.bottom);
+        _mtkView.frame = frame;
+    }
+}
+
 - (void)dealloc {
     if (_app) {
         _app->shutdown();
@@ -109,7 +150,9 @@ ImTextureID createControllerTexture(const unsigned char* pixels, int width, int 
 
 - (void)handleTouch:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event state:(BOOL)pressed {
     ImGuiIO& io = ImGui::GetIO();
-    for (UITouch *touch in touches) {
+    // Use the first touch as the primary pointer
+    UITouch *touch = [touches anyObject];
+    if (touch) {
         CGPoint location = [touch locationInView:_mtkView];
         io.AddMousePosEvent(location.x, location.y);
         io.AddMouseButtonEvent(ImGuiMouseButton_Left, pressed);
@@ -122,9 +165,12 @@ ImTextureID createControllerTexture(const unsigned char* pixels, int width, int 
 
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     ImGuiIO& io = ImGui::GetIO();
+    // Track all touches for multi-touch support, but use first as primary
     UITouch *touch = [touches anyObject];
-    CGPoint location = [touch locationInView:_mtkView];
-    io.AddMousePosEvent(location.x, location.y);
+    if (touch) {
+        CGPoint location = [touch locationInView:_mtkView];
+        io.AddMousePosEvent(location.x, location.y);
+    }
 }
 
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {

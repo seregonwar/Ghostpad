@@ -13,143 +13,222 @@ namespace ghostpad {
 void renderConsolesScreen(App& app) {
     const auto& p = ui::colors();
     float avail_w = ImGui::GetContentRegionAvail().x;
+    bool compact = app.is_compact_device;
 
-    // Connection bar
-    ui::beginCard("ConnectBar", ImVec2(avail_w, 110));
+    float bar_h = compact ? 160.0f : 110.0f;
+    ui::beginCard("ConnectBar", ImVec2(avail_w, bar_h));
     ui::sectionLabel("Direct Connect", ICON_FA_PLUG);
     ImGui::Spacing();
 
     static char ip_buf[64] = {};
     static int port_buf = 6967;
 
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextColored(p.muted, "%s IP:", ICON_FA_DESKTOP);
-    ImGui::SameLine();
-    ImGui::PushItemWidth(140);
-    ImGui::InputTextWithHint("##IP", "0.0.0.0", ip_buf, sizeof(ip_buf));
-    ImGui::PopItemWidth();
-    ImGui::SameLine();
-    
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextColored(p.muted, "Port:");
-    ImGui::SameLine();
-    ImGui::PushItemWidth(70);
-    ImGui::InputInt("##Port", &port_buf, 0, 0);
-    ImGui::PopItemWidth();
-    ImGui::SameLine();
+    if (compact) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(p.muted, "%s IP:", ICON_FA_DESKTOP);
+        ImGui::SameLine();
+        ImGui::PushItemWidth(avail_w * 0.35f);
+        ImGui::InputTextWithHint("##IP", "0.0.0.0", ip_buf, sizeof(ip_buf));
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
+        
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(p.muted, "Port:");
+        ImGui::SameLine();
+        ImGui::PushItemWidth(60);
+        ImGui::InputInt("##Port", &port_buf, 0, 0);
+        ImGui::PopItemWidth();
+        ImGui::Spacing();
 
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextColored(p.muted, "Slot:");
-    ImGui::SameLine();
-    ImGui::PushItemWidth(50);
-    static const char* slotNames[] = { "P1", "P2", "P3", "P4" };
-    int currentSlot = app.activeSlot();
-    if (ImGui::Combo("##Slot", &currentSlot, slotNames, App::MAX_CONTROLLER_SLOTS)) {
-        app.setActiveSlot(currentSlot);
-    }
-    ImGui::PopItemWidth();
-    ImGui::SameLine();
-
-    bool connecting = app.is_connecting_.load();
-
-    if (connecting) {
-        ImGui::BeginDisabled();
-        ui::softButton(ICON_FA_SPINNER "  Connecting...", ImVec2(130, 32));
-        ImGui::EndDisabled();
+        bool connecting = app.is_connecting_.load();
+        
+        // Mobile: stack buttons vertically for better touch targets
+        float btn_w = avail_w - 36.0f;
+        
+        if (connecting) {
+            ImGui::BeginDisabled();
+            ui::softButton(ICON_FA_SPINNER "  Connecting...", ImVec2(btn_w, 36));
+            ImGui::EndDisabled();
+        } else {
+            if (ui::primaryButton(ICON_FA_LINK "  Connect", ImVec2(btn_w, 36))) {
+                std::string ip(ip_buf);
+                if (!ip.empty()) {
+                    app.addStatus("Connecting to " + ip + "...");
+                    app.is_connecting_ = true;
+                    std::thread([&app, ip, port = port_buf]() {
+                        auto settings = app.settings.read();
+                        std::string elf = app.settings.resolvePayloadPath();
+                        if (settings.auto_deploy_on_connect && !elf.empty()) {
+                            PayloadDeployer::Options opts;
+                            opts.elf_path = elf;
+                            opts.auto_bind_via_klog = settings.auto_bind_via_klog;
+                            opts.status_callback = [&app](const DeployStatus& s) {
+                                app.addStatus(s.message, s.phase == "error");
+                            };
+                            app.deployer.ensurePayloadRunning(ip, opts);
+                        }
+                        if (app.ghostpad().connect(ip, port)) {
+                            app.selected_console_ip = ip;
+                            app.selected_console_port = port;
+                            app.addStatus("Connected P" + std::to_string(app.activeSlot() + 1) + " to " + ip);
+                            if (settings.connect_beep_enabled && app.deployer.auto_adopted)
+                                BeeperClient::buzz(ip, settings.connect_beep_type);
+                        } else {
+                            app.addStatus("Connection failed", true);
+                        }
+                        app.is_connecting_ = false;
+                    }).detach();
+                }
+            }
+        }
+        ImGui::Spacing();
+        if (ui::dangerButton(ICON_FA_LINK_SLASH "  Disconnect", ImVec2(btn_w, 36))) {
+            app.disconnectAllGhostpad();
+            app.deployer.stopKlogWatcher();
+            app.selected_console_ip.clear();
+            app.addStatus("Disconnected all controllers");
+        }
+        ImGui::Spacing();
+        if (ui::softButton(ICON_FA_WIFI "  Scan Network", ImVec2(btn_w, 36))) {
+            app.addStatus("Scanning subnet...");
+            std::thread([&app]() {
+                auto r = GhostpadClient::scanNetwork();
+                app.addStatus(std::to_string(r.size()) + " host(s) found");
+            }).detach();
+        }
     } else {
-        if (ui::primaryButton(ICON_FA_LINK "  Connect", ImVec2(110, 32))) {
-            std::string ip(ip_buf);
-            if (!ip.empty()) {
-                app.addStatus("Connecting to " + ip + "...");
-                app.is_connecting_ = true;
-                
-                std::thread([&app, ip, port = port_buf]() {
-                    auto settings = app.settings.read();
-                    std::string elf = app.settings.resolvePayloadPath();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(p.muted, "%s IP:", ICON_FA_DESKTOP);
+        ImGui::SameLine();
+        ImGui::PushItemWidth(140);
+        ImGui::InputTextWithHint("##IP", "0.0.0.0", ip_buf, sizeof(ip_buf));
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
+        
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(p.muted, "Port:");
+        ImGui::SameLine();
+        ImGui::PushItemWidth(70);
+        ImGui::InputInt("##Port", &port_buf, 0, 0);
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
 
-                    if (settings.auto_deploy_on_connect && !elf.empty()) {
-                        PayloadDeployer::Options opts;
-                        opts.elf_path = elf;
-                        opts.auto_bind_via_klog = settings.auto_bind_via_klog;
-                        opts.status_callback = [&app](const DeployStatus& s) {
-                            app.addStatus(s.message, s.phase == "error");
-                        };
-                        app.deployer.ensurePayloadRunning(ip, opts);
-                    }
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(p.muted, "Slot:");
+        ImGui::SameLine();
+        ImGui::PushItemWidth(50);
+        static const char* slotNames[] = { "P1", "P2", "P3", "P4" };
+        int currentSlot = app.activeSlot();
+        if (ImGui::Combo("##Slot", &currentSlot, slotNames, App::MAX_CONTROLLER_SLOTS)) {
+            app.setActiveSlot(currentSlot);
+        }
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
 
-                    if (app.ghostpad().connect(ip, port)) {
-                        app.selected_console_ip = ip;
-                        app.selected_console_port = port;
-                        app.addStatus("Connected P" + std::to_string(app.activeSlot() + 1) + " to " + ip);
-                        if (settings.connect_beep_enabled && app.deployer.auto_adopted)
-                            BeeperClient::buzz(ip, settings.connect_beep_type);
+        bool connecting = app.is_connecting_.load();
+
+        if (connecting) {
+            ImGui::BeginDisabled();
+            ui::softButton(ICON_FA_SPINNER "  Connecting...", ImVec2(130, 32));
+            ImGui::EndDisabled();
+        } else {
+            if (ui::primaryButton(ICON_FA_LINK "  Connect", ImVec2(110, 32))) {
+                std::string ip(ip_buf);
+                if (!ip.empty()) {
+                    app.addStatus("Connecting to " + ip + "...");
+                    app.is_connecting_ = true;
+                    
+                    std::thread([&app, ip, port = port_buf]() {
+                        auto settings = app.settings.read();
+                        std::string elf = app.settings.resolvePayloadPath();
+
+                        if (settings.auto_deploy_on_connect && !elf.empty()) {
+                            PayloadDeployer::Options opts;
+                            opts.elf_path = elf;
+                            opts.auto_bind_via_klog = settings.auto_bind_via_klog;
+                            opts.status_callback = [&app](const DeployStatus& s) {
+                                app.addStatus(s.message, s.phase == "error");
+                            };
+                            app.deployer.ensurePayloadRunning(ip, opts);
+                        }
+
+                        if (app.ghostpad().connect(ip, port)) {
+                            app.selected_console_ip = ip;
+                            app.selected_console_port = port;
+                            app.addStatus("Connected P" + std::to_string(app.activeSlot() + 1) + " to " + ip);
+                            if (settings.connect_beep_enabled && app.deployer.auto_adopted)
+                                BeeperClient::buzz(ip, settings.connect_beep_type);
+                        } else {
+                            app.addStatus("Connection failed", true);
+                        }
+                        app.is_connecting_ = false;
+                    }).detach();
+                }
+            }
+        }
+
+        ImGui::SameLine();
+        if (ui::dangerButton(ICON_FA_LINK_SLASH "  Disconnect", ImVec2(120, 32))) {
+            app.disconnectAllGhostpad();
+            app.deployer.stopKlogWatcher();
+            app.selected_console_ip.clear();
+            app.addStatus("Disconnected all controllers");
+        }
+
+        ImGui::SameLine();
+        if (ui::dangerButton(ICON_FA_POWER_OFF "  Terminate", ImVec2(120, 32))) {
+            if (!app.selected_console_ip.empty()) {
+                std::string ip = app.selected_console_ip;
+                app.addStatus("Terminating payload...");
+                std::thread([&app, ip]() {
+                    auto r = GhostpadClient::terminatePayload(ip);
+                    if (r.ok) {
+                        app.addStatus("Payload terminated");
                     } else {
-                        app.addStatus("Connection failed", true);
+                        app.addStatus("Payload termination sent", true);
                     }
-                    app.is_connecting_ = false;
+                    app.ghostpad().disconnect();
+                    app.deployer.stopKlogWatcher();
+                    app.selected_console_ip.clear();
                 }).detach();
             }
         }
-    }
 
-    ImGui::SameLine();
-    if (ui::dangerButton(ICON_FA_LINK_SLASH "  Disconnect", ImVec2(120, 32))) {
-        app.disconnectAllGhostpad();
-        app.deployer.stopKlogWatcher();
-        app.selected_console_ip.clear();
-        app.addStatus("Disconnected all controllers");
-    }
-
-    ImGui::SameLine();
-    if (ui::dangerButton(ICON_FA_POWER_OFF "  Terminate Payload", ImVec2(150, 32))) {
-        if (!app.selected_console_ip.empty()) {
-            std::string ip = app.selected_console_ip;
-            app.addStatus("Terminating and unpatching payload...");
-            std::thread([&app, ip]() {
-                auto r = GhostpadClient::terminatePayload(ip);
-                if (r.ok) {
-                    app.addStatus("Payload terminated and unpatched successfully");
-                } else {
-                    app.addStatus("Payload termination sent, checking status...", true);
-                }
-                app.ghostpad().disconnect();
-                app.deployer.stopKlogWatcher();
-                app.selected_console_ip.clear();
+        ImGui::SameLine();
+        if (ui::softButton(ICON_FA_WIFI "  Scan Network", ImVec2(140, 32))) {
+            app.addStatus("Scanning subnet...");
+            std::thread([&app]() {
+                auto r = GhostpadClient::scanNetwork();
+                app.addStatus(std::to_string(r.size()) + " host(s) found");
             }).detach();
         }
-    }
-
-
-    ImGui::SameLine();
-    if (ui::softButton(ICON_FA_WIFI "  Scan Network", ImVec2(140, 32))) {
-        app.addStatus("Scanning subnet...");
-        std::thread([&app]() {
-            auto r = GhostpadClient::scanNetwork();
-            app.addStatus(std::to_string(r.size()) + " host(s) found");
-        }).detach();
     }
 
     ui::endCard();
 
     ImGui::Spacing();
 
-    // Saved consoles
     ui::beginCard("ConsolesList", ImVec2(avail_w, 0));
-    /*
-     *    [ HEADER ]                   [ + ADD CONSOLE ]
-     *    ──────────────────────────────────────────────
-     */
     const auto& p_hdr = ui::colors();
     ImGui::PushStyleColor(ImGuiCol_Text, p_hdr.muted);
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 6.0f);
     ImGui::Text("%s  Saved Consoles", ICON_FA_DATABASE);
     ImGui::PopStyleColor();
 
-    ImGui::SameLine(ImGui::GetWindowWidth() - 130 - 18);
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 5.0f);
-    
-    if (ui::primaryButton(ICON_FA_PLUS "  Add Console", ImVec2(130, 30))) {
-        ImGui::OpenPopup("AddConsolePopup");
+    if (compact) {
+        // Mobile: button below title, full width
+        ImGui::Spacing();
+        if (ui::primaryButton(ICON_FA_PLUS "  Add Console", ImVec2(avail_w - 36.0f, 36))) {
+            ImGui::OpenPopup("AddConsolePopup");
+        }
+    } else {
+        // Desktop: button on the right
+        ImGui::SameLine(ImGui::GetWindowWidth() - 130 - 18);
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 5.0f);
+        
+        if (ui::primaryButton(ICON_FA_PLUS "  Add Console", ImVec2(130, 30))) {
+            ImGui::OpenPopup("AddConsolePopup");
+        }
     }
 
     ImGui::Spacing();
@@ -163,86 +242,141 @@ void renderConsolesScreen(App& app) {
 
     for (auto& c : consoles) {
         ImGui::PushID(c.id.c_str());
-        float item_h = 58.0f;
+        float item_h = compact ? 60.0f : 58.0f;
 
         ImGui::PushStyleColor(ImGuiCol_ChildBg, p.bg1);
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
         ImGui::BeginChild("ConsoleRow", ImVec2(avail_w - 36, item_h), true,
                           ImGuiWindowFlags_NoScrollbar);
 
-        /*
-         *  +-------------------------------------------------------+
-         *  |            DYNAMIC COLUMN GRID CALCULATOR             |
-         *  +-------------------------------------------------------+
-         */
         float child_w = ImGui::GetContentRegionAvail().x;
-        
-        float actions_x = child_w - 200.0f;
-        if (actions_x < 468.0f) actions_x = 468.0f;
-        
-        float date_x = child_w - 320.0f;
-        if (date_x < 360.0f) date_x = 360.0f;
-        
-        float loader_x = child_w - 460.0f;
-        if (loader_x < 252.0f) loader_x = 252.0f;
-        
-        float connection_x = child_w - 600.0f;
-        if (connection_x < 144.0f) connection_x = 144.0f;
 
-        ImGui::SetCursorPos(ImVec2(16, 14));
-        ImGui::TextColored(p.text, "%s  %s", ICON_FA_DESKTOP, c.name.c_str());
-        
-        ImGui::SetCursorPos(ImVec2(connection_x, 14));
-        ImGui::TextColored(p.muted, "%s  %s:%d", ICON_FA_SIGNAL, c.ip.c_str(), c.port);
-        
-        ImGui::SetCursorPos(ImVec2(loader_x, 14));
-        ImGui::TextColored(p.dim, "%s  Loader: %d", ICON_FA_DOWNLOAD, c.elf_loader_port);
-        
-        ImGui::SetCursorPos(ImVec2(date_x, 14));
-        ImGui::TextColored(p.dim, "%s  %s", ICON_FA_CALENDAR, c.updated_at.substr(0, 10).c_str());
+        if (compact) {
+            // Compact: stack info vertically
+            ImGui::SetCursorPos(ImVec2(12, 8));
+            ImGui::TextColored(p.text, "%s  %s", ICON_FA_DESKTOP, c.name.c_str());
+            
+            ImGui::SetCursorPos(ImVec2(12, 28));
+            ImGui::TextColored(p.muted, "%s:%d", c.ip.c_str(), c.port);
 
-        ImGui::SetCursorPos(ImVec2(actions_x, 13));
-        if (connecting) {
-            ImGui::BeginDisabled();
-            ui::softButton(ICON_FA_LINK "  Connect", ImVec2(100, 30));
-            ImGui::EndDisabled();
-        } else {
-            if (ui::primaryButton(ICON_FA_LINK "  Connect", ImVec2(100, 30))) {
-                app.addStatus("Connecting to " + c.name + "...");
-                app.is_connecting_ = true;
-                
-                std::thread([&app, ip = c.ip, port = c.port, name = c.name, elf_loader_port = c.elf_loader_port]() {
-                    auto settings = app.settings.read();
-                    std::string elf = app.settings.resolvePayloadPath();
+            // Buttons on the right
+            float btn_x = child_w - 180.0f;
+            if (btn_x < child_w * 0.5f) btn_x = child_w * 0.5f;
+            ImGui::SetCursorPos(ImVec2(btn_x, 15));
+            
+            bool connecting = app.is_connecting_.load();
+            if (connecting) {
+                ImGui::BeginDisabled();
+                ui::softButton(ICON_FA_LINK "  Connect", ImVec2(90, 32));
+                ImGui::EndDisabled();
+            } else {
+                if (ui::primaryButton(ICON_FA_LINK "  Connect", ImVec2(90, 32))) {
+                    app.addStatus("Connecting to " + c.name + "...");
+                    app.is_connecting_ = true;
                     
-                    if (settings.auto_deploy_on_connect && !elf.empty()) {
-                        PayloadDeployer::Options opts;
-                        opts.elf_path = elf;
-                        opts.elf_loader_port = elf_loader_port;
-                        opts.auto_bind_via_klog = settings.auto_bind_via_klog;
-                        opts.status_callback = [&app](const DeployStatus& s) {
-                            app.addStatus(s.message, s.phase == "error");
-                        };
-                        app.deployer.ensurePayloadRunning(ip, opts);
-                    }
-                    
-                    if (app.ghostpad().connect(ip, port)) {
-                        app.selected_console_ip = ip;
-                        app.selected_console_port = port;
-                        app.addStatus("Connected P" + std::to_string(app.activeSlot() + 1) + " to " + name);
-                        if (settings.connect_beep_enabled && app.deployer.auto_adopted)
-                            BeeperClient::buzz(ip, settings.connect_beep_type);
-                    } else {
-                        app.addStatus("Connection failed", true);
-                    }
-                    app.is_connecting_ = false;
-                }).detach();
+                    std::thread([&app, ip = c.ip, port = c.port, name = c.name, elf_loader_port = c.elf_loader_port]() {
+                        auto settings = app.settings.read();
+                        std::string elf = app.settings.resolvePayloadPath();
+                        
+                        if (settings.auto_deploy_on_connect && !elf.empty()) {
+                            PayloadDeployer::Options opts;
+                            opts.elf_path = elf;
+                            opts.elf_loader_port = elf_loader_port;
+                            opts.auto_bind_via_klog = settings.auto_bind_via_klog;
+                            opts.status_callback = [&app](const DeployStatus& s) {
+                                app.addStatus(s.message, s.phase == "error");
+                            };
+                            app.deployer.ensurePayloadRunning(ip, opts);
+                        }
+                        
+                        if (app.ghostpad().connect(ip, port)) {
+                            app.selected_console_ip = ip;
+                            app.selected_console_port = port;
+                            app.addStatus("Connected P" + std::to_string(app.activeSlot() + 1) + " to " + name);
+                            if (settings.connect_beep_enabled && app.deployer.auto_adopted)
+                                BeeperClient::buzz(ip, settings.connect_beep_type);
+                        } else {
+                            app.addStatus("Connection failed", true);
+                        }
+                        app.is_connecting_ = false;
+                    }).detach();
+                }
             }
-        }
-        ImGui::SameLine();
-        if (ui::dangerButton(ICON_FA_TRASH "  Delete", ImVec2(90, 30))) {
-            app.consoles.remove(c.id);
-            app.addStatus("Console removed");
+            ImGui::SameLine();
+            if (ui::dangerButton(ICON_FA_TRASH "  Del", ImVec2(70, 32))) {
+                app.consoles.remove(c.id);
+                app.addStatus("Console removed");
+            }
+        } else {
+            // Desktop/iPad: horizontal layout
+            float actions_x = child_w - 200.0f;
+            if (actions_x < child_w * 0.5f) actions_x = child_w * 0.5f;
+
+            float date_x = child_w - 320.0f;
+            if (date_x < child_w * 0.35f) date_x = child_w * 0.35f;
+
+            float loader_x = child_w - 460.0f;
+            if (loader_x < child_w * 0.22f) loader_x = child_w * 0.22f;
+
+            float connection_x = child_w - 600.0f;
+            if (connection_x < child_w * 0.12f) connection_x = child_w * 0.12f;
+
+            ImGui::SetCursorPos(ImVec2(12, 12));
+            ImGui::TextColored(p.text, "%s  %s", ICON_FA_DESKTOP, c.name.c_str());
+            
+            ImGui::SetCursorPos(ImVec2(connection_x, 14));
+            ImGui::TextColored(p.muted, "%s  %s:%d", ICON_FA_SIGNAL, c.ip.c_str(), c.port);
+            
+            ImGui::SetCursorPos(ImVec2(loader_x, 14));
+            ImGui::TextColored(p.dim, "%s  Loader: %d", ICON_FA_DOWNLOAD, c.elf_loader_port);
+            
+            ImGui::SetCursorPos(ImVec2(date_x, 14));
+            ImGui::TextColored(p.dim, "%s  %s", ICON_FA_CALENDAR, c.updated_at.substr(0, 10).c_str());
+
+            ImGui::SetCursorPos(ImVec2(actions_x, 13));
+            bool connecting = app.is_connecting_.load();
+            if (connecting) {
+                ImGui::BeginDisabled();
+                ui::softButton(ICON_FA_LINK "  Connect", ImVec2(100, 30));
+                ImGui::EndDisabled();
+            } else {
+                if (ui::primaryButton(ICON_FA_LINK "  Connect", ImVec2(100, 30))) {
+                    app.addStatus("Connecting to " + c.name + "...");
+                    app.is_connecting_ = true;
+                    
+                    std::thread([&app, ip = c.ip, port = c.port, name = c.name, elf_loader_port = c.elf_loader_port]() {
+                        auto settings = app.settings.read();
+                        std::string elf = app.settings.resolvePayloadPath();
+                        
+                        if (settings.auto_deploy_on_connect && !elf.empty()) {
+                            PayloadDeployer::Options opts;
+                            opts.elf_path = elf;
+                            opts.elf_loader_port = elf_loader_port;
+                            opts.auto_bind_via_klog = settings.auto_bind_via_klog;
+                            opts.status_callback = [&app](const DeployStatus& s) {
+                                app.addStatus(s.message, s.phase == "error");
+                            };
+                            app.deployer.ensurePayloadRunning(ip, opts);
+                        }
+                        
+                        if (app.ghostpad().connect(ip, port)) {
+                            app.selected_console_ip = ip;
+                            app.selected_console_port = port;
+                            app.addStatus("Connected P" + std::to_string(app.activeSlot() + 1) + " to " + name);
+                            if (settings.connect_beep_enabled && app.deployer.auto_adopted)
+                                BeeperClient::buzz(ip, settings.connect_beep_type);
+                        } else {
+                            app.addStatus("Connection failed", true);
+                        }
+                        app.is_connecting_ = false;
+                    }).detach();
+                }
+            }
+            ImGui::SameLine();
+            if (ui::dangerButton(ICON_FA_TRASH "  Del", ImVec2(70, 30))) {
+                app.consoles.remove(c.id);
+                app.addStatus("Console removed");
+            }
         }
 
         ImGui::EndChild();

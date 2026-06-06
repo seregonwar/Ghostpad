@@ -150,14 +150,28 @@ inline void applyGhostpadTheme() {
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     //  iPad / iOS: bigger touch targets, more breathing room
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    style.FramePadding      = ImVec2(16, 12);
-    style.CellPadding       = ImVec2(14, 10);
-    style.ItemSpacing       = ImVec2(14, 12);
-    style.ItemInnerSpacing  = ImVec2(10, 9);
-    style.TouchExtraPadding = ImVec2(4, 4);
-    style.ScrollbarSize     = 16.0f;
-    style.GrabMinSize       = 18.0f;
+    float scale = ImGui::GetIO().DisplaySize.x / 1024.0f;
+    if (scale < 0.7f) scale = 0.7f;
+    if (scale > 2.0f) scale = 2.0f;
+    // On very small screens (iPhone), boost scale for better touch targets
+    float display_width = ImGui::GetIO().DisplaySize.x;
+    if (display_width < 500.0f) {
+        scale = 0.85f;
+    } else if (display_width < 700.0f) {
+        scale = 0.75f;
+    }
+    float fp = 12.0f * scale;
+    style.FramePadding      = ImVec2(fp + 4, fp);
+    style.CellPadding       = ImVec2(fp, fp - 2);
+    style.ItemSpacing       = ImVec2(fp, fp);
+    style.ItemInnerSpacing  = ImVec2(fp - 4, fp - 2);
+    style.TouchExtraPadding = ImVec2(6, 6);
+    style.ScrollbarSize     = 14.0f * scale;
+    style.GrabMinSize       = 16.0f * scale;
+#else
+    float scale = 1.0f;
 #endif
+    (void)scale;
 }
 
 // ============================================================================

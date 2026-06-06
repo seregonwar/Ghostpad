@@ -661,11 +661,10 @@ static void drawSidebarGroup(const char* label, float x, float /*w*/) {
 
 static bool drawSidebarNav(const char* icon, const char* label, bool active, ImVec4 accent, float w) {
     const auto& p = ui::colors();
-#ifdef GHOSTPAD_IOS
-    float h = 58.0f;  // taller rows for touch
-#else
-    float h = 48.0f;
-#endif
+    ImVec2 display = ImGui::GetIO().DisplaySize;
+    float h = display.y * 0.054f;
+    if (h < 38.0f) h = 38.0f;
+    if (h > 62.0f) h = 62.0f;
 
     // Position horizontally to align with ConnectionCard
     ImGui::SetCursorPosX(14.0f);
@@ -716,44 +715,51 @@ void App::drawSidebar(float width, float height) {
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
     drawSidebarGradient(ImGui::GetWindowPos(), ImGui::GetWindowSize());
+
+    if (is_compact_device) {
+        ImGui::SetCursorPos(ImVec2(width - 48, 18));
+        ImGui::PushStyleColor(ImGuiCol_Button, ui::rgba(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ui::rgba(255, 255, 255, 15));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ui::rgba(255, 255, 255, 25));
+        if (ImGui::Button(ICON_FA_XMARK, ImVec2(36, 36))) {
+            sidebar_visible = false;
+        }
+        ImGui::PopStyleColor(3);
+    }
+
     drawSidebarHeader(pad, width);
     drawSidebarConnection(*this, pad, width);
 
     float navY = ImGui::GetCursorPosY() + 10;
     float navW = width - pad;
 
-    // ── Navigation Scroll Area ──────────────────────────────────
     ImGui::SetCursorPosY(navY);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::BeginChild("SidebarNavList", ImVec2(width, height - 110 - navY), false, ImGuiWindowFlags_NoScrollbar);
 
-    // ── Main ──
     drawSidebarGroup("MAIN", pad, width);
-    if (drawSidebarNav(ICON_FA_HOUSE, "Home",          current_screen == Screen::Home,          p.primary2, navW)) current_screen = Screen::Home;
-    if (drawSidebarNav(ICON_FA_DESKTOP, "Consoles",       current_screen == Screen::Consoles,       p.link,     navW)) current_screen = Screen::Consoles;
-    if (drawSidebarNav(ICON_FA_GAMEPAD, "Controller",     current_screen == Screen::Controller,     p.success,  navW)) current_screen = Screen::Controller;
-    if (drawSidebarNav(ICON_FA_KEYBOARD, "Input Redirect", current_screen == Screen::InputRedirect,  p.primary,  navW)) current_screen = Screen::InputRedirect;
+    if (drawSidebarNav(ICON_FA_HOUSE, "Home",          current_screen == Screen::Home,          p.primary2, navW)) { current_screen = Screen::Home; if (is_compact_device) sidebar_visible = false; }
+    if (drawSidebarNav(ICON_FA_DESKTOP, "Consoles",       current_screen == Screen::Consoles,       p.link,     navW)) { current_screen = Screen::Consoles; if (is_compact_device) sidebar_visible = false; }
+    if (drawSidebarNav(ICON_FA_GAMEPAD, "Controller",     current_screen == Screen::Controller,     p.success,  navW)) { current_screen = Screen::Controller; if (is_compact_device) sidebar_visible = false; }
+    if (drawSidebarNav(ICON_FA_KEYBOARD, "Input Redirect", current_screen == Screen::InputRedirect,  p.primary,  navW)) { current_screen = Screen::InputRedirect; if (is_compact_device) sidebar_visible = false; }
 
     ImGui::Spacing();
 
-    // ── Toolset ──
     drawSidebarGroup("TOOLSET", pad, width);
-    if (drawSidebarNav(ICON_FA_FOLDER_OPEN, "Projects",  current_screen == Screen::Projects,  p.warning, navW)) current_screen = Screen::Projects;
-    if (drawSidebarNav(ICON_FA_VOLUME_HIGH, "Beeper",    current_screen == Screen::Beeper,    p.success, navW)) current_screen = Screen::Beeper;
+    if (drawSidebarNav(ICON_FA_FOLDER_OPEN, "Projects",  current_screen == Screen::Projects,  p.warning, navW)) { current_screen = Screen::Projects; if (is_compact_device) sidebar_visible = false; }
+    if (drawSidebarNav(ICON_FA_VOLUME_HIGH, "Beeper",    current_screen == Screen::Beeper,    p.success, navW)) { current_screen = Screen::Beeper; if (is_compact_device) sidebar_visible = false; }
 
     ImGui::Spacing();
 
-    // ── System ──
     drawSidebarGroup("SYSTEM", pad, width);
-    if (drawSidebarNav(ICON_FA_MICROCHIP, "System State", current_screen == Screen::SystemState, p.danger, navW)) current_screen = Screen::SystemState;
-    if (drawSidebarNav(ICON_FA_GEAR, "Settings",     current_screen == Screen::Settings,    p.muted,  navW)) current_screen = Screen::Settings;
+    if (drawSidebarNav(ICON_FA_MICROCHIP, "System State", current_screen == Screen::SystemState, p.danger, navW)) { current_screen = Screen::SystemState; if (is_compact_device) sidebar_visible = false; }
+    if (drawSidebarNav(ICON_FA_GEAR, "Settings",     current_screen == Screen::Settings,    p.muted,  navW)) { current_screen = Screen::Settings; if (is_compact_device) sidebar_visible = false; }
 
     ImGui::Spacing();
 
     ImGui::EndChild();
     ImGui::PopStyleVar();
 
-    // ── Footer ──
     ImGui::SetCursorPosY(height - 110);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 fp = ImGui::GetCursorScreenPos();
@@ -769,11 +775,12 @@ void App::drawSidebar(float width, float height) {
     ImGui::SetCursorPosY(height - 34);
     ImGui::SetCursorPosX(pad + 4);
     
-    // Polished Credits selection
     ImGui::PushStyleColor(ImGuiCol_HeaderActive, ui::rgba(0,0,0,0));
     ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ui::rgba(255,255,255,10));
-    if (ImGui::Selectable(ICON_FA_CIRCLE_INFO "  Credits", current_screen == Screen::Credits, 0, ImVec2(130, 20)))
+    if (ImGui::Selectable(ICON_FA_CIRCLE_INFO "  Credits", current_screen == Screen::Credits, 0, ImVec2(130, 20))) {
         current_screen = Screen::Credits;
+        if (is_compact_device) sidebar_visible = false;
+    }
     ImGui::PopStyleColor(2);
 
     ImGui::EndChild();
@@ -826,9 +833,100 @@ void App::drawTopBar(float x, float y, float width, float height) {
     int connected = ghostpadConnectedCount();
     auto st = ghostpad().getStatus();
 
-    ImGui::SetCursorPos(ImVec2(24, 14));
+#ifdef GHOSTPAD_IOS
+    if (is_compact_device) {
+        // Compact: title on top, button below
+        float margin = 12.0f;
+        float btn_h = 28.0f;
+
+        // Title row
+        ImGui::SetCursorPos(ImVec2(margin, 8.0f));
+        ImGui::TextColored(p.primary2, "%s  %s", screenIcon(current_screen), screenTitle(current_screen));
+
+        if (anyConnected) {
+            ImGui::SameLine(0, 8);
+            ImGui::TextColored(p.success, "%s  P%d", ICON_FA_SIGNAL, activeSlot() + 1);
+        }
+
+        // Button row - right aligned
+        float btn_w = 120.0f;
+        ImGui::SetCursorPos(ImVec2(width - margin - btn_w, height - margin - btn_h - 4.0f));
+        if (!anyConnected) {
+            if (ui::primaryButton(ICON_FA_LINK "  Connect", ImVec2(btn_w, btn_h)))
+                current_screen = Screen::Consoles;
+        } else {
+            float half_btn = (btn_w - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+            if (ui::softButton(ICON_FA_GAMEPAD " Pad", ImVec2(half_btn, btn_h)))
+                current_screen = Screen::Controller;
+            ImGui::SameLine();
+            if (ui::dangerButton(ICON_FA_XMARK " Disc", ImVec2(half_btn, btn_h))) {
+                disconnectAllGhostpad();
+                deployer.stopKlogWatcher();
+                selected_console_ip.clear();
+                addStatus("Disconnected all controllers");
+            }
+        }
+    } else {
+        float btn_sz = 40.0f;
+        ImGui::SetCursorPos(ImVec2(8, (height - btn_sz) * 0.5f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ui::rgba(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ui::rgba(255, 255, 255, 15));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ui::rgba(255, 255, 255, 25));
+        if (ImGui::Button(sidebar_visible ? ICON_FA_XMARK : ICON_FA_BARS, ImVec2(btn_sz, btn_sz))) {
+            toggleSidebar();
+        }
+        ImGui::PopStyleColor(3);
+
+        float text_start = 52.0f;
+
+        float title_y = 14.0f;
+        ImGui::SetCursorPos(ImVec2(text_start, title_y));
+        ImGui::TextColored(p.primary2, "%s  %s", screenIcon(current_screen), screenTitle(current_screen));
+
+        ImGui::SetCursorPos(ImVec2(text_start, 40));
+        if (anyConnected) {
+            if (connected > 1)
+                ImGui::TextColored(p.success, "%s  Streaming %d controllers  %s:%d", ICON_FA_SIGNAL, connected, st.ip.c_str(), st.port);
+            else
+                ImGui::TextColored(p.success, "%s  Streaming  %s:%d", ICON_FA_SIGNAL, st.ip.c_str(), st.port);
+        } else {
+            ImGui::TextColored(p.muted, "Connect a console to begin");
+        }
+
+        float r = ImGui::GetWindowWidth() - 16.0f;
+        ImVec2 display = ImGui::GetIO().DisplaySize;
+        float btn_scale = display.y / 768.0f;
+        if (btn_scale < 0.5f) btn_scale = 0.5f;
+        float btnW1 = 160.0f * btn_scale + 30.0f;
+        float btnW2 = 100.0f * btn_scale + 20.0f;
+        float btnH  = 32.0f * btn_scale + 8.0f;
+        float buttons_w = !anyConnected ? btnW1 : (btnW2 * 2 + ImGui::GetStyle().ItemSpacing.x);
+
+        float btn_y = 16.0f;
+        ImGui::SetCursorPos(ImVec2(r - buttons_w, btn_y));
+        if (!anyConnected) {
+            if (ui::primaryButton(ICON_FA_LINK "  Connect Console", ImVec2(btnW1, btnH)))
+                current_screen = Screen::Consoles;
+        } else {
+            if (ui::softButton(ICON_FA_GAMEPAD "  Controller", ImVec2(btnW2, btnH)))
+                current_screen = Screen::Controller;
+            ImGui::SameLine();
+            if (ui::dangerButton(ICON_FA_LINK_SLASH "  Disconnect", ImVec2(btnW2, btnH))) {
+                disconnectAllGhostpad();
+                deployer.stopKlogWatcher();
+                selected_console_ip.clear();
+                addStatus("Disconnected all controllers");
+            }
+        }
+    }
+#else
+    float text_start = 24.0f;
+
+    float title_y = 14.0f;
+    ImGui::SetCursorPos(ImVec2(text_start, title_y));
     ImGui::TextColored(p.primary2, "%s  %s", screenIcon(current_screen), screenTitle(current_screen));
-    ImGui::SetCursorPos(ImVec2(24, 40));
+
+    ImGui::SetCursorPos(ImVec2(text_start, 40));
     if (anyConnected) {
         if (connected > 1)
             ImGui::TextColored(p.success, "%s  Streaming %d controllers  %s:%d", ICON_FA_SIGNAL, connected, st.ip.c_str(), st.port);
@@ -838,18 +936,12 @@ void App::drawTopBar(float x, float y, float width, float height) {
         ImGui::TextColored(p.muted, "Connect a console to begin");
     }
 
-    /*
-     *    [ NAV BUTTONS ] -> aligned right
-     */
     float r = ImGui::GetWindowWidth() - 16.0f;
-#ifdef GHOSTPAD_IOS
-    float btnW1 = 210.0f, btnW2 = 160.0f, btnH = 44.0f;
-#else
     float btnW1 = 150.0f, btnW2 = 120.0f, btnH = 36.0f;
-#endif
     float buttons_w = !anyConnected ? btnW1 : (btnW2 * 2 + ImGui::GetStyle().ItemSpacing.x);
 
-    ImGui::SetCursorPos(ImVec2(r - buttons_w, 16));
+    float btn_y = 16.0f;
+    ImGui::SetCursorPos(ImVec2(r - buttons_w, btn_y));
     if (!anyConnected) {
         if (ui::primaryButton(ICON_FA_LINK "  Connect Console", ImVec2(btnW1, btnH)))
             current_screen = Screen::Consoles;
@@ -864,33 +956,190 @@ void App::drawTopBar(float x, float y, float width, float height) {
             addStatus("Disconnected all controllers");
         }
     }
-    ImGui::SameLine();
-    
+#endif
 
     ImGui::EndChild();
     ImGui::PopStyleColor(2);
 }
 
+// ── Bottom Nav Bar (iPhone) ─────────────────────────────
+
+static bool drawBottomTab(const char* icon, const char* label, bool active, ImVec4 accent, float w, float h) {
+    const auto& p = ui::colors();
+    ImGui::PushID(label);
+
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##tab", ImVec2(w, h));
+    bool clicked = ImGui::IsItemClicked();
+    bool hovered = ImGui::IsItemHovered();
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec4 txtCol = active ? accent : (hovered ? p.text : p.muted);
+
+    // Icon at top, label below - both within bounds
+    float icon_y = pos.y + 8.0f;
+    float label_y = pos.y + h - 22.0f;
+    float cx = pos.x + w * 0.5f;
+
+    ImVec2 icon_size = ImGui::CalcTextSize(icon);
+    dl->AddText(ImVec2(cx - icon_size.x * 0.5f, icon_y), ui::u32(active ? accent : p.muted), icon);
+
+    ImVec2 label_size = ImGui::CalcTextSize(label);
+    dl->AddText(ImVec2(cx - label_size.x * 0.5f, label_y), ui::u32(txtCol), label);
+
+    if (active) {
+        dl->AddRectFilled(ImVec2(pos.x + w * 0.25f, pos.y + 2), ImVec2(pos.x + w * 0.75f, pos.y + 4),
+                          ui::u32(accent), 2.0f);
+    }
+
+    ImGui::PopID();
+    return clicked;
+}
+
+void App::drawBottomBar(float x, float y, float width, float height) {
+    const auto& p = ui::colors();
+    ImGui::SetCursorPos(ImVec2(x, y));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ui::rgba(16, 14, 22, 245));
+    ImGui::PushStyleColor(ImGuiCol_Border, ui::rgba(58, 48, 72, 140));
+    ImGui::BeginChild("BottomBar", ImVec2(width, height), true,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+    int num_tabs = is_compact_device ? 4 : 6;
+    float tab_w = width / (float)num_tabs;
+
+    ImGui::SetCursorPos(ImVec2(0, 0));
+    ImGui::BeginGroup();
+
+    ImGui::SameLine(tab_w * 0);
+    if (drawBottomTab(ICON_FA_HOUSE, "Home", current_screen == Screen::Home, p.primary2, tab_w, height))
+        current_screen = Screen::Home;
+
+    ImGui::SameLine(tab_w * 1);
+    if (drawBottomTab(ICON_FA_DESKTOP, "Consoles", current_screen == Screen::Consoles, p.link, tab_w, height))
+        current_screen = Screen::Consoles;
+
+    ImGui::SameLine(tab_w * 2);
+    if (drawBottomTab(ICON_FA_GAMEPAD, "Pad", current_screen == Screen::Controller, p.success, tab_w, height))
+        current_screen = Screen::Controller;
+
+    ImGui::SameLine(tab_w * 3);
+    if (drawBottomTab(ICON_FA_ELLIPSIS, "More", false, p.muted, tab_w, height)) {
+        ImGui::OpenPopup("MoreMenu");
+    }
+
+    if (!is_compact_device) {
+        ImGui::SameLine(tab_w * 4);
+        if (drawBottomTab(ICON_FA_FOLDER_OPEN, "Projects", current_screen == Screen::Projects, p.warning, tab_w, height))
+            current_screen = Screen::Projects;
+
+        ImGui::SameLine(tab_w * 5);
+        if (drawBottomTab(ICON_FA_KEYBOARD, "Input", current_screen == Screen::InputRedirect, p.primary, tab_w, height))
+            current_screen = Screen::InputRedirect;
+    }
+
+    if (ImGui::BeginPopup("MoreMenu")) {
+        if (ImGui::MenuItem(ICON_FA_VOLUME_HIGH "  Beeper", nullptr, current_screen == Screen::Beeper)) current_screen = Screen::Beeper;
+        if (ImGui::MenuItem(ICON_FA_MICROCHIP "  System State", nullptr, current_screen == Screen::SystemState)) current_screen = Screen::SystemState;
+        if (ImGui::MenuItem(ICON_FA_FOLDER_OPEN "  Projects", nullptr, current_screen == Screen::Projects)) current_screen = Screen::Projects;
+        if (ImGui::MenuItem(ICON_FA_GEAR "  Settings", nullptr, current_screen == Screen::Settings)) current_screen = Screen::Settings;
+        if (ImGui::MenuItem(ICON_FA_CIRCLE_INFO "  Credits", nullptr, current_screen == Screen::Credits)) current_screen = Screen::Credits;
+        if (!is_compact_device) {
+            if (ImGui::MenuItem(ICON_FA_KEYBOARD "  Input Redirect", nullptr, current_screen == Screen::InputRedirect)) current_screen = Screen::InputRedirect;
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::EndGroup();
+    ImGui::EndChild();
+    ImGui::PopStyleColor(2);
+}
+
+void App::toggleSidebar() {
+    sidebar_visible = !sidebar_visible;
+}
+
+void App::detectDeviceType() {
+    ImVec2 display = ImGui::GetIO().DisplaySize;
+    bool was_compact = is_compact_device;
+    // Phone: width < 600 or height < 500 (portrait phone)
+    is_compact_device = (display.x < 600.0f || display.y < 500.0f);
+    if (is_compact_device && !was_compact) {
+        sidebar_visible = false;
+    }
+    // Auto-show sidebar on large landscape tablets
+    if (!is_compact_device && display.x > display.y && display.x > 900.0f) {
+        if (!was_compact && !sidebar_visible) {
+            // keep user preference on desktop/tablet
+        }
+    }
+}
+
 // ── Layout ──────────────────────────────────────────────
 
 void App::drawAppChrome() {
-    const ImVec2 sz = ImGui::GetWindowSize();
-#ifdef GHOSTPAD_IOS
-    //  +------+----------------------------+
-    //  | side |        top bar             |
-    //  | bar  |----------------------------|  <-- wider sidebar + taller bars
-    //  |      |        content             |
-    //  |      |                            |
-    //  +------+----------------------------+
-    //  |          status bar               |
-    //  +-----------------------------------+
-    const float sb_w = 220.0f, top_h = 90.0f, bot_h = 48.0f, pad = 18.0f;
-#else
-    const float sb_w = 258.0f, top_h = 80.0f, bot_h = 42.0f, pad = 22.0f;
-#endif
+    detectDeviceType();
 
-    drawSidebar(sb_w, sz.y);
+    const ImVec2 sz = ImGui::GetWindowSize();
+    float scale = sz.x / 1024.0f;
+    if (scale < 0.6f) scale = 0.6f;
+    if (scale > 2.5f) scale = 2.5f;
+
+#ifdef GHOSTPAD_IOS
+    if (is_compact_device) {
+        const float top_h = 56.0f;
+        const float bot_h = 64.0f;
+        const float pad   = 8.0f;
+
+        drawTopBar(0.0f, 0.0f, sz.x, top_h);
+
+        ImGui::SetCursorPos(ImVec2(pad, top_h + pad * 0.5f));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ui::rgba(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_Border, ui::rgba(0, 0, 0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::BeginChild("Content", ImVec2(sz.x - pad * 2, sz.y - top_h - bot_h - pad), false);
+        renderScreen();
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(2);
+
+        drawBottomBar(0.0f, sz.y - bot_h, sz.x, bot_h);
+    } else {
+        const float top_h = 62.0f * scale + 18.0f;
+        const float bot_h = 36.0f * scale + 8.0f;
+        const float pad   = 12.0f * scale + 6.0f;
+        const float sb_w  = 190.0f * scale + 40.0f;
+
+        bool sidebar_pushes = sidebar_visible;
+        const float content_x = sidebar_pushes ? sb_w : 0.0f;
+        const float content_w = sz.x - content_x;
+
+        drawTopBar(content_x, 0.0f, content_w, top_h);
+
+        if (sidebar_visible) {
+            drawSidebar(sb_w, sz.y);
+        }
+
+        ImGui::SetCursorPos(ImVec2(content_x + pad, top_h + pad * 0.5f));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ui::rgba(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_Border, ui::rgba(0, 0, 0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::BeginChild("Content", ImVec2(content_w - pad * 2, sz.y - top_h - bot_h - pad), false);
+        renderScreen();
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(2);
+
+        ImGui::SetCursorPos(ImVec2(content_x, sz.y - bot_h));
+        drawStatusBar();
+    }
+#else
+    const float sb_w = 200.0f * scale + 58.0f;
+    const float top_h = 62.0f * scale + 18.0f;
+    const float bot_h = 32.0f * scale + 10.0f;
+    const float pad = 16.0f * scale + 6.0f;
+
     drawTopBar(sb_w, 0.0f, sz.x - sb_w, top_h);
+    drawSidebar(sb_w, sz.y);
 
     ImGui::SetCursorPos(ImVec2(sb_w + pad, top_h + pad));
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ui::rgba(0, 0, 0, 0));
@@ -904,6 +1153,7 @@ void App::drawAppChrome() {
 
     ImGui::SetCursorPos(ImVec2(sb_w, sz.y - bot_h));
     drawStatusBar();
+#endif
 }
 
 void App::renderScreen() {
@@ -932,49 +1182,74 @@ void App::addStatus(const std::string& msg, bool error) {
 void App::drawStatusBar() {
     const auto& p = ui::colors();
 
+    float bar_h = is_compact_device ? 32.0f : 42.0f;
+
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ui::rgba(13, 13, 16, 240));
     ImGui::PushStyleColor(ImGuiCol_Border, ui::rgba(48, 44, 58, 100));
-    ImGui::BeginChild("StatusBar", ImVec2(ImGui::GetContentRegionAvail().x, 42), true,
+    ImGui::BeginChild("StatusBar", ImVec2(ImGui::GetContentRegionAvail().x, bar_h), true,
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
-    ImGui::SetCursorPos(ImVec2(24, 11));
-    
-    StatusMessage latest_msg;
-    bool has_msg = false;
-    {
-        std::lock_guard<std::mutex> lock(status_mutex_);
-        if (!status_messages_.empty()) {
-            latest_msg = status_messages_.back();
-            has_msg = true;
+    float text_y = (bar_h - ImGui::GetTextLineHeight()) * 0.5f;
+    ImGui::SetCursorPos(ImVec2(16, text_y));
+
+    if (is_compact_device) {
+        StatusMessage latest_msg;
+        bool has_msg = false;
+        {
+            std::lock_guard<std::mutex> lock(status_mutex_);
+            if (!status_messages_.empty()) {
+                latest_msg = status_messages_.back();
+                has_msg = true;
+            }
         }
-    }
 
-    if (has_msg) {
-        ImGui::TextColored(latest_msg.is_error ? p.danger : p.success, "%s  %s", 
-            latest_msg.is_error ? ICON_FA_TRIANGLE_EXCLAMATION : ICON_FA_CIRCLE_CHECK, latest_msg.text.c_str());
+        if (has_msg) {
+            ImGui::TextColored(latest_msg.is_error ? p.danger : p.success, "%s  %s",
+                latest_msg.is_error ? ICON_FA_TRIANGLE_EXCLAMATION : ICON_FA_CIRCLE_CHECK, latest_msg.text.c_str());
+        } else {
+            int cnt = ghostpadConnectedCount();
+            ImGui::TextColored(p.dim, "%s  %s", ICON_FA_GAMEPAD,
+                cnt > 0 ? (cnt > 1 ? ("GPAD x" + std::to_string(cnt)).c_str() : "GPAD active") : "Ready");
+        }
     } else {
-        ImGui::TextColored(p.muted, "%s  Ready", ICON_FA_CIRCLE_CHECK);
-    }
+        StatusMessage latest_msg;
+        bool has_msg = false;
+        {
+            std::lock_guard<std::mutex> lock(status_mutex_);
+            if (!status_messages_.empty()) {
+                latest_msg = status_messages_.back();
+                has_msg = true;
+            }
+        }
 
-    float r = ImGui::GetWindowWidth();
+        if (has_msg) {
+            ImGui::TextColored(latest_msg.is_error ? p.danger : p.success, "%s  %s", 
+                latest_msg.is_error ? ICON_FA_TRIANGLE_EXCLAMATION : ICON_FA_CIRCLE_CHECK, latest_msg.text.c_str());
+        } else {
+            ImGui::TextColored(p.muted, "%s  Ready", ICON_FA_CIRCLE_CHECK);
+        }
+
+        float r = ImGui::GetWindowWidth();
 #ifdef GHOSTPAD_IOS
-    ImGui::SameLine(r - 500);
+        float fps_offset = (r < 500.0f) ? 10.0f : (r - 500.0f);
+        ImGui::SameLine(fps_offset);
 #else
-    ImGui::SameLine(r - 400);
+        ImGui::SameLine(r - 400);
 #endif
-    ImGui::TextColored(p.dim, "%s  FPS %.0f", ICON_FA_GAUGE_HIGH, current_fps_);
-    ImGui::SameLine();
-    int cnt = ghostpadConnectedCount();
-    ImGui::TextColored(p.dim, "|  %s  %s", ICON_FA_GAMEPAD,
-        cnt > 0 ? (cnt > 1 ? ("GPAD x" + std::to_string(cnt)).c_str() : "GPAD active") : "GPAD idle");
-    ImGui::SameLine();
-    
-    size_t num_notices = 0;
-    {
-        std::lock_guard<std::mutex> lock(status_mutex_);
-        num_notices = status_messages_.size();
+        ImGui::TextColored(p.dim, "%s  FPS %.0f", ICON_FA_GAUGE_HIGH, current_fps_);
+        ImGui::SameLine();
+        int cnt = ghostpadConnectedCount();
+        ImGui::TextColored(p.dim, "|  %s  %s", ICON_FA_GAMEPAD,
+            cnt > 0 ? (cnt > 1 ? ("GPAD x" + std::to_string(cnt)).c_str() : "GPAD active") : "GPAD idle");
+        ImGui::SameLine();
+
+        size_t num_notices = 0;
+        {
+            std::lock_guard<std::mutex> lock(status_mutex_);
+            num_notices = status_messages_.size();
+        }
+        ImGui::TextColored(p.dim, "|  %s  %zu notices", ICON_FA_BELL, num_notices);
     }
-    ImGui::TextColored(p.dim, "|  %s  %zu notices", ICON_FA_BELL, num_notices);
 
     ImGui::EndChild();
     ImGui::PopStyleColor(2);

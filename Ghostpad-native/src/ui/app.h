@@ -106,6 +106,9 @@ public:
     bool has_last_recorded_ = false;
     PadStateInput last_recorded_ps_;
 
+    bool sidebar_visible = true;
+    bool is_compact_device = false;
+
     // Active controller state query
     PadStateInput getCurrentPadState();
 
@@ -118,10 +121,13 @@ public:
     void addStatus(const std::string& msg, bool error = false);
     void drawStatusBar();
     void drawAppChrome();
+    void toggleSidebar();
+    void detectDeviceType();
 
 private:
     void drawMainMenu();
     void drawSidebar(float width, float height);
+    void drawBottomBar(float x, float y, float width, float height);
     void drawTopBar(float x, float y, float width, float height);
     void renderScreen();
 

@@ -61,10 +61,14 @@ std::string pickFile(const std::string& title, const std::string& filter_desc, c
         return ofn.lpstrFile;
     }
     return "";
-#elif defined(__APPLE__) && !defined(GHOSTPAD_IOS)
+#elif defined(GHOSTPAD_IOS)
+    // iOS: use native UIDocumentPickerViewController (declared in file_picker_ios.mm)
+    extern std::string pickFileIOS(const std::string& title, const std::string& filter_ext);
+    return pickFileIOS(title, filter_ext);
+#elif defined(__APPLE__)
     (void)filter_desc;
     (void)filter_ext;
-    // Use AppleScript to pick a file
+    // Use AppleScript to pick a file (macOS)
     std::string cmd = "osascript -e 'POSIX path of (choose file with prompt \"" + title + "\")' 2>/dev/null";
     return execCommand(cmd.c_str());
 #else

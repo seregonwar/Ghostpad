@@ -39,7 +39,7 @@ void renderCreditsScreen(App& app) {
     // ─────────────────────────────────────────────────────────────────────────────
     //                            LEAD DEVELOPER (SEREGONWAR)
     // ─────────────────────────────────────────────────────────────────────────────
-    ui::beginCard("CreatorCard", ImVec2(content_w, 350), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ui::beginCard("CreatorCard", ImVec2(content_w, 0));
     ui::sectionLabel("Lead Developer & Maintainer", ICON_FA_USER);
     ImGui::Spacing();
     
@@ -64,7 +64,7 @@ void renderCreditsScreen(App& app) {
     // ─────────────────────────────────────────────────────────────────────────────
     //                            ORIGINAL CREATOR (STONEDMODDER)
     // ─────────────────────────────────────────────────────────────────────────────
-    ui::beginCard("OriginalCard", ImVec2(content_w, 250), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ui::beginCard("OriginalCard", ImVec2(content_w, 0));
     ui::sectionLabel("Original Project Creator", ICON_FA_USER_SHIELD);
     ImGui::Spacing();
     
@@ -87,7 +87,7 @@ void renderCreditsScreen(App& app) {
     // ─────────────────────────────────────────────────────────────────────────────
     //                                  LICENSE CARD
     // ─────────────────────────────────────────────────────────────────────────────
-    ui::beginCard("LicenseCard", ImVec2(content_w, 160), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ui::beginCard("LicenseCard", ImVec2(content_w, 0));
     ui::sectionLabel("Software License", ICON_FA_FILE_CONTRACT);
     ImGui::Spacing();
     

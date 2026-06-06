@@ -25,6 +25,7 @@ struct GamepadRemap {
 class GamepadInput {
 public:
     GamepadInput();
+    ~GamepadInput();
 
     void update();
     std::vector<GamepadDevice> listGamepads() const;
@@ -38,7 +39,11 @@ public:
 
 private:
     std::vector<GamepadRemap> remaps_;
-    mutable void* last_glfw_window_ = nullptr; // stored for polling
+#ifndef GHOSTPAD_IOS
+    mutable void* last_glfw_window_ = nullptr;
+#else
+    void* ios_controller_observer_ = nullptr;
+#endif
 };
 
 } // namespace ghostpad

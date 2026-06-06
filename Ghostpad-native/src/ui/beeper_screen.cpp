@@ -12,36 +12,45 @@ namespace ghostpad {
 void renderBeeperScreen(App& app) {
     const auto& p = ui::colors();
     float avail_w = ImGui::GetContentRegionAvail().x;
+    bool compact = app.is_compact_device;
 
     if (app.selected_console_ip.empty()) {
         ImGui::TextColored(p.warning, "%s  Not connected. Connect to a PS5 first.", ICON_FA_TRIANGLE_EXCLAMATION);
+        ImGui::Spacing();
+        if (ui::primaryButton(ICON_FA_DESKTOP "  Open Consoles", ImVec2(compact ? (avail_w - 36) : 160, 36)))
+            app.current_screen = Screen::Consoles;
         return;
     }
 
     ImGui::TextColored(p.muted, "%s Target: %s", ICON_FA_SIGNAL, app.selected_console_ip.c_str());
     ImGui::Spacing();
 
-    float col_w = (avail_w - 16.0f) * 0.5f;
+    float col_w = compact ? avail_w : (avail_w - 16.0f) * 0.5f;
 
-    // Beeper card
-    ui::beginCard("BeeperSection", ImVec2(col_w, 290));
+    ui::beginCard("BeeperSection", ImVec2(col_w, 0));
     ui::sectionLabel("Beeper Commands", ICON_FA_VOLUME_HIGH);
     ImGui::Spacing();
 
-    if (ui::softButton(ICON_FA_BELL "  Single Beep", ImVec2(col_w - 36, 42))) {
+    float btn_w = col_w - 36;
+    if (ui::softButton(ICON_FA_BELL "  Single Beep", ImVec2(btn_w, 42))) {
         auto r = BeeperClient::buzz(app.selected_console_ip, 1);
         app.addStatus(r.response, !r.ok);
     }
-    if (ui::softButton(ICON_FA_BELL "  Long Beep", ImVec2(col_w - 36, 42))) {
+    ImGui::Spacing();
+    if (ui::softButton(ICON_FA_BELL "  Long Beep", ImVec2(btn_w, 42))) {
         auto r = BeeperClient::buzz(app.selected_console_ip, 3);
         app.addStatus(r.response, !r.ok);
     }
-    if (ui::softButton(ICON_FA_TRIANGLE_EXCLAMATION "  Error Pattern", ImVec2(col_w - 36, 42))) {
+    ImGui::Spacing();
+    if (ui::softButton(ICON_FA_TRIANGLE_EXCLAMATION "  Error Pattern", ImVec2(btn_w, 42))) {
         auto r = BeeperClient::buzz(app.selected_console_ip, 2);
         app.addStatus(r.response, !r.ok);
     }
 
     ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    
     static int spam_n = 5;
     
     ImGui::AlignTextToFramePadding();
@@ -58,28 +67,36 @@ void renderBeeperScreen(App& app) {
     }
     ui::endCard();
 
-    ImGui::SameLine(0, 16);
+    if (!compact) {
+        ImGui::SameLine(0, 16);
+    } else {
+        ImGui::Spacing();
+    }
 
-    // Controls card
-    ui::beginCard("ControlsSection", ImVec2(col_w, 290));
+    ui::beginCard("ControlsSection", ImVec2(col_w, 0));
     ui::sectionLabel("Controller hardware", ICON_FA_SLIDERS);
     ImGui::Spacing();
 
     static int vol = 0, mute = 0, led = 0;
     
     ImGui::TextColored(p.muted, "Beeper Volume:");
+    ImGui::SetNextItemWidth(col_w - 36);
     ImGui::Combo("##Volume", &vol, "High (0)\0Medium (1)\0Low (2)\0");
     
+    ImGui::Spacing();
     ImGui::TextColored(p.muted, "Beeper Mute:");
+    ImGui::SetNextItemWidth(col_w - 36);
     ImGui::Combo("##Mute", &mute, "Unmute (0)\0Mute (1)\0");
     
+    ImGui::Spacing();
     ImGui::TextColored(p.muted, "LED Brightness:");
+    ImGui::SetNextItemWidth(col_w - 36);
     ImGui::Combo("##LED", &led, "High (0)\0Medium (1)\0Low (2)\0");
     
     ImGui::Spacing();
     ImGui::Spacing();
 
-    if (ui::softButton(ICON_FA_CHECK "  Apply All Settings", ImVec2(col_w - 36, 38))) {
+    if (ui::softButton(ICON_FA_CHECK "  Apply All Settings", ImVec2(btn_w, 38))) {
         BeeperClient::setVolume(app.selected_console_ip, vol);
         BeeperClient::setMute(app.selected_console_ip, mute);
         BeeperClient::setLed(app.selected_console_ip, led);

@@ -33,84 +33,163 @@ void renderInputRedirectScreen(App& app) {
     const auto& p = ui::colors();
     float avail_w = ImGui::GetContentRegionAvail().x;
     auto status = app.ghostpad().getStatus();
+    bool compact = app.is_compact_device;
 
     if (!status.is_connected) {
         ImGui::TextColored(p.warning, "%s  Not connected. Go to Consoles first.", ICON_FA_TRIANGLE_EXCLAMATION);
         ImGui::Spacing();
-        if (ui::primaryButton(ICON_FA_DESKTOP "  Open Consoles", ImVec2(160, 32)))
+        if (ui::primaryButton(ICON_FA_DESKTOP "  Open Consoles", ImVec2(compact ? (avail_w - 36) : 160, 36)))
             app.current_screen = Screen::Consoles;
         return;
     }
 
     ImGui::TextColored(p.muted, "%s Connected: %s:%d  |  P%d", ICON_FA_SIGNAL, status.ip.c_str(), status.port, app.activeSlot() + 1);
-    ImGui::SameLine(0, 10);
-    ImGui::TextColored(p.muted, "Slot:");
-    ImGui::SameLine(0, 4);
-    ImGui::PushItemWidth(75);
-    int slot = app.activeSlot();
-    if (ImGui::Combo("##IRSlot", &slot, "P1\0P2\0P3\0P4\0")) {
-        app.setActiveSlot(slot);
-    }
-    ImGui::PopItemWidth();
     ImGui::Spacing();
 
-    auto profileList = app.profiles.list();
-
-    ui::sectionLabel("Keybinding Profiles", ICON_FA_LAYER_GROUP);
-    ImGui::Spacing();
-
-    int selectedProfileIdx = -1;
-    for (int i = 0; i < (int)profileList.size(); i++) {
-        if (profileList[i].id == app.selected_profile_id) {
-            selectedProfileIdx = i;
-            break;
+    if (compact) {
+        // Compact: stack controls vertically
+        ImGui::TextColored(p.muted, "Slot:");
+        ImGui::PushItemWidth(avail_w - 36);
+        int slot = app.activeSlot();
+        if (ImGui::Combo("##IRSlot", &slot, "P1\0P2\0P3\0P4\0")) {
+            app.setActiveSlot(slot);
         }
-    }
+        ImGui::PopItemWidth();
+        ImGui::Spacing();
 
-    const char* previewLabel = selectedProfileIdx >= 0 ? profileList[selectedProfileIdx].name.c_str() : "(none)";
-    ImGui::SetNextItemWidth(220);
-    if (ImGui::BeginCombo("##ProfileCombo", previewLabel)) {
+        auto profileList = app.profiles.list();
+
+        ui::sectionLabel("Keybinding Profiles", ICON_FA_LAYER_GROUP);
+        ImGui::Spacing();
+
+        int selectedProfileIdx = -1;
         for (int i = 0; i < (int)profileList.size(); i++) {
-            bool isSel = (selectedProfileIdx == i);
-            if (ImGui::Selectable(profileList[i].name.c_str(), isSel)) {
-                app.keyboard.loadFromProfile(profileList[i]);
-                app.selected_profile_id = profileList[i].id;
-                auto s = app.settings.read();
-                s.active_profile_id = profileList[i].id;
-                app.settings.write(s);
-                app.addStatus("Loaded profile \"" + profileList[i].name + "\"");
+            if (profileList[i].id == app.selected_profile_id) {
+                selectedProfileIdx = i;
+                break;
             }
-            if (isSel) ImGui::SetItemDefaultFocus();
         }
-        ImGui::EndCombo();
-    }
 
-    ImGui::SameLine(0, 10);
-    if (ui::primaryButton(ICON_FA_PLUS "  Save New", ImVec2(110, 28))) {
-        ImGui::OpenPopup("SaveProfilePopup");
-    }
+        const char* previewLabel = selectedProfileIdx >= 0 ? profileList[selectedProfileIdx].name.c_str() : "(none)";
+        ImGui::SetNextItemWidth(avail_w - 36);
+        if (ImGui::BeginCombo("##ProfileCombo", previewLabel)) {
+            for (int i = 0; i < (int)profileList.size(); i++) {
+                bool isSel = (selectedProfileIdx == i);
+                if (ImGui::Selectable(profileList[i].name.c_str(), isSel)) {
+                    app.keyboard.loadFromProfile(profileList[i]);
+                    app.selected_profile_id = profileList[i].id;
+                    auto s = app.settings.read();
+                    s.active_profile_id = profileList[i].id;
+                    app.settings.write(s);
+                    app.addStatus("Loaded profile \"" + profileList[i].name + "\"");
+                }
+                if (isSel) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
 
-    ImGui::SameLine(0, 6);
-    if (ui::softButton(ICON_FA_FLOPPY_DISK "  Overwrite", ImVec2(110, 28))) {
-        if (!app.selected_profile_id.empty()) {
-            auto profile = app.keyboard.saveToProfile("");
-            app.profiles.update(app.selected_profile_id, profile);
-            app.addStatus("Profile overwritten");
-        } else {
+        ImGui::Spacing();
+
+        // Stack buttons vertically on mobile
+        float btn_w = avail_w - 36;
+        if (ui::primaryButton(ICON_FA_PLUS "  Save New", ImVec2(btn_w, 36))) {
             ImGui::OpenPopup("SaveProfilePopup");
         }
-    }
+        ImGui::Spacing();
+        if (ui::softButton(ICON_FA_FLOPPY_DISK "  Overwrite", ImVec2(btn_w, 36))) {
+            if (!app.selected_profile_id.empty()) {
+                auto profile = app.keyboard.saveToProfile("");
+                app.profiles.update(app.selected_profile_id, profile);
+                app.addStatus("Profile overwritten");
+            } else {
+                ImGui::OpenPopup("SaveProfilePopup");
+            }
+        }
+        ImGui::Spacing();
+        if (ui::dangerButton(ICON_FA_TRASH "  Delete", ImVec2(btn_w, 36))) {
+            if (!app.selected_profile_id.empty()) {
+                app.profiles.remove(app.selected_profile_id);
+                app.selected_profile_id.clear();
+                auto s = app.settings.read();
+                s.active_profile_id = "";
+                app.settings.write(s);
+                app.keyboard.loadDefaultBindings();
+                app.addStatus("Profile deleted, defaults restored");
+            }
+        }
+    } else {
+        // Desktop/iPad: horizontal layout
+        ImGui::SameLine(0, 10);
+        ImGui::TextColored(p.muted, "Slot:");
+        ImGui::SameLine(0, 4);
+        ImGui::PushItemWidth(75);
+        int slot = app.activeSlot();
+        if (ImGui::Combo("##IRSlot", &slot, "P1\0P2\0P3\0P4\0")) {
+            app.setActiveSlot(slot);
+        }
+        ImGui::PopItemWidth();
+        ImGui::Spacing();
 
-    ImGui::SameLine(0, 6);
-    if (ui::dangerButton(ICON_FA_TRASH "  Delete", ImVec2(90, 28))) {
-        if (!app.selected_profile_id.empty()) {
-            app.profiles.remove(app.selected_profile_id);
-            app.selected_profile_id.clear();
-            auto s = app.settings.read();
-            s.active_profile_id = "";
-            app.settings.write(s);
-            app.keyboard.loadDefaultBindings();
-            app.addStatus("Profile deleted, defaults restored");
+        auto profileList = app.profiles.list();
+
+        ui::sectionLabel("Keybinding Profiles", ICON_FA_LAYER_GROUP);
+        ImGui::Spacing();
+
+        int selectedProfileIdx = -1;
+        for (int i = 0; i < (int)profileList.size(); i++) {
+            if (profileList[i].id == app.selected_profile_id) {
+                selectedProfileIdx = i;
+                break;
+            }
+        }
+
+        const char* previewLabel = selectedProfileIdx >= 0 ? profileList[selectedProfileIdx].name.c_str() : "(none)";
+        float combo_w = avail_w - 240.0f;
+        if (combo_w < 120.0f) combo_w = 120.0f;
+        ImGui::SetNextItemWidth(combo_w);
+        if (ImGui::BeginCombo("##ProfileCombo", previewLabel)) {
+            for (int i = 0; i < (int)profileList.size(); i++) {
+                bool isSel = (selectedProfileIdx == i);
+                if (ImGui::Selectable(profileList[i].name.c_str(), isSel)) {
+                    app.keyboard.loadFromProfile(profileList[i]);
+                    app.selected_profile_id = profileList[i].id;
+                    auto s = app.settings.read();
+                    s.active_profile_id = profileList[i].id;
+                    app.settings.write(s);
+                    app.addStatus("Loaded profile \"" + profileList[i].name + "\"");
+                }
+                if (isSel) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+
+        ImGui::SameLine(0, 10);
+        if (ui::primaryButton(ICON_FA_PLUS "  Save New", ImVec2(110, 28))) {
+            ImGui::OpenPopup("SaveProfilePopup");
+        }
+
+        ImGui::SameLine(0, 6);
+        if (ui::softButton(ICON_FA_FLOPPY_DISK "  Overwrite", ImVec2(110, 28))) {
+            if (!app.selected_profile_id.empty()) {
+                auto profile = app.keyboard.saveToProfile("");
+                app.profiles.update(app.selected_profile_id, profile);
+                app.addStatus("Profile overwritten");
+            } else {
+                ImGui::OpenPopup("SaveProfilePopup");
+            }
+        }
+
+        ImGui::SameLine(0, 6);
+        if (ui::dangerButton(ICON_FA_TRASH "  Delete", ImVec2(90, 28))) {
+            if (!app.selected_profile_id.empty()) {
+                app.profiles.remove(app.selected_profile_id);
+                app.selected_profile_id.clear();
+                auto s = app.settings.read();
+                s.active_profile_id = "";
+                app.settings.write(s);
+                app.keyboard.loadDefaultBindings();
+                app.addStatus("Profile deleted, defaults restored");
+            }
         }
     }
 
@@ -121,7 +200,7 @@ void renderInputRedirectScreen(App& app) {
         ImGui::Spacing();
         static char profileNameBuf[128] = {};
         ImGui::Text("Profile Name:");
-        ImGui::SetNextItemWidth(300);
+        ImGui::SetNextItemWidth(-1);
         ImGui::InputText("##ProfileName", profileNameBuf, sizeof(profileNameBuf));
         ImGui::Spacing();
         if (ui::primaryButton(ICON_FA_CHECK "  Save", ImVec2(100, 32))) {
@@ -150,17 +229,21 @@ void renderInputRedirectScreen(App& app) {
     ImGui::Spacing();
     ImGui::Spacing();
 
-    float col_w = (avail_w - 16.0f) * 0.5f;
+    float col_w = compact ? avail_w : (avail_w - 16.0f) * 0.5f;
 
-    // Left: Button bindings
     ui::beginCard("BindingsCard", ImVec2(col_w, 0));
     ui::sectionLabel("Button Bindings", ICON_FA_KEYBOARD);
     ImGui::Spacing();
 
-    if (ImGui::BeginTable("BindTbl", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0, 360))) {
-        ImGui::TableSetupColumn("PS Button", ImGuiTableColumnFlags_WidthFixed, 100.0f); 
+    // Use auto-height table on mobile for better touch scrolling
+    float table_h = compact ? 0.0f : 360.0f;
+    ImGuiTableFlags table_flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg;
+    if (!compact) table_flags |= ImGuiTableFlags_ScrollY;
+
+    if (ImGui::BeginTable("BindTbl", 3, table_flags, ImVec2(0, table_h))) {
+        ImGui::TableSetupColumn("PS Button", ImGuiTableColumnFlags_WidthFixed, compact ? 80.0f : 100.0f); 
         ImGui::TableSetupColumn("Keyboard Key", ImGuiTableColumnFlags_WidthStretch); 
-        ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, compact ? 70.0f : 80.0f);
         ImGui::TableHeadersRow();
 
         for (int i = 0; i < 18; i++) {
@@ -179,7 +262,7 @@ void renderInputRedirectScreen(App& app) {
 
             ImGui::TableSetColumnIndex(2);
             ImGui::PushID(i);
-            if (ui::softButton(ICON_FA_KEY "  Set", ImVec2(70, 24))) {
+            if (ui::softButton(ICON_FA_KEY "  Set", ImVec2(compact ? 60.0f : 70.0f, compact ? 28.0f : 24.0f))) {
                 app.rebind_button_id = i;
                 app.rebind_button_name = BTN_NAMES[i];
             }
@@ -210,9 +293,12 @@ void renderInputRedirectScreen(App& app) {
     }
     ui::endCard();
 
-    ImGui::SameLine(0, 16);
+    if (!compact) {
+        ImGui::SameLine(0, 16);
+    } else {
+        ImGui::Spacing();
+    }
 
-    // Right: Options
     ui::beginCard("OptionsCard", ImVec2(col_w, 0));
     ui::sectionLabel("Control Settings", ICON_FA_GEAR);
     ImGui::Spacing();
@@ -254,8 +340,8 @@ void renderInputRedirectScreen(App& app) {
 
     // Gamepad
     ImGui::TextColored(p.muted, "%s  Physical Gamepad Passthrough:", ICON_FA_GAMEPAD);
-    ImGui::SameLine(col_w - 180);
-    if (ui::softButton(ICON_FA_ARROW_ROTATE_RIGHT "  Scan gamepads", ImVec2(140, 26))) app.gamepad_input.update();
+    ImGui::Spacing();
+    if (ui::softButton(ICON_FA_ARROW_ROTATE_RIGHT "  Scan gamepads", ImVec2(col_w - 36, 32))) app.gamepad_input.update();
     
     ImGui::Spacing();
     auto pads = app.gamepad_input.listGamepads();

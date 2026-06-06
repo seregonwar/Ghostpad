@@ -33,73 +33,130 @@ void renderControllerScreen(App& app) {
      *  └──────────────────────────────────────────────────────────┘
      */
     float spacing = ImGui::GetStyle().ItemSpacing.x;
-    float edit_pencil_w = 40.0f;
-    float total_width = 0.0f;
-    
-    float slot_sel_w = 14.0f + spacing + 75.0f;
-    total_width += slot_sel_w;
-    total_width += spacing + edit_pencil_w;
+    bool compact = app.is_compact_device;
 
-    if (app.is_layout_edit_mode) {
-        total_width += spacing + 130.0f + spacing + 120.0f;
-    } else {
-        total_width += spacing + 90.0f;
-        if (!status.is_connected) {
-            total_width += spacing + 100.0f;
-        }
-    }
+    if (compact) {
+        float half_w = (avail_w - spacing) * 0.5f;
 
-    ImGui::SameLine(avail_w - total_width);
-
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextColored(p.muted, "%s", ICON_FA_USER);
-    ImGui::SameLine();
-    ImGui::PushItemWidth(75);
-    int slot = app.activeSlot();
-    if (ImGui::Combo("##CtrlSlot", &slot, "P1\0P2\0P3\0P4\0")) {
-        app.setActiveSlot(slot);
-    }
-    ImGui::PopItemWidth();
-    ImGui::SameLine();
-
-    // Pencil button (Toggles Edit Mode)
-    const char* pencil_icon = app.is_layout_edit_mode ? ICON_FA_XMARK : ICON_FA_PEN_TO_SQUARE;
-    ImU32 pencil_col = app.is_layout_edit_mode ? ui::u32(p.danger) : ui::u32(p.primary2);
-    ImGui::PushStyleColor(ImGuiCol_Text, pencil_col);
-    if (ui::softButton(pencil_icon, ImVec2(edit_pencil_w, 30))) {
-        if (!app.is_layout_edit_mode) {
-            app.is_layout_edit_mode = true;
-            app.temp_layout = app.settings.read().pad_layout;
-            app.selected_layout_component = 0;
-        } else {
-            app.is_layout_edit_mode = false;
-        }
-    }
-    ImGui::PopStyleColor();
-
-    if (app.is_layout_edit_mode) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(p.muted, "%s", ICON_FA_USER);
         ImGui::SameLine();
-        if (ui::dangerButton(ICON_FA_ARROW_ROTATE_LEFT "  Reset Defaults", ImVec2(130, 30))) {
-            app.temp_layout = PadLayoutSettings{};
-            app.addStatus("Layout reset to defaults");
+        ImGui::PushItemWidth(half_w - 30.0f);
+        int slot = app.activeSlot();
+        if (ImGui::Combo("##CtrlSlot", &slot, "P1\0P2\0P3\0P4\0")) {
+            app.setActiveSlot(slot);
         }
+        ImGui::PopItemWidth();
         ImGui::SameLine();
-        if (ui::primaryButton(ICON_FA_CHECK "  Save Layout", ImVec2(120, 30))) {
-            auto s = app.settings.read();
-            s.pad_layout = app.temp_layout;
-            app.settings.write(s);
-            app.is_layout_edit_mode = false;
-            app.addStatus("Controller layout saved");
+
+        const char* pencil_icon = app.is_layout_edit_mode ? ICON_FA_XMARK : ICON_FA_PEN_TO_SQUARE;
+        ImU32 pencil_col = app.is_layout_edit_mode ? ui::u32(p.danger) : ui::u32(p.primary2);
+        ImGui::PushStyleColor(ImGuiCol_Text, pencil_col);
+        if (ui::softButton(pencil_icon, ImVec2(40.0f, 30))) {
+            if (!app.is_layout_edit_mode) {
+                app.is_layout_edit_mode = true;
+                app.temp_layout = app.settings.read().pad_layout;
+                app.selected_layout_component = 0;
+            } else {
+                app.is_layout_edit_mode = false;
+            }
         }
-    } else {
-        ImGui::SameLine();
-        if (ui::softButton(ICON_FA_ARROW_ROTATE_LEFT "  Reset", ImVec2(90, 30))) {
-            app.virtual_pad = {};
-        }
-        if (!status.is_connected) {
+        ImGui::PopStyleColor();
+
+        if (app.is_layout_edit_mode) {
+            if (ui::dangerButton(ICON_FA_ARROW_ROTATE_LEFT "  Reset", ImVec2(half_w, 30))) {
+                app.temp_layout = PadLayoutSettings{};
+                app.addStatus("Layout reset to defaults");
+            }
             ImGui::SameLine();
-            if (ui::primaryButton(ICON_FA_LINK "  Connect", ImVec2(100, 30))) {
-                app.current_screen = Screen::Consoles;
+            if (ui::primaryButton(ICON_FA_CHECK "  Save", ImVec2(half_w, 30))) {
+                auto s = app.settings.read();
+                s.pad_layout = app.temp_layout;
+                app.settings.write(s);
+                app.is_layout_edit_mode = false;
+                app.addStatus("Controller layout saved");
+            }
+        } else {
+            if (ui::softButton(ICON_FA_ARROW_ROTATE_LEFT "  Reset", ImVec2(half_w, 30))) {
+                app.virtual_pad = {};
+            }
+            ImGui::SameLine();
+            if (!status.is_connected) {
+                if (ui::primaryButton(ICON_FA_LINK "  Connect", ImVec2(half_w, 30))) {
+                    app.current_screen = Screen::Consoles;
+                }
+            } else {
+                ImGui::Dummy(ImVec2(half_w, 0));
+            }
+        }
+    } else {
+        float edit_pencil_w = 40.0f;
+        float total_width = 0.0f;
+        
+        float slot_sel_w = 14.0f + spacing + 75.0f;
+        total_width += slot_sel_w;
+        total_width += spacing + edit_pencil_w;
+
+        if (app.is_layout_edit_mode) {
+            total_width += spacing + 130.0f + spacing + 120.0f;
+        } else {
+            total_width += spacing + 90.0f;
+            if (!status.is_connected) {
+                total_width += spacing + 100.0f;
+            }
+        }
+
+        ImGui::SameLine(avail_w - total_width);
+
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(p.muted, "%s", ICON_FA_USER);
+        ImGui::SameLine();
+        ImGui::PushItemWidth(75);
+        int slot = app.activeSlot();
+        if (ImGui::Combo("##CtrlSlot", &slot, "P1\0P2\0P3\0P4\0")) {
+            app.setActiveSlot(slot);
+        }
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
+
+        const char* pencil_icon = app.is_layout_edit_mode ? ICON_FA_XMARK : ICON_FA_PEN_TO_SQUARE;
+        ImU32 pencil_col = app.is_layout_edit_mode ? ui::u32(p.danger) : ui::u32(p.primary2);
+        ImGui::PushStyleColor(ImGuiCol_Text, pencil_col);
+        if (ui::softButton(pencil_icon, ImVec2(edit_pencil_w, 30))) {
+            if (!app.is_layout_edit_mode) {
+                app.is_layout_edit_mode = true;
+                app.temp_layout = app.settings.read().pad_layout;
+                app.selected_layout_component = 0;
+            } else {
+                app.is_layout_edit_mode = false;
+            }
+        }
+        ImGui::PopStyleColor();
+
+        if (app.is_layout_edit_mode) {
+            ImGui::SameLine();
+            if (ui::dangerButton(ICON_FA_ARROW_ROTATE_LEFT "  Reset Defaults", ImVec2(130, 30))) {
+                app.temp_layout = PadLayoutSettings{};
+                app.addStatus("Layout reset to defaults");
+            }
+            ImGui::SameLine();
+            if (ui::primaryButton(ICON_FA_CHECK "  Save Layout", ImVec2(120, 30))) {
+                auto s = app.settings.read();
+                s.pad_layout = app.temp_layout;
+                app.settings.write(s);
+                app.is_layout_edit_mode = false;
+                app.addStatus("Controller layout saved");
+            }
+        } else {
+            ImGui::SameLine();
+            if (ui::softButton(ICON_FA_ARROW_ROTATE_LEFT "  Reset", ImVec2(90, 30))) {
+                app.virtual_pad = {};
+            }
+            if (!status.is_connected) {
+                ImGui::SameLine();
+                if (ui::primaryButton(ICON_FA_LINK "  Connect", ImVec2(100, 30))) {
+                    app.current_screen = Screen::Consoles;
+                }
             }
         }
     }
@@ -111,15 +168,26 @@ void renderControllerScreen(App& app) {
     // ─────────────────────────────────────────────────────────────────────────────
     //                          CONTROLLER GRAPHICS AREA
     // ─────────────────────────────────────────────────────────────────────────────
-    float panel_w = 320.0f;
-    float pad_area_w = app.is_layout_edit_mode ? (avail_w - panel_w - 20.0f) : avail_w;
+    float panel_w = avail_w * 0.3f;
+    if (panel_w > 320.0f) panel_w = 320.0f;
+    if (panel_w < 200.0f) panel_w = 200.0f;
+    
+    bool show_panel_side = app.is_layout_edit_mode && !compact;
+    float pad_area_w = show_panel_side ? (avail_w - panel_w - 20.0f) : avail_w;
     
     float pad_size = (std::min)(pad_area_w * 0.42f, (avail_h - 100.0f) * 0.70f);
+    if (compact) {
+        // Mobile: smaller controller to fit screen
+        pad_size = (std::min)(pad_area_w * 0.42f, (avail_h - 140.0f) * 0.45f);
+        if (pad_size < 100.0f) pad_size = 100.0f;
+        if (pad_size > 160.0f) pad_size = 160.0f; // cap max size on mobile
+    }
     float pad_w = pad_size * 2.0f;
     float pad_h = pad_size * 1.2f;
     
     float offset_x = (pad_area_w - pad_w) * 0.5f;
     float offset_y = (std::max)((avail_h - 90.0f - pad_h) * 0.4f, 10.0f);
+    if (compact) offset_y = 10.0f;
     
     ImGui::BeginGroup();
     if (offset_y > 0) ImGui::Dummy(ImVec2(0, offset_y));
@@ -143,23 +211,41 @@ void renderControllerScreen(App& app) {
     }
 
     ImGui::Dummy(ImVec2(0, 16));
-    float text_w = ImGui::CalcTextSize("Drag sticks/triggers. Click buttons. Leave this tab open for direct touch control.").x;
-    ImGui::SetCursorPosX((pad_area_w - text_w) * 0.5f);
-    ImGui::TextColored(p.muted, "%s  Press buttons on physical controller to see them light up in real-time.", ICON_FA_CIRCLE_INFO);
     
-    text_w = ImGui::CalcTextSize("Tip: Click & drag on the layout above to send virtual controller inputs.").x;
-    ImGui::SetCursorPosX((pad_area_w - text_w) * 0.5f);
-    ImGui::TextColored(p.dim, "Tip: Click & drag on the layout above to send virtual controller inputs.");
+    // Use TextWrapped for mobile to prevent truncation
+    if (compact) {
+        ImGui::TextWrapped("%s  Press buttons on physical controller to see them light up in real-time.", ICON_FA_CIRCLE_INFO);
+        ImGui::TextWrapped("Tip: Click & drag on the layout above to send virtual controller inputs.");
+    } else {
+        const char* hint1 = "Press buttons on physical controller to see them light up in real-time.";
+        float text_w = ImGui::CalcTextSize(hint1).x;
+        float text_x = (pad_area_w - text_w) * 0.5f;
+        if (text_x < 8.0f) text_x = 8.0f;
+        ImGui::SetCursorPosX(text_x);
+        ImGui::TextColored(p.muted, "%s  %s", ICON_FA_CIRCLE_INFO, hint1);
+        
+        const char* hint2 = "Tip: Click & drag on the layout above to send virtual controller inputs.";
+        text_w = ImGui::CalcTextSize(hint2).x;
+        text_x = (pad_area_w - text_w) * 0.5f;
+        if (text_x < 8.0f) text_x = 8.0f;
+        ImGui::SetCursorPosX(text_x);
+        ImGui::TextColored(p.dim, "%s", hint2);
+    }
     ImGui::EndGroup();
 
     // ─────────────────────────────────────────────────────────────────────────────
     //                         PROPERTIES SIDEBAR PANEL
     // ─────────────────────────────────────────────────────────────────────────────
     if (app.is_layout_edit_mode) {
-        ImGui::SameLine();
-        ImGui::SetCursorPosX(pad_area_w + 20.0f);
+        if (show_panel_side) {
+            ImGui::SameLine();
+            ImGui::SetCursorPosX(pad_area_w + 20.0f);
+        } else {
+            ImGui::Spacing();
+        }
         
-        ui::beginCard("EditPanel", ImVec2(panel_w, avail_h - 90.0f));
+        float panel_h = show_panel_side ? (avail_h - 90.0f) : (avail_h * 0.4f);
+        ui::beginCard("EditPanel", ImVec2(compact ? avail_w : panel_w, panel_h));
         ui::sectionLabel("Properties", ICON_FA_PEN_TO_SQUARE);
         ImGui::Spacing();
         
