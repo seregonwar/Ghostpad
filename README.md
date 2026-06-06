@@ -100,8 +100,8 @@ Ghostpad is designed for local-network control, diagnostics, development, and co
            │ WiFi
            ▼
   ┌─────────────────┐         TCP 6967          ┌─────────────────────┐
-  │  ESP32 Bridge   │ ────────────────────────► │  PS4 / PS5 Console   │
-  │  Web + BLE HID  │                           │  ghostpad.elf        │
+  │  ESP32 Bridge   │ ────────────────────────► │  PS4 / PS5 Console  │
+  │  Web + BLE HID  │                           │  ghostpad.elf       │
   └────────┬────────┘                           └─────────────────────┘
            │
            │ BLE
