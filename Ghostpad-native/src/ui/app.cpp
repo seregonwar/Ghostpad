@@ -9,9 +9,11 @@
 #include "fa_solid_900_ttf.h"
 #include "imgui.h"
 #include "imgui_internal.h"
+#ifndef GHOSTPAD_IOS
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 #include "GLFW/glfw3.h"
+#endif
 #include <cstdio>
 #include <algorithm>
 #include <string>
@@ -32,6 +34,7 @@ extern void renderPadVisualizer(App& app, const PadStateInput& state, float size
 extern void renderInteractivePadVisualizer(App& app, PadStateInput& state, float size);
 }
 
+#ifndef GHOSTPAD_IOS
 static GLFWwindow* g_window = nullptr;
 
 static void glfw_error_callback(int error, const char* description) {
@@ -47,8 +50,21 @@ static ImGuiKey glfwKeyToImGuiKey(int glfw_key) {
         return static_cast<ImGuiKey>(ImGuiKey_Keypad0 + (glfw_key - GLFW_KEY_KP_0));
     return ImGuiKey_None;
 }
+#endif
 
 namespace ghostpad {
+
+#ifndef GHOSTPAD_IOS
+ImTextureID createControllerTexture(const unsigned char* pixels, int width, int height) {
+    GLuint tex_id = 0;
+    glGenTextures(1, &tex_id);
+    glBindTexture(GL_TEXTURE_2D, tex_id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    return (ImTextureID)(intptr_t)tex_id;
+}
+#endif
 
 App::App(const std::string& data_dir)
     : consoles(data_dir), settings(data_dir), projects(data_dir), profiles(data_dir), is_connecting_(false) {}
@@ -56,6 +72,7 @@ App::App(const std::string& data_dir)
 App::~App() { shutdown(); }
 
 void App::init() {
+#ifndef GHOSTPAD_IOS
     glfwSetErrorCallback(glfw_error_callback);
     if (!glfwInit()) { fprintf(stderr, "glfwInit failed\n"); exit(1); }
 
@@ -92,6 +109,7 @@ void App::init() {
         auto* ap = static_cast<App*>(glfwGetWindowUserPointer(w));
         if (ap) ap->render();
     });
+#endif
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -101,7 +119,14 @@ void App::init() {
     // Load main font (Roboto-Medium) from embedded memory
     ImFontConfig main_font_config;
     main_font_config.FontDataOwnedByAtlas = false;
-    ImFont* mainFont = io.Fonts->AddFontFromMemoryTTF((void*)roboto_medium_ttf, roboto_medium_ttf_size, 16.0f, &main_font_config);
+#ifdef GHOSTPAD_IOS
+    float baseFontSize = 22.0f;  // Larger for touch screens
+    float iconFontSize = 19.0f;
+#else
+    float baseFontSize = 16.0f;
+    float iconFontSize = 14.0f;
+#endif
+    ImFont* mainFont = io.Fonts->AddFontFromMemoryTTF((void*)roboto_medium_ttf, roboto_medium_ttf_size, baseFontSize, &main_font_config);
     if (!mainFont) {
         io.Fonts->AddFontDefault();
     }
@@ -111,15 +136,17 @@ void App::init() {
     ImFontConfig icons_config;
     icons_config.MergeMode = true;
     icons_config.PixelSnapH = true;
-    icons_config.GlyphMinAdvanceX = 14.0f;
+    icons_config.GlyphMinAdvanceX = iconFontSize;
     icons_config.FontDataOwnedByAtlas = false;
-    io.Fonts->AddFontFromMemoryTTF((void*)fa_solid_900_ttf, fa_solid_900_ttf_size, 14.0f, &icons_config, icons_ranges);
+    io.Fonts->AddFontFromMemoryTTF((void*)fa_solid_900_ttf, fa_solid_900_ttf_size, iconFontSize, &icons_config, icons_ranges);
 
     ui::applyGhostpadTheme();
 
+#ifndef GHOSTPAD_IOS
     ImGui_ImplGlfw_InitForOpenGL(g_window, true);
     ImGui_ImplOpenGL3_Init("#version 150");
     glfwShowWindow(g_window);
+#endif
 
     last_pad_send_ = std::chrono::steady_clock::now();
 
@@ -284,6 +311,7 @@ PadStateInput App::getCurrentPadState() {
     return keyboard.getPadState();
 }
 
+#ifndef GHOSTPAD_IOS
 void App::render() {
     if (glfwWindowShouldClose(g_window)) { should_close = true; return; }
 
@@ -348,11 +376,6 @@ void App::render() {
 
         float vis_w = vis_screen_size * 2.0f;
         float vis_h = vis_screen_size * 1.3f;
-        float offset_x = (vp->Size.x - vis_w) * 0.5f;
-        float offset_y = (vp->Size.y - vis_h) * 0.45f;
-
-        ImGui::SetCursorPos(ImVec2(offset_x, offset_y));
-        ImGui::BeginGroup();
         vis_screen_base = ImGui::GetCursorScreenPos();
         renderPadVisualizer(*this, macro_engine.getPlaybackState(), vis_screen_size);
         ImGui::Dummy(ImVec2(vis_w, vis_h));
@@ -467,17 +490,23 @@ void App::render() {
 
     glfwSwapBuffers(g_window);
 }
+#endif
 
 void App::shutdown() {
     disconnectAllGhostpad();
     deployer.stopKlogWatcher();
+#ifndef GHOSTPAD_IOS
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
+#endif
     ImGui::DestroyContext();
+#ifndef GHOSTPAD_IOS
     if (g_window) { glfwDestroyWindow(g_window); g_window = nullptr; }
     glfwTerminate();
+#endif
 }
 
+#ifndef GHOSTPAD_IOS
 void App::onKey(int key, int scancode, int action, int mods) {
     bool ctrl_or_cmd = (mods & GLFW_MOD_CONTROL) || (mods & GLFW_MOD_SUPER);
     if (ctrl_or_cmd && action == GLFW_PRESS && rebind_button_id < 0) {
@@ -540,6 +569,7 @@ void App::onMouseButton(int button, int action, int mods) {
 void App::onScroll(double xo, double yo) {
     ImGui::GetIO().AddMouseWheelEvent((float)xo, (float)yo);
 }
+#endif
 
 // ── Sidebar ──────────────────────────────────────────────
 
@@ -588,7 +618,7 @@ static void drawSidebarConnection(App& app, float x, float w) {
     ImVec2 led_pos(pos.x + 16.0f, pos.y + 16.0f);
 
     if (anyConnected) {
-        float t = (float)glfwGetTime();
+        float t = (float)ImGui::GetTime();
         float glow_r = 7.0f + 2.0f * std::sin(t * 4.0f);
         float glow_a = 0.25f + 0.15f * std::sin(t * 4.0f);
         dl->AddCircleFilled(led_pos, glow_r, ui::u32(ui::withAlpha(p.success, glow_a)), 16);
@@ -631,7 +661,11 @@ static void drawSidebarGroup(const char* label, float x, float /*w*/) {
 
 static bool drawSidebarNav(const char* icon, const char* label, bool active, ImVec4 accent, float w) {
     const auto& p = ui::colors();
+#ifdef GHOSTPAD_IOS
+    float h = 58.0f;  // taller rows for touch
+#else
     float h = 48.0f;
+#endif
 
     // Position horizontally to align with ConnectionCard
     ImGui::SetCursorPosX(14.0f);
@@ -807,18 +841,23 @@ void App::drawTopBar(float x, float y, float width, float height) {
     /*
      *    [ NAV BUTTONS ] -> aligned right
      */
-    float r = ImGui::GetWindowWidth() - 12.0f;
-    float buttons_w = !anyConnected ? 150.0f : (120.0f + 120.0f + ImGui::GetStyle().ItemSpacing.x);
+    float r = ImGui::GetWindowWidth() - 16.0f;
+#ifdef GHOSTPAD_IOS
+    float btnW1 = 210.0f, btnW2 = 160.0f, btnH = 44.0f;
+#else
+    float btnW1 = 150.0f, btnW2 = 120.0f, btnH = 36.0f;
+#endif
+    float buttons_w = !anyConnected ? btnW1 : (btnW2 * 2 + ImGui::GetStyle().ItemSpacing.x);
 
     ImGui::SetCursorPos(ImVec2(r - buttons_w, 16));
     if (!anyConnected) {
-        if (ui::primaryButton(ICON_FA_LINK "  Connect Console", ImVec2(150, 36)))
+        if (ui::primaryButton(ICON_FA_LINK "  Connect Console", ImVec2(btnW1, btnH)))
             current_screen = Screen::Consoles;
     } else {
-        if (ui::softButton(ICON_FA_GAMEPAD "  Controller", ImVec2(120, 36)))
+        if (ui::softButton(ICON_FA_GAMEPAD "  Controller", ImVec2(btnW2, btnH)))
             current_screen = Screen::Controller;
         ImGui::SameLine();
-        if (ui::dangerButton(ICON_FA_LINK_SLASH "  Disconnect", ImVec2(120, 36))) {
+        if (ui::dangerButton(ICON_FA_LINK_SLASH "  Disconnect", ImVec2(btnW2, btnH))) {
             disconnectAllGhostpad();
             deployer.stopKlogWatcher();
             selected_console_ip.clear();
@@ -836,7 +875,19 @@ void App::drawTopBar(float x, float y, float width, float height) {
 
 void App::drawAppChrome() {
     const ImVec2 sz = ImGui::GetWindowSize();
+#ifdef GHOSTPAD_IOS
+    //  +------+----------------------------+
+    //  | side |        top bar             |
+    //  | bar  |----------------------------|  <-- wider sidebar + taller bars
+    //  |      |        content             |
+    //  |      |                            |
+    //  +------+----------------------------+
+    //  |          status bar               |
+    //  +-----------------------------------+
+    const float sb_w = 220.0f, top_h = 90.0f, bot_h = 48.0f, pad = 18.0f;
+#else
     const float sb_w = 258.0f, top_h = 80.0f, bot_h = 42.0f, pad = 22.0f;
+#endif
 
     drawSidebar(sb_w, sz.y);
     drawTopBar(sb_w, 0.0f, sz.x - sb_w, top_h);
@@ -906,7 +957,11 @@ void App::drawStatusBar() {
     }
 
     float r = ImGui::GetWindowWidth();
+#ifdef GHOSTPAD_IOS
+    ImGui::SameLine(r - 500);
+#else
     ImGui::SameLine(r - 400);
+#endif
     ImGui::TextColored(p.dim, "%s  FPS %.0f", ICON_FA_GAUGE_HIGH, current_fps_);
     ImGui::SameLine();
     int cnt = ghostpadConnectedCount();

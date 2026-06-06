@@ -145,6 +145,19 @@ inline void applyGhostpadTheme() {
     style.ScrollbarRounding = 12.0f;
     style.GrabRounding      = 10.0f;
     style.TabRounding       = 8.0f;
+
+#ifdef GHOSTPAD_IOS
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    //  iPad / iOS: bigger touch targets, more breathing room
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    style.FramePadding      = ImVec2(16, 12);
+    style.CellPadding       = ImVec2(14, 10);
+    style.ItemSpacing       = ImVec2(14, 12);
+    style.ItemInnerSpacing  = ImVec2(10, 9);
+    style.TouchExtraPadding = ImVec2(4, 4);
+    style.ScrollbarSize     = 16.0f;
+    style.GrabMinSize       = 18.0f;
+#endif
 }
 
 // ============================================================================

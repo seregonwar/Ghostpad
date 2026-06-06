@@ -14,7 +14,6 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
-#include "GLFW/glfw3.h"
 
 namespace ghostpad {
 
@@ -23,7 +22,9 @@ namespace ghostpad {
  */
 #include "dualsense_solid_black_png.h"
 
-static GLuint g_controller_texture = 0;
+extern ImTextureID createControllerTexture(const unsigned char* pixels, int width, int height);
+
+static ImTextureID g_controller_texture = 0;
 static int g_tex_w = 0;
 static int g_tex_h = 0;
 
@@ -50,11 +51,7 @@ static void loadControllerTexture() {
         data[i * 4 + 3] = max_val;
     }
 
-    glGenTextures(1, &g_controller_texture);
-    glBindTexture(GL_TEXTURE_2D, g_controller_texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    g_controller_texture = createControllerTexture(data, width, height);
     
     stbi_image_free(data);
 }
@@ -345,7 +342,7 @@ void renderInteractivePadVisualizer(App& app, PadStateInput& state, float size) 
         ImVec2 p_min(cx - img_size * 0.5f, cy - img_size * 0.5f);
         ImVec2 p_max(cx + img_size * 0.5f, cy + img_size * 0.5f);
         
-        dl->AddImage((ImTextureID)(intptr_t)g_controller_texture, p_min, p_max, ImVec2(0,0), ImVec2(1,1), ui::u32(ui::rgba(255, 255, 255, 255)));
+        dl->AddImage(g_controller_texture, p_min, p_max, ImVec2(0,0), ImVec2(1,1), ui::u32(ui::rgba(255, 255, 255, 255)));
     } else {
         // Fallback: draw outline body vector representation
         dl->AddCircleFilled(ImVec2(cx - size * 0.52f, cy + size * 0.22f), size * 0.34f, ui::u32(ui::rgba(20, 18, 25, 230)));

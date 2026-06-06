@@ -7,7 +7,33 @@
 #include "storage/profile_store.h"
 #include <algorithm>
 #include <cmath>
+#ifndef GHOSTPAD_IOS
 #include <GLFW/glfw3.h>
+#else
+// Define GLFW key codes for iOS compatibility
+#define GLFW_KEY_I                  73
+#define GLFW_KEY_J                  74
+#define GLFW_KEY_K                  75
+#define GLFW_KEY_L                  76
+#define GLFW_KEY_Q                  81
+#define GLFW_KEY_E                  69
+#define GLFW_KEY_U                  85
+#define GLFW_KEY_O                  79
+#define GLFW_KEY_UP                 265
+#define GLFW_KEY_DOWN               264
+#define GLFW_KEY_LEFT               263
+#define GLFW_KEY_RIGHT              262
+#define GLFW_KEY_TAB                258
+#define GLFW_KEY_BACKSPACE          259
+#define GLFW_KEY_LEFT_SHIFT         340
+#define GLFW_KEY_RIGHT_SHIFT        344
+#define GLFW_KEY_ESCAPE             256
+#define GLFW_KEY_T                  84
+#define GLFW_KEY_D                  68
+#define GLFW_KEY_A                  65
+#define GLFW_KEY_S                  83
+#define GLFW_KEY_W                  87
+#endif
 
 namespace ghostpad {
 

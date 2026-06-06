@@ -16,6 +16,7 @@
 namespace ghostpad::ui {
 
 #ifndef _WIN32
+#ifndef GHOSTPAD_IOS
 static std::string execCommand(const char* cmd) {
     std::array<char, 128> buffer;
     std::string result;
@@ -32,6 +33,7 @@ static std::string execCommand(const char* cmd) {
     }
     return result;
 }
+#endif
 #endif
 
 std::string pickFile(const std::string& title, const std::string& filter_desc, const std::string& filter_ext) {
@@ -59,18 +61,17 @@ std::string pickFile(const std::string& title, const std::string& filter_desc, c
         return ofn.lpstrFile;
     }
     return "";
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) && !defined(GHOSTPAD_IOS)
     (void)filter_desc;
     (void)filter_ext;
     // Use AppleScript to pick a file
     std::string cmd = "osascript -e 'POSIX path of (choose file with prompt \"" + title + "\")' 2>/dev/null";
     return execCommand(cmd.c_str());
 #else
+    (void)title;
     (void)filter_desc;
     (void)filter_ext;
-    // Fallback for generic Linux / other systems (zenity if available, or empty)
-    std::string cmd = "zenity --file-selection --title=\"" + title + "\" 2>/dev/null";
-    return execCommand(cmd.c_str());
+    return "";
 #endif
 }
 

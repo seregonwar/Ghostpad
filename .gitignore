@@ -27,3 +27,4 @@ Ghostpad-app/react/src/.DS_Store
 *.txt
 *.gif
 /build-test
+/Ghostpad-native/build_ios

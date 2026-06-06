@@ -7,6 +7,24 @@
 #include "ui/native_theme.h"
 #include "imgui.h"
 
+extern "C" void openBrowserURL(const char* url);
+
+#ifndef GHOSTPAD_IOS
+#include <cstdlib>
+extern "C" void openBrowserURL(const char* url) {
+#ifdef _WIN32
+    std::string cmd = "start " + std::string(url);
+    std::system(cmd.c_str());
+#elif defined(__APPLE__)
+    std::string cmd = "open " + std::string(url);
+    std::system(cmd.c_str());
+#else
+    std::string cmd = "xdg-open " + std::string(url);
+    std::system(cmd.c_str());
+#endif
+}
+#endif
+
 namespace ghostpad {
 
 void renderCreditsScreen(App& app) {
@@ -28,7 +46,7 @@ void renderCreditsScreen(App& app) {
     ImGui::TextColored(p.primary2, "seregonwar");
     ImGui::SameLine(content_w - 170);
     if (ui::softButton(ICON_FA_UP_RIGHT_FROM_SQUARE "  GitHub Profile", ImVec2(140, 28))) {
-        system("open https://github.com/seregonwar");
+        openBrowserURL("https://github.com/seregonwar");
     }
     
     ImGui::Spacing();
@@ -53,7 +71,7 @@ void renderCreditsScreen(App& app) {
     ImGui::TextColored(p.primary2, "stonedmodder");
     ImGui::SameLine(content_w - 170);
     if (ui::softButton(ICON_FA_UP_RIGHT_FROM_SQUARE "  GitHub Profile", ImVec2(140, 28))) {
-        system("open https://github.com/stonedmodder");
+        openBrowserURL("https://github.com/stonedmodder");
     }
     
     ImGui::Spacing();
@@ -76,7 +94,7 @@ void renderCreditsScreen(App& app) {
     ImGui::TextColored(p.primary2, "GNU General Public License v3.0");
     ImGui::SameLine(content_w - 170);
     if (ui::softButton(ICON_FA_UP_RIGHT_FROM_SQUARE "  View Full License", ImVec2(140, 28))) {
-        system("open https://www.gnu.org/licenses/gpl-3.0.html");
+        openBrowserURL("https://www.gnu.org/licenses/gpl-3.0.html");
     }
     
     ImGui::TextWrapped("Copyright (C) 2026 seregonwar. This program is free software: you can redistribute it and/or modify it under the terms of the GPLv3 license. See the LICENSE file in the repository for full terms.");

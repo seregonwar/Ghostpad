@@ -58,11 +58,13 @@ public:
     void render();
     void shutdown();
 
+#ifndef GHOSTPAD_IOS
     // GLFW callbacks
     void onKey(int key, int scancode, int action, int mods);
     void onMouseMove(double x, double y);
     void onMouseButton(int button, int action, int mods);
     void onScroll(double xoffset, double yoffset);
+#endif
 
     bool should_close = false;
 
@@ -115,10 +117,10 @@ public:
     // Status messages
     void addStatus(const std::string& msg, bool error = false);
     void drawStatusBar();
+    void drawAppChrome();
 
 private:
     void drawMainMenu();
-    void drawAppChrome();
     void drawSidebar(float width, float height);
     void drawTopBar(float x, float y, float width, float height);
     void renderScreen();
