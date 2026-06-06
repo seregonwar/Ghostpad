@@ -31,10 +31,10 @@ Ghostpad is a **payload + bridge + client** system that creates a virtual DualSe
 
 The console shell and games see the injected device as a real controller. Input can come from:
 
-- the **Ghostpad Desktop App**;
+- the native **Ghostpad Desktop GUI**;
 - the embedded **ESP32 web controller**;
 - a physical **BLE gamepad** such as DualSense or DualShock 4;
-- keyboard, mouse, XInput, or browser-based controls, depending on the client.
+- keyboard, gamepad, or browser-based controls, depending on the client.
 
 Ghostpad is designed for local-network control, diagnostics, development, and controller redirection workflows.
 
@@ -65,16 +65,16 @@ Ghostpad is designed for local-network control, diagnostics, development, and co
 - Supports TinyUSB HID output for direct USB HID use cases.
 - Streams klog data to dashboard clients through WebSocket.
 
-### Desktop app
+### Desktop GUI
 
-- Electron + React Windows client.
-- Virtual controller UI.
-- Keyboard and mouse input.
-- XInput gamepad passthrough.
-- Macro recording and playback.
-- Console manager with LAN scan and auto-deploy workflow.
-- System actions such as reboot, shutdown, rest mode, and disc eject.
-- Optional beeper and LED control when the companion server is available.
+- Native C++17 cross-platform client (GLFW + OpenGL + Dear ImGui).
+- Virtual controller UI with real-time gamepad visualizer.
+- Keyboard and native gamepad input mappings.
+- Advanced macro engine (recording, playback, and customization).
+- Integrated console manager with network scanning and auto-deploy workflow.
+- Console system actions (reboot, shutdown, rest mode, and disc eject).
+- Dedicated diagnostic and testing views (Beeper control, project/profile stores).
+- High performance, low latency, and lightweight resource footprint.
 
 ---
 
@@ -85,7 +85,7 @@ Ghostpad is designed for local-network control, diagnostics, development, and co
                                GPAD controller input
   ┌─────────────────┐      ───────────────────────────►      ┌─────────────────────┐
   │  Desktop App    │                                       │  PS4 / PS5 Console   │
-  │  Electron/React │      ◄──────── TCP 3434 ────────────  │  ghostpad.elf        │
+  │  C++ / ImGui    │      ◄──────── TCP 3434 ────────────  │  ghostpad.elf        │
   └─────────────────┘             klog stream               └──────────┬──────────┘
                                                                         │
                                                                         │
@@ -120,7 +120,7 @@ Ghostpad is designed for local-network control, diagnostics, development, and co
 |---|---:|---|
 | Console payload | `payload/` | ELF payload for PS4/PS5. Creates the virtual controller, accepts GPAD input, handles VDA/VDI and optional klog streaming. |
 | ESP32 bridge | `esp32-ghostpad/` | Firmware for WiFi, web UI, BLE HID host, USB HID, subnet scan, API, and WebSocket streaming. |
-| Desktop app | `Ghostpad-app/` | Electron + React Windows client with advanced controller, macro, deployment, and console-management features. |
+| Desktop GUI | `Ghostpad-native/` | Native C++17 (GLFW/ImGui) cross-platform client with advanced controller, macro, deployment, and console-management features. |
 | VDA probe | `tools/vda_probe/` | Diagnostic payload for fingerprinting VDA byte patterns and MBus symbols. |
 | Research notes | `virtualDS5research.md` | Technical write-up for the virtual DualSense research and implementation. |
 
@@ -184,28 +184,40 @@ If mDNS is unavailable, use the device IP shown by your router or serial monitor
 
 ---
 
-### 3. Start the desktop app
+### 3. Build the native Desktop GUI
+
+#### Building on macOS / Linux:
 
 ```bash
-cd Ghostpad-app
-
-npm install
-npm run build:react
-npm run start
+cd Ghostpad-native
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
 ```
 
-For a packaged Windows build:
+On macOS, this builds the application bundle (`ghostpad-native.app`). On Linux/macOS, you can run the executable from the build directory:
 
 ```bash
-npm run compile
+./build/ghostpad-native
 ```
+
+#### Building on Windows:
+
+Using Command Prompt or PowerShell, run:
+
+```cmd
+cd Ghostpad-native
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+```
+
+This produces `ghostpad-native.exe` in `build/` (or `build/Release/`).
 
 First-time desktop workflow:
 
 1. Start the ELF loader on the console.
-2. Open the Ghostpad desktop app.
-3. Add the console IP in **Settings**.
-4. Click **Deploy Payload**.
+2. Run the native Ghostpad GUI.
+3. Add the console IP in the **Consoles** or **Settings** screen.
+4. Click **Deploy** to load the payload.
 5. Click **Connect**.
 
 ---
@@ -214,7 +226,7 @@ First-time desktop workflow:
 
 | Mode | Input source | Transport | Output target | Best for |
 |---|---|---|---|---|
-| Desktop app → Console | Keyboard, mouse, XInput, virtual controller | TCP `6967` | Virtual DualSense | Full-featured Windows control |
+| Desktop GUI → Console | Keyboard, gamepad, virtual controller | TCP `6967` | Virtual DualSense | Full-featured cross-platform control |
 | Browser → ESP32 → Console | Web UI | WebSocket + TCP `6967` | Virtual DualSense | Lightweight LAN control |
 | BLE gamepad → ESP32 → Console | DualSense, DualShock 4, compatible BLE HID devices | BLE + TCP `6967` | Virtual DualSense | Wireless controller relay |
 | Browser → ESP32 → USB | Web UI | WebSocket + USB HID | PS5 USB HID | Direct wired control experiments |
@@ -357,11 +369,12 @@ The ESP32 bridge returns periodic status frames:
 - ESP32-WROOM-32U board;
 - USB serial adapter or native USB flashing path supported by your board.
 
-#### Desktop app
+#### Desktop GUI
 
-- Node.js;
-- npm;
-- Windows for packaged `.exe` builds.
+- CMake 3.20+;
+- C++17 compiler (GCC, Clang, or MSVC);
+- Python 3 (required for automated asset embedding);
+- GLFW/OpenGL development libraries (on Linux/Ubuntu, install `libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev`).
 
 ---
 
@@ -416,20 +429,12 @@ idf.py -p /dev/cu.usbmodemXXXX flash
 
 ---
 
-### Desktop app example
+### Desktop GUI example
 
 ```bash
-cd Ghostpad-app
-
-npm install
-npm run build:react
-npm run start
-```
-
-Package for Windows:
-
-```bash
-npm run compile
+cd Ghostpad-native
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
 ```
 
 ---
@@ -497,8 +502,8 @@ esp32-ghostpad/
 ├── sdkconfig.private.defaults
 └── CMakeLists.txt
 
-Ghostpad-app/
-└── Electron + React desktop client
+Ghostpad-native/
+└── C++17 + ImGui + GLFW cross-platform desktop client
 
 tools/
 └── vda_probe/
@@ -526,7 +531,7 @@ virtualDS5research.md
 
 ### StonedModder
 
-- Ghostpad desktop app: Electron + React GUI for Windows with virtual controller, XInput passthrough, keyboard/mouse input, macro recording/playback, console manager, auto-deploy, system-state controls, beeper/LED controls, and video-capture overlay.
+- Original Ghostpad desktop app: Electron + React GUI (now deprecated).
 - Original PS5 payload and VDA research.
 - `scePadVirtualDeviceAddDevice` code-cave patch.
 - `sceMbusBindDeviceWithUserId` / `sceMbusDisconnectDevice` MBus binding flow.
@@ -553,7 +558,7 @@ virtualDS5research.md
 - GBND prebind loop and direct MBus bind path.
 - VDA probe diagnostic tool.
 - Klog parser improvements.
-- Native C++ GUI.
+- Native C++ GUI (GLFW + OpenGL + Dear ImGui cross-platform client).
 
 ---
 
@@ -574,7 +579,7 @@ virtualDS5research.md
 |---|---|
 | Payload C sources | GPL-3.0-or-later |
 | ESP32 firmware | GPL-3.0-or-later |
-| PC GUI scripts | MIT |
+| Native Desktop GUI | GPL-3.0-or-later |
 
 ---
 
