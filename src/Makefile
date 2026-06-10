@@ -20,13 +20,13 @@ ifeq ($(MAKECMDGOALS),clean)
 else ifdef PS4_PAYLOAD_SDK
     include $(PS4_PAYLOAD_SDK)/toolchain/orbis.mk
     CFLAGS  += -D__ORBIS__
-    TARGET  := ghostpad-ps4.elf
+    TARGET  := ghostpad.elf
     DEPLOY  := $(PS4_DEPLOY)
     HOST    := $(PS4_HOST)
 else ifdef PS5_PAYLOAD_SDK
     include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
     CFLAGS  += -D__PROSPERO__
-    TARGET  := ghostpad-ps5.elf
+    TARGET  := ghostpad.elf
     DEPLOY  := $(PS5_PAYLOAD_SDK)/bin/prospero-deploy
     HOST    := $(PS5_HOST)
 else
@@ -35,10 +35,19 @@ endif
 
 # ── COMPILATION FLAGS ─────────────────────────────────────────────────────
 
-CFLAGS  += -Wall -Wextra -g -O2 -fPIC -fno-stack-protector $(EXTRA_CFLAGS)
-LDFLAGS += -lScePad -lSceUserService -lpthread -ldl
+CFLAGS  += -Wall -Wextra -g -O2 -fPIC -fno-stack-protector -I. -Icontroller/include -I../lib/sjson $(EXTRA_CFLAGS)
+LDFLAGS += -lScePad -lSceUserService -lpthread -ldl -lm
 
-SRC     := main.c shellui_pad.c
+SRC := main.c \
+       shellui_pad.c \
+       controller/controller.c \
+       controller/ds4.c \
+       controller/xbox.c \
+       controller/nintendo.c \
+       controller/generic.c \
+       controller/logitech.c \
+       controller/ctrl_registry.c \
+       controller/ctrl_manager.c
 
 # ── RULES ─────────────────────────────────────────────────────────────────
 

@@ -28,3 +28,4 @@ Ghostpad-app/react/src/.DS_Store
 *.gif
 /build-test
 /Ghostpad-native/build_ios
+*.zip

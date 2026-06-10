@@ -44,6 +44,14 @@
 
 #include "shellui_pad.h"
 
+#ifndef GHOSTPAD_ENABLE_USB_CONTROLLERS
+#define GHOSTPAD_ENABLE_USB_CONTROLLERS 1
+#endif
+
+#if GHOSTPAD_ENABLE_USB_CONTROLLERS
+#include "ctrl_manager.h"
+#endif
+
 #ifndef GHOSTPAD_ENABLE_INTERNAL_KLOG
 #define GHOSTPAD_ENABLE_INTERNAL_KLOG 1
 #endif
@@ -896,6 +904,9 @@ static void parse_klog_line(const char *line) {
                is_unassigned ? " unassigned" : "");
         klog_note_vda_candidate(dev_id,
             is_vda_ps5_proxy ? "ps5-vda" : (is_vda_remoteplay ? "remoteplay" : "unassigned"));
+#if GHOSTPAD_ENABLE_USB_CONTROLLERS
+        ctrl_manager_on_device_id(dev_id);
+#endif
 #if GHOSTPAD_ENABLE_KLOG_AUTOBIND
         if (dev_id != g_last_bound_virt_id) {
             trigger_auto_bind(dev_id, g_phys_dev_id);
@@ -1279,6 +1290,16 @@ int main(void) {
     /* ---- Set Pad Process Privilege ---- */
     ret = scePadSetProcessPrivilege(1);
     gp_log("[Ghostpad] scePadSetProcessPrivilege(1): 0x%08x\n", ret);
+
+    /* ---- USB Controller Manager (hotplug + VDA per USB device) ---- */
+#if GHOSTPAD_ENABLE_USB_CONTROLLERS
+    {
+        int cm_ret = ctrl_manager_init(userId, injectUserId);
+        gp_log("[Ghostpad] ctrl_manager_init: %d\n", cm_ret);
+        if (cm_ret == 0)
+            ctrl_manager_start();
+    }
+#endif
 
     /* ---- Always-on /dev/klog capture and TCP bridge ----
      * klog_capture_thread opens /dev/klog before the VDA call so we never
@@ -2083,6 +2104,9 @@ int main(void) {
 
 cleanup:
     gp_log("[Ghostpad] Cleaning up...\n");
+#if GHOSTPAD_ENABLE_USB_CONTROLLERS
+    ctrl_manager_cleanup();
+#endif
     if (clientFd >= 0) close(clientFd);
     if (ctrlFd   >= 0) close(ctrlFd);
     if (serverFd >= 0) close(serverFd);
