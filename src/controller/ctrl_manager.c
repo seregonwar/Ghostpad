@@ -8,6 +8,7 @@
 #include "ctrl_manager.h"
 #include "controller.h"
 #include "ctrl_registry.h"
+#include <unistd.h>
 #include "../shellui_pad.h"
 
 #include <stdarg.h>

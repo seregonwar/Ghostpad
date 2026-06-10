@@ -8,6 +8,7 @@
 
 #pragma once
 #include <stdint.h>
+#include <fcntl.h>
 #include <dev/usb/usb.h>
 #include <dev/usb/usb_ioctl.h>
 

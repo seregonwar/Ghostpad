@@ -36,7 +36,7 @@ endif
 # ── COMPILATION FLAGS ─────────────────────────────────────────────────────
 
 CFLAGS  += -Wall -Wextra -g -O2 -fPIC -fno-stack-protector -I. -Icontroller/include -I../lib/sjson $(EXTRA_CFLAGS)
-LDFLAGS += -lScePad -lSceUserService -lpthread -ldl -lm
+LDFLAGS += -lScePad -lSceUserService -lpthread -ldl
 
 SRC := main.c \
        shellui_pad.c \
