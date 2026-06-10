@@ -101,6 +101,9 @@ static int32_t create_vda_for_slot(int slot) {
     memset(&vdp, 0, sizeof(vdp)); vdp.size = sizeof(vdp); vdp.userId = 1;
     for (int k = 0; k < 6; k++) vdp.pad[k] = SEN;
 
+    /* Drain stale klog device IDs before VDA so we only pick the new one */
+    while (klog_dequeue_ms(100) != 0) {}
+
     int ret = scePadVirtualDeviceAddDevice(&vdp, VIRTUAL_DEVICE_TYPE_DUALSENSE);
     gp_log("slot[%d] VDA ret=0x%08x\n", slot, (uint32_t)ret);
 
@@ -109,12 +112,20 @@ static int32_t create_vda_for_slot(int slot) {
         if (vdp.pad[k] != SEN && vdp.pad[k] > 0) { if (handle < 0) handle = vdp.pad[k]; break; }
     }
 
-    uint64_t dev_id = klog_dequeue_ms(10000);
+    /* Wait for the fresh DEVICE_ADDED event from klog */
+    uint64_t dev_id = klog_dequeue_ms(5000);
     if (dev_id) {
         handle = (int32_t)(dev_id & 0xffffffffu);
         int br = shellui_pad_force_bind(dev_id, g_inject_uid);
         gp_log("slot[%d] force_bind(0x%llx, 0x%08x) ret=%d\n",
                slot, (unsigned long long)dev_id, (uint32_t)g_inject_uid, br);
+        if (br != 0) {
+            /* force_bind failed — still try GetHandle with the device ID */
+            gp_log("slot[%d] force_bind failed, trying GetHandle fallback\n", slot);
+            int32_t fallback = scePadGetHandle(1, 0, 0);
+            if (fallback < 0) fallback = scePadGetHandle(1, 3, 0);
+            if (fallback >= 0) handle = fallback;
+        }
     } else if (handle >= 0) {
         gp_log("slot[%d] klog timeout — using direct handle %d\n", slot, handle);
     } else {
@@ -163,6 +174,21 @@ static void *usb_ctrl_thread(void *arg) {
     const char *disp_name2 = json_name2 ? json_name2 : desc->name;
     gp_log("slot[%d] ctrl thread: %s (%s)\n", slot, dev_path, disp_name2);
     ghostpad_notify("Ghostpad: slot[%d] %s streaming", slot, disp_name2);
+
+    /* Auto-press Cross to dismiss PS5 "who is using this controller?" dialog */
+    {
+        extern int32_t scePadVirtualDeviceInsertData(int32_t h, const void *d);
+        ScePadData cross;
+        gp_pad_neutral(&cross);
+        cross.buttons = SCE_PAD_BUTTON_CROSS;
+        usleep(1000000); /* wait 1s for PS5 dialog to render */
+        scePadVirtualDeviceInsertData(g_slots[slot].handle, &cross);
+        gp_log("slot[%d] auto-press Cross\n", slot);
+        usleep(200000);
+        cross.buttons = 0;
+        scePadVirtualDeviceInsertData(g_slots[slot].handle, &cross);
+        usleep(100000);
+    }
 
     ctrl_run(dev_path, desc, g_slots[slot].handle, slot, on_controller_frame);
 
@@ -222,7 +248,15 @@ static void *controller_manager_thread(void *arg) {
 
             uint16_t vid = 0, pid = 0;
             const CtrlDesc *desc = ctrl_probe(path, &vid, &pid);
-            if (!desc) continue;
+            if (!desc) {
+                if ((scan % 5) == 0) {
+                    if (vid)
+                        gp_log("manager: %s VID=0x%04x PID=0x%04x — unknown\n", path, vid, pid);
+                    else
+                        gp_log("manager: %s — probe failed\n", path);
+                }
+                continue;
+            }
 
             int slot = -1;
             pthread_mutex_lock(&g_slot_lock);

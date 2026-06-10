@@ -208,8 +208,6 @@ extern int32_t sceKernelSendNotificationRequest(int unk0, void *req, size_t size
 #define VIRTUAL_DEVICE_TYPE_DUALSENSE  3
 #define VIRTUAL_DEVICE_TYPE_DS4COMPAT  0
 
-/* Network packet protocol (shared with Python GUI, ~60 Hz over TCP) */
-
 /* PS5/Prospero VDA differs from PS4/Orbis:
  *  - AddDevice must be attempted with userId=1, type=3, size=32.
  *  - scePadVirtualDeviceAddDevice may return 0x803b0006 while still creating
@@ -229,17 +227,6 @@ static int32_t ghostpad_vda_add_user_id(int32_t direct_user_id) {
 
 static int ghostpad_vda_ret_can_create_mbus_device(int32_t ret) {
     return ret >= 0 || (GHOSTPAD_PLATFORM_PS5 && ret == GHOSTPAD_PS5_VDA_COMPAT_RET);
-}
-
-static const char *ghostpad_vda_type_name(int32_t type) {
-    switch (type) {
-    case VIRTUAL_DEVICE_TYPE_DUALSENSE:
-        return "DualSense/RemotePlay";
-    case VIRTUAL_DEVICE_TYPE_DS4COMPAT:
-        return "DS4-compatible";
-    default:
-        return "custom";
-    }
 }
 
 /* Network packet protocol (shared with Python GUI, ~60 Hz over TCP) */
@@ -427,9 +414,7 @@ static uint64_t g_klog_candidate_seq = 0;
 static uint64_t g_klog_candidate_consumed_seq = 0;
 
 typedef int32_t (*GhostpadMbusBindDeviceWithUserIdFn)(uint64_t deviceId, int32_t userId);
-typedef int32_t (*GhostpadMbusDisconnectDeviceFn)(uint64_t deviceId);
 static GhostpadMbusBindDeviceWithUserIdFn g_mbus_bind_device_with_user_id = NULL;
-static GhostpadMbusDisconnectDeviceFn g_mbus_disconnect_device = NULL;
 
 /* ── VDA candidate tracking (Ghostpad-specific binding logic) ──────── */
 
@@ -495,13 +480,7 @@ static int ghostpad_try_klog_candidate_bind(int32_t default_user)
     }
 
     ScePadData probe;
-    memset(&probe, 0, sizeof(probe));
-    probe.connected = 1;
-    probe.quat.w = 1.0f;
-    probe.leftStick.x = 128;
-    probe.leftStick.y = 128;
-    probe.rightStick.x = 128;
-    probe.rightStick.y = 128;
+    gp_pad_neutral(&probe);
 
     int vr = scePadVirtualDeviceInsertData(dev_h, &probe);
     gp_log("[Ghostpad] klog prebind: direct InsertData devId=0x%x ret=0x%x\n",
@@ -602,13 +581,7 @@ static int ghostpad_ctrl_try_bind_once(int ctrlFd, int32_t default_user)
     gp_log("[Ghostpad] GBND(prebind): shellcore vdi_neutral ret=%d\n", tr);
 
     ScePadData probe;
-    memset(&probe, 0, sizeof(probe));
-    probe.connected = 1;
-    probe.quat.w = 1.0f;
-    probe.leftStick.x = 128;
-    probe.leftStick.y = 128;
-    probe.rightStick.x = 128;
-    probe.rightStick.y = 128;
+    gp_pad_neutral(&probe);
 
     int vr = scePadVirtualDeviceInsertData(dev_h, &probe);
     gp_log("[Ghostpad] GBND(prebind): direct InsertData devId=0x%x ret=0x%x\n",
@@ -650,11 +623,8 @@ int main(void) {
     if (mbus_handle) {
         g_mbus_bind_device_with_user_id =
             (GhostpadMbusBindDeviceWithUserIdFn)dlsym(mbus_handle, "sceMbusBindDeviceWithUserId");
-        g_mbus_disconnect_device =
-            (GhostpadMbusDisconnectDeviceFn)dlsym(mbus_handle, "sceMbusDisconnectDevice");
-        gp_log("[Ghostpad] dlsym(libSceMbus): bind=%p disconnect=%p\n",
-               (void *)g_mbus_bind_device_with_user_id,
-               (void *)g_mbus_disconnect_device);
+        gp_log("[Ghostpad] dlsym(libSceMbus): bind=%p\n",
+               (void *)g_mbus_bind_device_with_user_id);
     }
 #endif
 
@@ -935,14 +905,8 @@ int main(void) {
             /* Auto-press Cross to dismiss the "who is using this controller?" dialog */
             {
                 ScePadData ap;
-                memset(&ap, 0, sizeof(ap));
-                ap.buttons           = SCE_PAD_BUTTON_CROSS;
-                ap.leftStick.x       = 128;
-                ap.leftStick.y       = 128;
-                ap.rightStick.x      = 128;
-                ap.rightStick.y      = 128;
-                ap.connected         = 1;
-                ap.quat.w            = 1.0f;
+                gp_pad_neutral(&ap);
+                ap.buttons = SCE_PAD_BUTTON_CROSS;
 
                 sleep(1);  /* wait for PS5 UI dialog to render */
                 ret = scePadVirtualDeviceInsertData(padHandle, &ap);
@@ -1199,13 +1163,7 @@ int main(void) {
                                     /* Direct VDI from our process using the raw deviceId */
                                     if (padHandle < 0) {
                                         ScePadData vdi_probe;
-                                        memset(&vdi_probe, 0, sizeof(vdi_probe));
-                                        vdi_probe.connected = 1;
-                                        vdi_probe.quat.w   = 1.0f;
-                                        vdi_probe.leftStick.x  = 128;
-                                        vdi_probe.leftStick.y  = 128;
-                                        vdi_probe.rightStick.x = 128;
-                                        vdi_probe.rightStick.y = 128;
+                                        gp_pad_neutral(&vdi_probe);
                                         int32_t dev_h = (int32_t)(vDevId & 0xffffffffu);
                                         int vr = scePadVirtualDeviceInsertData(dev_h, &vdi_probe);
                                         gp_log("[Ghostpad] direct-VDI from our process: devId=0x%x ret=0x%x\n",
@@ -1258,7 +1216,34 @@ int main(void) {
                                                 if (shellui_pad_direct_adopt_vdi_handle(shellui_pid,
                                                         shellui_args, dev_handle) == 0) {
                                                     gp_log("[Ghostpad] HVDI: adopted deviceId for direct SceShellCore VDI input\n");
-                                                } else {
+        } else {
+            /* VDA created device on MBus without local handle.
+             * On PS5 the device is created under userId=1 — try GetHandle there. */
+            if (vda_pending_mbus_bind) {
+                for (int _uid = 0; _uid < 3 && padHandle < 0; _uid++) {
+                    int32_t try_uid = (_uid == 0) ? 1 : (_uid == 1 ? (int32_t)0xffffffff : userId);
+                    for (int _idx = 0; _idx < 8 && padHandle < 0; _idx++) {
+                        padHandle = scePadGetHandle(try_uid, 3, _idx);
+                        if (padHandle >= 0)
+                            gp_log("[Ghostpad] post-VDA GetHandle(uid=0x%x,type=3,idx=%d)=0x%x\n",
+                                   (uint32_t)try_uid, _idx, padHandle);
+                    }
+                }
+                if (padHandle >= 0) {
+                    gp_log("[Ghostpad] recovered VDA handle via GetHandle: %d\n", padHandle);
+                    /* Auto-press Cross to dismiss assignment screen */
+                    ScePadData ap;
+                    gp_pad_neutral(&ap);
+                    ap.buttons = SCE_PAD_BUTTON_CROSS;
+                    sleep(1);
+                    ret = scePadVirtualDeviceInsertData(padHandle, &ap);
+                    gp_log("[Ghostpad] auto-press Cross (post-VDA): VDI ret=0x%08x\n", (uint32_t)ret);
+                    usleep(200000);
+                    ap.buttons = 0;
+                    scePadVirtualDeviceInsertData(padHandle, &ap);
+                    usleep(100000);
+                }
+            }
                                                     gp_log("[Ghostpad] HVDI: direct adopt of deviceId failed\n");
                                                 }
                                             }
@@ -1354,12 +1339,26 @@ int main(void) {
 
         {
             uint32_t ip = ntohl(clientAddr.sin_addr.s_addr);
-            gp_log("[Ghostpad] Connected: %d.%d.%d.%d\n",
-                   (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
-                   (ip >> 8)  & 0xFF, ip & 0xFF);
-            ghostpad_notify("Ghostpad: PC connected (%d.%d.%d.%d)",
-                   (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
-                   (ip >> 8)  & 0xFF, ip & 0xFF);
+        gp_log("[Ghostpad] Connected: %d.%d.%d.%d\n",
+               (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
+               (ip >> 8)  & 0xFF, ip & 0xFF);
+        ghostpad_notify("Ghostpad: PC connected (%d.%d.%d.%d)",
+               (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
+               (ip >> 8)  & 0xFF, ip & 0xFF);
+
+        /* Retry GetHandle on client connect — VDA device may be findable now */
+        if (padHandle < 0 && vda_pending_mbus_bind) {
+            for (int _uid = 0; _uid < 3 && padHandle < 0; _uid++) {
+                int32_t try_uid = (_uid == 0) ? 1 : (_uid == 1 ? (int32_t)0xffffffff : userId);
+                for (int _idx = 0; _idx < 8 && padHandle < 0; _idx++) {
+                    padHandle = scePadGetHandle(try_uid, 3, _idx);
+                    if (padHandle >= 0)
+                        gp_log("[Ghostpad] connect-retry GetHandle(uid=0x%x,type=3,idx=%d)=0x%x\n",
+                               (uint32_t)try_uid, _idx, padHandle);
+                }
+            }
+            if (padHandle >= 0) gp_log("[Ghostpad] recovered handle on client connect: %d\n", padHandle);
+        }
         }
 
         /* Disable Nagle for low-latency input */
@@ -1428,7 +1427,6 @@ int main(void) {
                 continue;
             }
 
-            /* Build ScePadData from packet */
             memset(&padData, 0, sizeof(padData));
             padData.buttons                = ntohl(pkt.buttons);
             padData.leftStick.x            = pkt.lx;
@@ -1438,10 +1436,23 @@ int main(void) {
             padData.analogButtons.l2       = pkt.l2;
             padData.analogButtons.r2       = pkt.r2;
             padData.connected              = 1;
-            padData.quat.w                 = 1.0f; /* identity quaternion */
+            padData.quat.w                 = 1.0f;
 
             /* Inject into pad — time the VDI call so we can measure its latency */
             {
+                /* Auto-press Cross on first packet to select user on PS5 */
+                if (pktCount == 0 && padHandle >= 0) {
+                    ScePadData cross_pkt;
+                    gp_pad_neutral(&cross_pkt);
+                    cross_pkt.buttons = SCE_PAD_BUTTON_CROSS;
+                    scePadVirtualDeviceInsertData(padHandle, &cross_pkt);
+                    gp_log("[Ghostpad] auto-press Cross (first packet)\n");
+                    usleep(200000);
+                    cross_pkt.buttons = 0;
+                    scePadVirtualDeviceInsertData(padHandle, &cross_pkt);
+                    usleep(100000);
+                }
+
                 int is_press = (padData.buttons != 0);
                 struct timeval vdi_t1, vdi_t2;
                 uint64_t vdi_us = 0;
@@ -1495,12 +1506,7 @@ int main(void) {
         clientFd = -1;
 
         /* Zero out / center controller state after disconnect */
-        memset(&padData, 0, sizeof(padData));
-        padData.leftStick.x  = 128;
-        padData.leftStick.y  = 128;
-        padData.rightStick.x = 128;
-        padData.rightStick.y = 128;
-        padData.quat.w       = 1.0f;
+        gp_pad_neutral(&padData);
         if (padHandle >= 0) {
             scePadVirtualDeviceInsertData(padHandle, &padData);
         } else if (shellui_args != 0) {

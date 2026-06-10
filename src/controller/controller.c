@@ -15,8 +15,13 @@
 #include <sys/ioctl.h>
 #include <dev/usb/usb_endian.h>
 
+/* Persistent log sink for scan diagnostics (mirrors ghostpad_status.log) */
+extern void ghostpad_status_log(const char *fmt, ...);
+#define SLOG(...) ghostpad_status_log("[GC] " __VA_ARGS__)
+
 /* ── Per-controller ops (defined in each controller .c) ──────────────── */
 extern const CtrlOps g_ctrl_ds4_ops;
+extern const CtrlOps g_ctrl_ds3_ops;
 extern const CtrlOps g_ctrl_xbox_ops;
 extern const CtrlOps g_ctrl_nintendo_ops;
 extern const CtrlOps g_ctrl_generic_ops;
@@ -64,8 +69,13 @@ int usb_send_cmd(int fd, struct usb_fs_endpoint *ep, uint8_t a, uint8_t b)
 /* ── Registry ─────────────────────────────────────────────────────────── */
 
 static const CtrlDesc g_registry[] = {
-    { VID_SONY,   0x0000, "DualShock 4 / DS4-compatible", &g_ctrl_ds4_ops, 64u, 0, 0 },
-    { VID_HORI,   0x0000, "HORIPAD / DS4-compatible",      &g_ctrl_ds4_ops, 64u, 0, 0 },
+    { VID_SONY,   0x05C4, "DualShock 4 V1",              &g_ctrl_ds4_ops, 64u, 0, 0 },
+    { VID_SONY,   0x09CC, "DualShock 4 V2",              &g_ctrl_ds4_ops, 64u, 0, 0 },
+    { VID_SONY,   0x0268, "DualShock 3",                 &g_ctrl_ds3_ops, 64u, 0, 0 },
+    { VID_SONY,   0x02A1, "DualShock 3 / Sixaxis",       &g_ctrl_ds3_ops, 64u, 0, 0 },
+    { VID_SONY,   0x042F, "PS3 Navigation Controller",   &g_ctrl_ds3_ops, 64u, 0, 0 },
+    { VID_SONY,   0x03D5, "PS3 Move Controller",         &g_ctrl_ds3_ops, 64u, 0, 0 },
+    { VID_HORI,   0x0000, "HORIPAD / DS4-compatible",     &g_ctrl_ds4_ops, 64u, 0, 0 },
     { VID_XBOX,   PID_XBOX, "Xbox One / Series",           &g_ctrl_xbox_ops, 64u, 0, 0 },
     { VID_SWITCH, PID_SWITCH, "Nintendo Switch Pro / 8BitDo", &g_ctrl_nintendo_ops, 64u, 0, 0 },
     { VID_LOGITECH, 0x0000, "Logitech HID Gamepad", &g_ctrl_logitech_ops, 64u, 4,
@@ -111,24 +121,26 @@ const CtrlDesc *ctrl_lookup(uint16_t vid, uint16_t pid)
 
 const CtrlDesc *ctrl_probe(const char *path, uint16_t *out_vid, uint16_t *out_pid)
 {
-    int fd = open(path, O_RDWR | O_NONBLOCK);
-    if (fd < 0) return NULL;
     *out_vid = 0; *out_pid = 0;
+
+    /* Safe path: descriptor read works on any bus */
+    int fd = open(path, O_RDWR | O_NONBLOCK);
+    if (fd < 0) fd = open(path, O_RDONLY | O_NONBLOCK);
+    if (fd < 0) { SLOG("scan: %s open failed errno=%d\n", path, errno); return NULL; }
 
     struct usb_device_descriptor desc;
     memset(&desc, 0, sizeof(desc));
     if (ioctl(fd, USB_GET_DEVICE_DESC, &desc) == 0) {
         uint16_t vid = UGETW(desc.idVendor);
         uint16_t pid = UGETW(desc.idProduct);
-        KLOG("scan: %s VID=0x%04x PID=0x%04x\n", path, vid, pid);
+        SLOG("scan: %s VID=0x%04x PID=0x%04x class=0x%02x\n", path, vid, pid, desc.bDeviceClass);
 
         struct usb_interface_descriptor iface;
         memset(&iface, 0, sizeof(iface));
         if (ioctl(fd, USB_GET_RX_INTERFACE_DESC, &iface) == 0 &&
             iface.bInterfaceSubClass == XBOX_GIP_SUBCLASS &&
             iface.bInterfaceProtocol == XBOX_GIP_PROTOCOL) {
-            KLOG("scan: %s GIP Xbox (sub=0x%02x proto=0x%02x)\n",
-                 path, iface.bInterfaceSubClass, iface.bInterfaceProtocol);
+            SLOG("scan: %s GIP Xbox\n", path);
             *out_vid = VID_XBOX; *out_pid = PID_XBOX;
             close(fd);
             return ctrl_lookup(VID_XBOX, PID_XBOX);
@@ -137,11 +149,10 @@ const CtrlDesc *ctrl_probe(const char *path, uint16_t *out_vid, uint16_t *out_pi
         const CtrlDesc *found = ctrl_lookup(vid, pid);
         if (found) { *out_vid = vid; *out_pid = pid; close(fd); return found; }
 
-        if (ctrl_is_external_ugen(path) &&
-            !ctrl_should_skip_unknown(desc.bDeviceClass, iface.bInterfaceClass,
+        if (!ctrl_should_skip_unknown(desc.bDeviceClass, iface.bInterfaceClass,
                                       iface.bInterfaceSubClass, iface.bInterfaceProtocol) &&
             iface.bInterfaceClass == 0x03) {
-            KLOG("scan: %s VID=0x%04x PID=0x%04x -> generic HID\n", path, vid, pid);
+            SLOG("scan: %s -> generic HID\n", path);
             *out_vid = vid; *out_pid = pid;
             close(fd);
             return &g_generic_hid_desc;
@@ -150,30 +161,41 @@ const CtrlDesc *ctrl_probe(const char *path, uint16_t *out_vid, uint16_t *out_pi
         return NULL;
     }
 
+    SLOG("scan: %s GET_DEVICE_DESC errno=%d — destructive probe\n", path, errno);
+
+    /* Destructive probe: only on external bus (ugen2+) to avoid yanking
+     * system drivers from internal devices (Bluetooth, disc drive, etc.). */
     if (!ctrl_is_external_ugen(path)) { close(fd); return NULL; }
 
     struct usb_fs_endpoint ep; struct usb_fs_init ini; struct usb_fs_uninit u;
     memset(&ep,0,sizeof(ep)); memset(&ini,0,sizeof(ini));
     ini.pEndpoints=&ep; ini.ep_index_max=1;
-    if (ioctl(fd,USB_FS_INIT,&ini)!=0) {close(fd);return NULL;}
+    if (ioctl(fd,USB_FS_INIT,&ini)!=0) { SLOG("scan: %s FS_INIT errno=%d\n",path,errno); close(fd); return NULL; }
     { int ii=0; ioctl(fd,USB_IFACE_DRIVER_DETACH,&ii);
       ii=1; ioctl(fd,USB_IFACE_DRIVER_DETACH,&ii);
       ii=2; ioctl(fd,USB_IFACE_DRIVER_DETACH,&ii); }
     struct usb_fs_open po; memset(&po,0,sizeof(po));
     po.ep_index=0; po.max_bufsize=64; po.max_frames=1;
+
+    /* Probe: Nintendo (ep=0x81, maxpkt=64) */
     po.ep_no=0x81;
     if(ioctl(fd,USB_FS_OPEN,&po)==0 && po.max_packet_length==64){
         struct usb_fs_close pc; memset(&pc,0,sizeof(pc)); pc.ep_index=0;
         ioctl(fd,USB_FS_CLOSE,&pc);
+        KLOG("scan: %s -> Nintendo (ep=0x81)\n", path);
         *out_vid=VID_SWITCH; *out_pid=PID_SWITCH; goto done_probe;
     }
+    /* Probe: Xbox (ep=0x82, maxpkt in 1..64) */
     memset(&po,0,sizeof(po)); po.ep_index=0; po.max_bufsize=64; po.max_frames=1;
     po.ep_no=0x82;
     if(ioctl(fd,USB_FS_OPEN,&po)==0 && po.max_packet_length>0 && po.max_packet_length<=64){
         struct usb_fs_close pc; memset(&pc,0,sizeof(pc)); pc.ep_index=0;
         ioctl(fd,USB_FS_CLOSE,&pc);
+        SLOG("scan: %s -> Xbox (ep=0x82)\n", path);
         *out_vid=VID_XBOX; *out_pid=PID_XBOX; goto done_probe;
     }
+
+    SLOG("scan: %s destructive probe — no known EP\n", path);
 done_probe:
     memset(&u,0,sizeof(u)); ioctl(fd,USB_FS_UNINIT,&u); close(fd);
     return ctrl_lookup(*out_vid,*out_pid);

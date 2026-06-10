@@ -42,6 +42,7 @@ SRC := main.c \
        shellui_pad.c \
        controller/controller.c \
        controller/ds4.c \
+       controller/ds3.c \
        controller/xbox.c \
        controller/nintendo.c \
        controller/generic.c \

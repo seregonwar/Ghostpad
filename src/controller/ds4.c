@@ -8,7 +8,9 @@
 
 int ds4_is_compatible_vidpid(uint16_t vid, uint16_t pid)
 {
-    if (vid == VID_SONY || vid == VID_HORI) return 1;
+    /* Sony DS4 V1/V2 — matched by exact PID in the registry above.
+     * Only check third-party entries here (HORI + JSON registry). */
+    if (vid == VID_HORI) return 1;
     return ctrl_registry_is_ds4(vid, pid);
 }
 

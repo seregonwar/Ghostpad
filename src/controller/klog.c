@@ -265,7 +265,15 @@ static void parse_line(const char *line) {
 static void *reader_thread(void *arg) {
     (void)arg;
     char buf[512], line[1024]; size_t ll = 0;
-    int fd = open("/dev/klog", O_RDONLY);
+    int fd = -1;
+
+    /* /dev/klog may be EBUSY if another payload left it open.
+     * Retry for up to 30s — the previous reader usually releases it. */
+    for (int retry = 0; retry < 150 && fd < 0; retry++) {
+        fd = open("/dev/klog", O_RDONLY);
+        if (fd < 0 && errno == EBUSY) { usleep(200000); continue; }
+        break;
+    }
     if (fd < 0) { KP_LOG("open /dev/klog failed errno=%d\n", errno); return NULL; }
     KP_LOG("capture started, backlog=%u\n", (unsigned)sizeof(g_bl_buf));
     while (1) {

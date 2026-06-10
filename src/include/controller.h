@@ -153,18 +153,25 @@ void ghostpad_notify(const char *fmt, ...) __attribute__((format(printf, 1, 2)))
 
 /* ── Shared inline helpers ────────────────────────────────────────────── */
 
-/* USB device lifecycle: open, detach drivers (ifaces 0..3), FS_INIT.
- * Returns fd on success, -1 on error.  eps array is zeroed + inited. */
-static inline int usb_dev_open(const char *path, struct usb_fs_endpoint eps[4], int ep_max) {
+/* USB device lifecycle: open, optionally detach drivers, FS_INIT.
+ * Pass detach=1 for external USB ports, detach=0 for internal bus devices
+ * (ugen0/ugen1) to avoid reset loops. */
+static inline int usb_dev_open_ex(const char *path, struct usb_fs_endpoint eps[4], int ep_max, int detach) {
     int fd = open(path, O_RDWR);
     if (fd < 0) return -1;
-    for (int i = 0; i < 4; i++) { int iface = i; ioctl(fd, USB_IFACE_DRIVER_DETACH, &iface); }
-    usleep(100000);
+    if (detach) {
+        for (int i = 0; i < 4; i++) { int iface = i; ioctl(fd, USB_IFACE_DRIVER_DETACH, &iface); }
+        usleep(100000);
+    }
     memset(eps, 0, sizeof(eps[0]) * 4);
     struct usb_fs_init init; memset(&init, 0, sizeof(init));
     init.pEndpoints = eps; init.ep_index_max = ep_max;
     if (ioctl(fd, USB_FS_INIT, &init) != 0) { close(fd); return -1; }
     return fd;
+}
+/* Default: with detach (existing callers unchanged) */
+static inline int usb_dev_open(const char *path, struct usb_fs_endpoint eps[4], int ep_max) {
+    return usb_dev_open_ex(path, eps, ep_max, 1);
 }
 
 /* Open one endpoint.  Returns 0 on success, -1 on error. */
