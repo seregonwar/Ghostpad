@@ -35,7 +35,7 @@ endif
 
 # ── COMPILATION FLAGS ─────────────────────────────────────────────────────
 
-CFLAGS  += -Wall -Wextra -g -O2 -fPIC -fno-stack-protector -I. -Icontroller/include -I../lib/sjson $(EXTRA_CFLAGS)
+CFLAGS  += -Wall -Wextra -g -O2 -fPIC -fno-stack-protector -I. -Iinclude -I../lib/sjson $(EXTRA_CFLAGS)
 LDFLAGS += -lScePad -lSceUserService -lpthread -ldl
 
 SRC := main.c \
@@ -47,7 +47,8 @@ SRC := main.c \
        controller/generic.c \
        controller/logitech.c \
        controller/ctrl_registry.c \
-       controller/ctrl_manager.c
+       controller/ctrl_manager.c \
+       controller/klog.c
 
 # ── RULES ─────────────────────────────────────────────────────────────────
 

@@ -14,5 +14,5 @@
 
 int  ctrl_manager_init(int32_t userId, int32_t injectUid);
 int  ctrl_manager_start(void);
-void ctrl_manager_on_device_id(uint64_t dev_id);
+void ctrl_manager_on_device_id(uint64_t dev_id, void *ctx);
 void ctrl_manager_cleanup(void);

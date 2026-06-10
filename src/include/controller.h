@@ -1,16 +1,25 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  * controller.h — USB controller abstraction module
  *
- * Single public header.  Everything the rest of Ghostpad needs to work
- * with USB controllers is declared here: types, button constants,
- * controller ops, USB helpers, VID/PID defines, and the public API.
+ * Single public header.  Everything the rest of Ghostpad needs.
  */
 
 #pragma once
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
 #include <fcntl.h>
 #include <dev/usb/usb.h>
 #include <dev/usb/usb_ioctl.h>
+
+/* ── Logging macro (shared across all controller .c files) ────────────── */
+#ifdef __PROSPERO__
+#include <ps5/klog.h>
+#define KLOG(...) klog_printf("[GC] " __VA_ARGS__)
+#else
+#define KLOG(...) fprintf(stderr, __VA_ARGS__)
+#endif
 
 /* ── SCE pad button bitmask ───────────────────────────────────────────── */
 #define SCE_PAD_BUTTON_SHARE      0x00000001u
@@ -138,3 +147,76 @@ int ds4_is_compatible_vidpid(uint16_t vid, uint16_t pid);
 int usb_send_out(int fd, struct usb_fs_endpoint *ep,
                  const uint8_t *data, uint32_t len, const char *tag);
 int usb_send_cmd(int fd, struct usb_fs_endpoint *ep, uint8_t a, uint8_t b);
+
+/* ── PS5 toast notification (implemented in main.c) ───────────────────── */
+void ghostpad_notify(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
+/* ── Shared inline helpers ────────────────────────────────────────────── */
+
+/* USB device lifecycle: open, detach drivers (ifaces 0..3), FS_INIT.
+ * Returns fd on success, -1 on error.  eps array is zeroed + inited. */
+static inline int usb_dev_open(const char *path, struct usb_fs_endpoint eps[4], int ep_max) {
+    int fd = open(path, O_RDWR);
+    if (fd < 0) return -1;
+    for (int i = 0; i < 4; i++) { int iface = i; ioctl(fd, USB_IFACE_DRIVER_DETACH, &iface); }
+    usleep(100000);
+    memset(eps, 0, sizeof(eps[0]) * 4);
+    struct usb_fs_init init; memset(&init, 0, sizeof(init));
+    init.pEndpoints = eps; init.ep_index_max = ep_max;
+    if (ioctl(fd, USB_FS_INIT, &init) != 0) { close(fd); return -1; }
+    return fd;
+}
+
+/* Open one endpoint.  Returns 0 on success, -1 on error. */
+static inline int usb_ep_open(int fd, struct usb_fs_endpoint eps[4], int idx, int ep_no, int maxpkt) {
+    (void)eps;
+    struct usb_fs_open o; memset(&o, 0, sizeof(o));
+    o.ep_index = idx; o.ep_no = ep_no; o.max_bufsize = maxpkt; o.max_frames = 1;
+    return ioctl(fd, USB_FS_OPEN, &o);
+}
+
+/* Close device: stop+close all eps, FS_UNINIT, close fd. */
+static inline void usb_dev_close(int fd, struct usb_fs_endpoint eps[4], int ep_count) {
+    (void)eps;
+    for (int i = 0; i < ep_count; i++) {
+        struct usb_fs_stop  sp; memset(&sp, 0, sizeof(sp)); sp.ep_index = i;
+        ioctl(fd, USB_FS_STOP,  &sp);
+        struct usb_fs_close fc; memset(&fc, 0, sizeof(fc)); fc.ep_index = i;
+        ioctl(fd, USB_FS_CLOSE, &fc);
+    }
+    struct usb_fs_uninit u; memset(&u, 0, sizeof(u));
+    ioctl(fd, USB_FS_UNINIT, &u);
+    close(fd);
+}
+
+/* Initialise ScePadData to neutral (centered sticks, connected, identity quat) */
+static inline void gp_pad_neutral(ScePadData *p) {
+    p->buttons = 0;
+    p->leftStick.x = 128;  p->leftStick.y  = 128;
+    p->rightStick.x = 128; p->rightStick.y = 128;
+    p->analogButtons.l2 = 0; p->analogButtons.r2 = 0;
+    p->connected = 1;
+    p->quat.w = 1.0f;
+}
+
+/* Convert 8-direction hat (0=N..7=NW, 8=neutral) to SCE dpad bits */
+static inline uint32_t hat_to_dpad(uint8_t hat) {
+    static const uint32_t map[9] = {
+        SCE_PAD_BUTTON_UP,
+        SCE_PAD_BUTTON_UP    | SCE_PAD_BUTTON_RIGHT,
+        SCE_PAD_BUTTON_RIGHT,
+        SCE_PAD_BUTTON_DOWN  | SCE_PAD_BUTTON_RIGHT,
+        SCE_PAD_BUTTON_DOWN,
+        SCE_PAD_BUTTON_DOWN  | SCE_PAD_BUTTON_LEFT,
+        SCE_PAD_BUTTON_LEFT,
+        SCE_PAD_BUTTON_UP    | SCE_PAD_BUTTON_LEFT,
+        0u,
+    };
+    return (hat <= 8) ? map[hat] : 0u;
+}
+
+/* Scale 12-bit stick value (0-4095) to 8-bit (0-255) */
+static inline uint8_t stick_scale_12to8(uint16_t v) {
+    if (v > 4095) v = 4095;
+    return (uint8_t)((v * 255u) / 4095u);
+}

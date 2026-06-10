@@ -15,19 +15,15 @@
 #include <sys/ioctl.h>
 #include <dev/usb/usb_endian.h>
 
-#ifdef __PROSPERO__
-#include <ps5/klog.h>
-#define KLOG(...) klog_printf("[GC] " __VA_ARGS__)
-#else
-#define KLOG(...) fprintf(stderr, __VA_ARGS__)
-#endif
-
 /* ── Per-controller ops (defined in each controller .c) ──────────────── */
 extern const CtrlOps g_ctrl_ds4_ops;
 extern const CtrlOps g_ctrl_xbox_ops;
 extern const CtrlOps g_ctrl_nintendo_ops;
 extern const CtrlOps g_ctrl_generic_ops;
 extern const CtrlOps g_ctrl_logitech_ops;
+
+/* Single extern for VDI — used in ctrl_run's while loop */
+extern int32_t scePadVirtualDeviceInsertData(int32_t handle, const void *padData);
 
 /* ── USB helpers ──────────────────────────────────────────────────────── */
 
@@ -298,7 +294,7 @@ int ctrl_run(const char *path, const CtrlDesc *desc,
             if(poll(&pfd,1,50)<=0){
                 if(cache_ok){
                     if(cv&&++ndc>=2){cp.buttons=0;cp.analogButtons.l2=0;cp.analogButtons.r2=0;}
-                    if(cv){extern int32_t scePadVirtualDeviceInsertData(int32_t,const void*);scePadVirtualDeviceInsertData(vdi_handle,&cp);}
+                    if(cv){scePadVirtualDeviceInsertData(vdi_handle,&cp);}
                 }
                 continue;
             }
@@ -311,7 +307,7 @@ int ctrl_run(const char *path, const CtrlDesc *desc,
         if(n==0){
             if(cache_ok){
                 if(cv&&++ndc>=2){cp.buttons=0;cp.analogButtons.l2=0;cp.analogButtons.r2=0;}
-                if(cv){extern int32_t scePadVirtualDeviceInsertData(int32_t,const void*);scePadVirtualDeviceInsertData(vdi_handle,&cp);}
+                if(cv){scePadVirtualDeviceInsertData(vdi_handle,&cp);}
             }
             continue;
         }
@@ -321,7 +317,7 @@ int ctrl_run(const char *path, const CtrlDesc *desc,
         if(pr<0){KLOG("slot[%d] parse err\n",slot);break;}
         if(pr==0) goto after;
 
-        {extern int32_t scePadVirtualDeviceInsertData(int32_t,const void*);scePadVirtualDeviceInsertData(vdi_handle,&pd);}
+        scePadVirtualDeviceInsertData(vdi_handle,&pd);
         inj++;
         if(cache_ok){memcpy(&cp,&pd,sizeof(cp));cv=1;ndc=0;}
         if(on_frame) on_frame(slot,&pd);
@@ -333,11 +329,6 @@ after:
     KLOG("slot[%d] %s exit (%u frames)\n",slot,desc->name,inj);
 
     if(desc->ops->deinit){desc->ops->deinit(fd,eps);}
-    else{
-        struct usb_fs_stop sp; memset(&sp,0,sizeof(sp)); sp.ep_index=0; ioctl(fd,USB_FS_STOP,&sp);
-        struct usb_fs_close fc; memset(&fc,0,sizeof(fc)); fc.ep_index=0; ioctl(fd,USB_FS_CLOSE,&fc);
-        struct usb_fs_uninit u; memset(&u,0,sizeof(u)); ioctl(fd,USB_FS_UNINIT,&u);
-        if(fd>=0)close(fd);
-    }
+    else{ usb_dev_close(fd, eps, 1); }
     return 0;
 }

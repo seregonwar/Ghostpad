@@ -16,19 +16,13 @@
 #define JSON_MAX_ARRAY_LEN    256     /* max entries per category */
 #include "json_pal.h"
 
+#include "controller.h"
 #include "ctrl_registry.h"
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
-
-#ifdef __PROSPERO__
-#include <ps5/klog.h>
-#define KLOG(...) klog_printf("[GC] " __VA_ARGS__)
-#else
-#define KLOG(...) fprintf(stderr, __VA_ARGS__)
-#endif
 
 #define JSON_PATH "/data/ghostpad/controllers.json"
 #define MAX_ENTRIES   256

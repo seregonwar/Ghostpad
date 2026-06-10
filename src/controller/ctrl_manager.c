@@ -8,6 +8,7 @@
 #include "ctrl_manager.h"
 #include "controller.h"
 #include "ctrl_registry.h"
+#include "klog.h"
 #include <unistd.h>
 #include "../shellui_pad.h"
 
@@ -35,7 +36,6 @@
 extern int32_t scePadGetHandle(int32_t userId, int32_t type, int32_t index);
 extern int32_t scePadVirtualDeviceAddDevice(void *param, int32_t deviceType);
 extern int32_t scePadVirtualDeviceDeleteDevice(int32_t handle);
-extern int32_t sceKernelSendNotificationRequest(int unk0, void *req, size_t size, int unk1);
 
 #define VIRTUAL_DEVICE_TYPE_DUALSENSE 3
 
@@ -66,7 +66,8 @@ static uint64_t        g_klog_q[KLOG_QSIZE];
 static int             g_klog_qw = 0, g_klog_qr = 0;
 static pthread_mutex_t g_klog_lock = PTHREAD_MUTEX_INITIALIZER;
 
-void ctrl_manager_on_device_id(uint64_t id) {
+void ctrl_manager_on_device_id(uint64_t id, void *ctx) {
+    (void)ctx;
     if (!id) return;
     pthread_mutex_lock(&g_klog_lock);
     int next = (g_klog_qw + 1) % KLOG_QSIZE;
@@ -90,15 +91,7 @@ static uint64_t klog_dequeue_ms(int ms) {
 }
 
 /* ── Notification ─────────────────────────────────────────────────────── */
-
-typedef struct { char _unk[45]; char message[3075]; } NotifyRequest;
-
-static void notify(const char *fmt, ...) {
-    NotifyRequest req; va_list ap;
-    memset(&req, 0, sizeof(req));
-    va_start(ap, fmt); vsnprintf(req.message, sizeof(req.message), fmt, ap); va_end(ap);
-    sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
-}
+/* ghostpad_ghostpad_notify() is implemented in main.c, declared in controller.h */
 
 /* ── VDA creation for a slot ──────────────────────────────────────────── */
 
@@ -169,13 +162,13 @@ static void *usb_ctrl_thread(void *arg) {
     const char *json_name2 = ctrl_registry_get_name(g_slots[slot].vid, g_slots[slot].pid);
     const char *disp_name2 = json_name2 ? json_name2 : desc->name;
     gp_log("slot[%d] ctrl thread: %s (%s)\n", slot, dev_path, disp_name2);
-    notify("Ghostpad: slot[%d] %s streaming", slot, disp_name2);
+    ghostpad_notify("Ghostpad: slot[%d] %s streaming", slot, disp_name2);
 
     ctrl_run(dev_path, desc, g_slots[slot].handle, slot, on_controller_frame);
 
     /* Device disconnected */
     gp_log("slot[%d] ctrl thread exiting\n", slot);
-    notify("Ghostpad: slot[%d] disconnected", slot);
+    ghostpad_notify("Ghostpad: slot[%d] disconnected", slot);
     scePadVirtualDeviceDeleteDevice(g_slots[slot].handle);
 
     pthread_mutex_lock(&g_slot_lock);
@@ -244,7 +237,7 @@ static void *controller_manager_thread(void *arg) {
             const char *json_name = ctrl_registry_get_name(vid, pid);
             const char *disp_name = json_name ? json_name : desc->name;
             gp_log("manager: %s at %s -> slot[%d]\n", disp_name, path, slot);
-            notify("Ghostpad: %s connected", disp_name);
+            ghostpad_notify("Ghostpad: %s connected", disp_name);
 
             pthread_mutex_lock(&g_slot_lock);
             strncpy(g_slots[slot].dev_path, path, sizeof(g_slots[slot].dev_path)-1);
@@ -301,7 +294,7 @@ static void *controller_manager_thread(void *arg) {
                 pthread_detach(tid);
                 gp_log("manager: slot[%d] ctrl thread started handle=0x%x\n",
                        slot, (uint32_t)handle);
-                notify("Ghostcontrol: slot[%d] ready — press a button to assign", slot);
+                ghostpad_notify("Ghostcontrol: slot[%d] ready — press a button to assign", slot);
             }
             break;
         }
@@ -335,8 +328,8 @@ int ctrl_manager_init(int32_t userId, int32_t injectUid) {
 
     /* Load external VID/PID database.  If missing, disable USB detection. */
     if (ctrl_registry_init() != 0) {
-        notify("Ghostpad: controllers.json missing in /data/ghostpad/");
-        notify("Ghostpad: USB detection disabled — only TCP mode available");
+        ghostpad_notify("Ghostpad: controllers.json missing in /data/ghostpad/");
+        ghostpad_notify("Ghostpad: USB detection disabled — only TCP mode available");
         gp_log("manager: controllers.json not found — USB detection disabled\n");
         return -2;
     }

@@ -3,27 +3,11 @@
  */
 
 #include "controller.h"
-#include <errno.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/ioctl.h>
+#include <errno.h>
 
-#ifdef __PROSPERO__
-#include <ps5/klog.h>
-#define KLOG(...) klog_printf("[GC] " __VA_ARGS__)
-#else
-#define KLOG(...) fprintf(stderr, __VA_ARGS__)
-#endif
-
-static uint8_t ntoh_stick(uint16_t v){if(v>4095)v=4095;return(uint8_t)((v*255u)/4095u);}
-static uint8_t hat_dpad(uint8_t h){
-    switch(h){case 0:return SCE_PAD_BUTTON_UP;case 1:return SCE_PAD_BUTTON_UP|SCE_PAD_BUTTON_RIGHT;
-    case 2:return SCE_PAD_BUTTON_RIGHT;case 3:return SCE_PAD_BUTTON_DOWN|SCE_PAD_BUTTON_RIGHT;
-    case 4:return SCE_PAD_BUTTON_DOWN;case 5:return SCE_PAD_BUTTON_DOWN|SCE_PAD_BUTTON_LEFT;
-    case 6:return SCE_PAD_BUTTON_LEFT;case 7:return SCE_PAD_BUTTON_UP|SCE_PAD_BUTTON_LEFT;
-    default:return 0;}
-}
+/* log via controller.h KLOG macro, helpers via controller.h inlines */
 
 static int nintendo_send_subcmd(int fd, struct usb_fs_endpoint *ep,
                                 uint8_t *seq, uint8_t sc,
@@ -64,19 +48,18 @@ static int nintendo_parse(int fd, struct usb_fs_endpoint eps[4],
         if(bs&0x10)btn|=SCE_PAD_BUTTON_PS;if(bs&0x20)btn|=SCE_PAD_BUTTON_TOUCH_PAD;
         if(bl&0x02)btn|=SCE_PAD_BUTTON_UP;if(bl&0x01)btn|=SCE_PAD_BUTTON_DOWN;
         if(bl&0x04)btn|=SCE_PAD_BUTTON_RIGHT;if(bl&0x08)btn|=SCE_PAD_BUTTON_LEFT;
-        out->buttons=btn; out->leftStick.x=ntoh_stick(lx); out->leftStick.y=ntoh_stick(ly);
-        out->rightStick.x=ntoh_stick(rx); out->rightStick.y=ntoh_stick(ry);
+        out->buttons=btn; out->leftStick.x=stick_scale_12to8(lx); out->leftStick.y=stick_scale_12to8(ly);
+        out->rightStick.x=stick_scale_12to8(rx); out->rightStick.y=stick_scale_12to8(ry);
         out->analogButtons.l2=(bl&0x80)?255:0; out->analogButtons.r2=(br&0x80)?255:0;
         return 1;
     }
     if(rid==0x21&&len>=12){
-        KLOG("0x21 ACK sc=0x%02x hs=%d\n",(buf[12]&0x7f),*hs);
         if(*hs==HS_STREAMING) return nintendo_parse(fd,eps,buf,len,out,hs,seq);
         return 0;
     }
     if(rid==0x3f&&len>=9){
         uint8_t b1=buf[1],b2=buf[2],hat=buf[3],b8=buf[8];
-        uint32_t btn=hat_dpad(hat);
+        uint32_t btn=hat_to_dpad(hat);
         if(b1&0x04)btn|=SCE_PAD_BUTTON_CROSS;if(b1&0x08)btn|=SCE_PAD_BUTTON_CIRCLE;
         if(b1&0x01)btn|=SCE_PAD_BUTTON_SQUARE;if(b1&0x02)btn|=SCE_PAD_BUTTON_TRIANGLE;
         if(b8&0x40)btn|=SCE_PAD_BUTTON_L1;if(b8&0x80)btn|=SCE_PAD_BUTTON_L2;
@@ -90,7 +73,7 @@ static int nintendo_parse(int fd, struct usb_fs_endpoint eps[4],
         return 1;
     }
     if(rid==0x81){
-        if(*hs==HS_STREAMING){KLOG("0x81 reconnect\n");*hs=HS_WAIT_81_01;return 0;}
+        if(*hs==HS_STREAMING){*hs=HS_WAIT_81_01;return 0;}
         if(buf[1]==0x01&&*hs==HS_WAIT_81_01){usb_send_cmd(fd,&eps[1],0x80,0x02);*hs=HS_WAIT_81_02;}
         else if(buf[1]==0x02&&*hs<=HS_WAIT_81_02){
             usb_send_cmd(fd,&eps[1],0x80,0x04);
@@ -107,64 +90,47 @@ static int nintendo_parse(int fd, struct usb_fs_endpoint eps[4],
 }
 
 static int nintendo_init(const char *dev_path, int *fd_out,
-                         struct usb_fs_endpoint eps[4],
-                         int *hs_out, uint8_t *seq_out)
+                         struct usb_fs_endpoint eps[4], int *hs_out, uint8_t *seq_out)
 {
-    int fd=-1, dt; struct usb_fs_init init; struct usb_fs_open fs_open; struct usb_fs_uninit uninit;
+    int fd=-1, dt; struct usb_fs_uninit uninit;
     *hs_out=HS_WAIT_81_01; *seq_out=0;
 
-    fd=open(dev_path,O_RDWR); if(fd<0){KLOG("Nintendo open fail\n");return -1;}
+    /* Pass 1: confirm device */
+    fd=open(dev_path,O_RDWR); if(fd<0)return -1;
     memset(eps,0,sizeof(eps[0])*4);
-    memset(&init,0,sizeof(init)); init.pEndpoints=eps; init.ep_index_max=1;
-    if(ioctl(fd,USB_FS_INIT,&init)!=0){KLOG("Nintendo FS_INIT p1 fail\n");close(fd);return -1;}
+    struct usb_fs_init init; memset(&init,0,sizeof(init)); init.pEndpoints=eps; init.ep_index_max=1;
+    if(ioctl(fd,USB_FS_INIT,&init)!=0){close(fd);return -1;}
     {int i0=0,i1=1;ioctl(fd,USB_IFACE_DRIVER_DETACH,&i0);ioctl(fd,USB_IFACE_DRIVER_DETACH,&i1);}
-    memset(&fs_open,0,sizeof(fs_open)); fs_open.ep_index=0; fs_open.ep_no=0x81;
-    fs_open.max_bufsize=64; fs_open.max_frames=1;
-    if(ioctl(fd,USB_FS_OPEN,&fs_open)!=0){KLOG("Nintendo IN p1 fail\n");goto fail1;}
-    KLOG("Nintendo p1 ok maxpkt=%u\n",(unsigned)fs_open.max_packet_length);
-    memset(&uninit,0,sizeof(uninit)); ioctl(fd,USB_FS_UNINIT,&uninit); close(fd); fd=-1;
+    struct usb_fs_open fs_open; memset(&fs_open,0,sizeof(fs_open));
+    fs_open.ep_index=0;fs_open.ep_no=0x81;fs_open.max_bufsize=64;fs_open.max_frames=1;
+    if(ioctl(fd,USB_FS_OPEN,&fs_open)!=0){goto fail1;}
+    memset(&uninit,0,sizeof(uninit));ioctl(fd,USB_FS_UNINIT,&uninit);close(fd);fd=-1;
 
+    /* Pass 2: beat HID re-attach, open IN+OUT */
     for(dt=0;dt<5;dt++){
-        fd=open(dev_path,O_RDWR); if(fd<0){KLOG("Nintendo reopen fail\n");return -1;}
-        {int i0=0,i1=1,i2=2; ioctl(fd,USB_IFACE_DRIVER_DETACH,&i0);ioctl(fd,USB_IFACE_DRIVER_DETACH,&i1);ioctl(fd,USB_IFACE_DRIVER_DETACH,&i2);}
-        memset(eps,0,sizeof(eps[0])*4); memset(&init,0,sizeof(init)); init.pEndpoints=eps; init.ep_index_max=2;
+        fd=open(dev_path,O_RDWR); if(fd<0)return -1;
+        {int i0=0,i1=1,i2=2;ioctl(fd,USB_IFACE_DRIVER_DETACH,&i0);ioctl(fd,USB_IFACE_DRIVER_DETACH,&i1);ioctl(fd,USB_IFACE_DRIVER_DETACH,&i2);}
+        memset(eps,0,sizeof(eps[0])*4); memset(&init,0,sizeof(init)); init.pEndpoints=eps;init.ep_index_max=2;
         if(ioctl(fd,USB_FS_INIT,&init)!=0){close(fd);fd=-1;usleep(50000);continue;}
-        memset(&fs_open,0,sizeof(fs_open)); fs_open.ep_index=0; fs_open.ep_no=0x81;
-        fs_open.max_bufsize=64; fs_open.max_frames=1;
+        memset(&fs_open,0,sizeof(fs_open));fs_open.ep_index=0;fs_open.ep_no=0x81;fs_open.max_bufsize=64;fs_open.max_frames=1;
         if(ioctl(fd,USB_FS_OPEN,&fs_open)==0)break;
-        memset(&uninit,0,sizeof(uninit)); ioctl(fd,USB_FS_UNINIT,&uninit); close(fd);fd=-1;
-        KLOG("Nintendo p2 retry %d\n",dt); usleep(50000);
+        memset(&uninit,0,sizeof(uninit));ioctl(fd,USB_FS_UNINIT,&uninit);close(fd);fd=-1;usleep(50000);
     }
-    if(fd<0){KLOG("Nintendo p2 give up\n");return -1;}
-    KLOG("Nintendo p2 ok maxpkt=%u\n",(unsigned)fs_open.max_packet_length);
+    if(fd<0)return -1;
 
-    memset(&fs_open,0,sizeof(fs_open)); fs_open.ep_index=1; fs_open.ep_no=0x02;
-    fs_open.max_bufsize=64; fs_open.max_frames=1;
+    /* OUT: try 0x02 (8BitDo), then 0x01 (real Switch Pro) */
+    memset(&fs_open,0,sizeof(fs_open));fs_open.ep_index=1;fs_open.ep_no=0x02;fs_open.max_bufsize=64;fs_open.max_frames=1;
     if(ioctl(fd,USB_FS_OPEN,&fs_open)!=0){
-        memset(&fs_open,0,sizeof(fs_open)); fs_open.ep_index=1; fs_open.ep_no=0x01;
-        fs_open.max_bufsize=64; fs_open.max_frames=1;
-        if(ioctl(fd,USB_FS_OPEN,&fs_open)==0)KLOG("Nintendo OUT ep=0x01\n");
-    }else KLOG("Nintendo OUT ep=0x02\n");
-
-    usb_send_cmd(fd,&eps[1],0x80,0x02); usleep(30000);
-    usb_send_cmd(fd,&eps[1],0x80,0x04); usleep(50000);
-    KLOG("Nintendo [80 02]+[80 04] sent\n");
-    *hs_out=HS_WAIT_81_02;
-    *fd_out=fd; return 0;
-
-fail1:{struct usb_fs_uninit u;memset(&u,0,sizeof(u));ioctl(fd,USB_FS_UNINIT,&u);}close(fd);return -1;
+        memset(&fs_open,0,sizeof(fs_open));fs_open.ep_index=1;fs_open.ep_no=0x01;fs_open.max_bufsize=64;fs_open.max_frames=1;
+        ioctl(fd,USB_FS_OPEN,&fs_open);
+    }
+    usb_send_cmd(fd,&eps[1],0x80,0x02);usleep(30000);
+    usb_send_cmd(fd,&eps[1],0x80,0x04);usleep(50000);
+    *hs_out=HS_WAIT_81_02; *fd_out=fd; return 0;
+fail1:
+    {struct usb_fs_uninit u;memset(&u,0,sizeof(u));ioctl(fd,USB_FS_UNINIT,&u);}close(fd);return -1;
 }
 
-static void nintendo_deinit(int fd, struct usb_fs_endpoint eps[4])
-{
-    struct usb_fs_stop sp;struct usb_fs_close fc;struct usb_fs_uninit u;
-    memset(&sp,0,sizeof(sp));sp.ep_index=0;ioctl(fd,USB_FS_STOP,&sp);
-    memset(&sp,0,sizeof(sp));sp.ep_index=1;ioctl(fd,USB_FS_STOP,&sp);
-    memset(&fc,0,sizeof(fc));fc.ep_index=0;ioctl(fd,USB_FS_CLOSE,&fc);
-    memset(&fc,0,sizeof(fc));fc.ep_index=1;ioctl(fd,USB_FS_CLOSE,&fc);
-    memset(&u,0,sizeof(u));ioctl(fd,USB_FS_UNINIT,&u);close(fd);
-}
+static void nintendo_deinit(int fd, struct usb_fs_endpoint eps[4]) { usb_dev_close(fd, eps, 2); }
 
-const CtrlOps g_ctrl_nintendo_ops = {
-    .name="Nintendo Switch Pro/8BitDo", .init=nintendo_init, .parse=nintendo_parse, .deinit=nintendo_deinit,
-};
+const CtrlOps g_ctrl_nintendo_ops = { "Nintendo", nintendo_init, nintendo_parse, nintendo_deinit };
