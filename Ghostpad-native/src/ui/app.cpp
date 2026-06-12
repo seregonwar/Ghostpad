@@ -9,10 +9,20 @@
 #include "fa_solid_900_ttf.h"
 #include "imgui.h"
 #include "imgui_internal.h"
+#ifdef GHOSTPAD_CONSOLE
+#include <SDL2/SDL.h>
+#include "imgui_impl_ps4_sw.h"
+// imgui_impl_sdl2.h not needed for PS4SW
+#include "gl_stubs.h"
+#endif
 #ifndef GHOSTPAD_IOS
 #include "imgui_impl_glfw.h"
-#include "imgui_impl_opengl3.h"
+#ifdef GHOSTPAD_CONSOLE
+#include "glfw_console_stubs.h"
+#else
 #include "GLFW/glfw3.h"
+#include "imgui_impl_opengl3.h"
+#endif
 #endif
 #include <cstdio>
 #include <algorithm>
@@ -20,6 +30,11 @@
 #include <cmath>
 
 namespace ghostpad {
+#ifdef GHOSTPAD_CONSOLE
+extern SDL_Window*   g_sdl_window;
+extern SDL_Renderer* g_sdl_renderer;
+#define GHOSTPAD_HAS_SDL_RENDERER
+#endif
 extern void renderHomeScreen(App& app);
 extern void renderConsolesScreen(App& app);
 extern void renderSettingsScreen(App& app);
@@ -54,7 +69,7 @@ static ImGuiKey glfwKeyToImGuiKey(int glfw_key) {
 
 namespace ghostpad {
 
-#ifndef GHOSTPAD_IOS
+#if !defined(GHOSTPAD_IOS) && !defined(GHOSTPAD_CONSOLE)
 ImTextureID createControllerTexture(const unsigned char* pixels, int width, int height) {
     GLuint tex_id = 0;
     glGenTextures(1, &tex_id);
@@ -142,7 +157,10 @@ void App::init() {
 
     ui::applyGhostpadTheme();
 
-#ifndef GHOSTPAD_IOS
+#ifdef GHOSTPAD_CONSOLE
+    // Init handled in main_ps4.cpp
+    // PS4SW init already done in main
+#elif !defined(GHOSTPAD_IOS)
     ImGui_ImplGlfw_InitForOpenGL(g_window, true);
     ImGui_ImplOpenGL3_Init("#version 150");
     glfwShowWindow(g_window);
@@ -322,8 +340,13 @@ void App::render() {
         in_poll = false;
     }
 
+#ifdef GHOSTPAD_CONSOLE
+    ImGui_ImplPS4SW_NewFrame();
+    // Not needed for PS4SW
+#else
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
+#endif
 
     float scale = 1.0f;
     if (!gif_export_active_) {
@@ -415,9 +438,15 @@ void App::render() {
     glViewport(0, 0, dw, dh);
 
     if (gif_export_active_) {
+#ifdef GHOSTPAD_CONSOLE
+        // Clear handled in main loop
+        // Clear handled in main loop
+        ImGui_ImplPS4SW_RenderDrawData(ImGui::GetDrawData());
+#else
         glClearColor(0.07f, 0.07f, 0.08f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+#endif
 
         if (gif_frame_ready_) {
             gif_frame_ready_ = false;
@@ -455,7 +484,9 @@ void App::render() {
             std::vector<uint8_t> frame(cap_w * cap_h * 4, 0);
             if (read_w > 0 && read_h > 0) {
                 std::vector<uint8_t> fb_pixels(read_w * read_h * 4, 0);
-                glReadPixels(read_x, read_y, read_w, read_h, GL_RGBA, GL_UNSIGNED_BYTE, fb_pixels.data());
+                #ifndef GHOSTPAD_CONSOLE
+        glReadPixels(read_x, read_y, read_w, read_h, GL_RGBA, GL_UNSIGNED_BYTE, fb_pixels.data());
+#endif
 
                 int dest_x_offset = (orig_sc_read_x < 0) ? -orig_sc_read_x : 0;
                 int dest_y_offset = (orig_sc_read_y < 0) ? -orig_sc_read_y : 0;
@@ -483,24 +514,37 @@ void App::render() {
             gif_exporter_.addFrame(frame);
         }
     } else {
+#ifdef GHOSTPAD_CONSOLE
+        // Clear handled in main loop
+        // Clear handled in main loop
+        ImGui_ImplPS4SW_RenderDrawData(ImGui::GetDrawData());
+#else
         glClearColor(0.07f, 0.07f, 0.08f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+#endif
     }
 
+#ifdef GHOSTPAD_CONSOLE
+    // Present handled in main loop
+#else
     glfwSwapBuffers(g_window);
+#endif
 }
 #endif
 
 void App::shutdown() {
     disconnectAllGhostpad();
     deployer.stopKlogWatcher();
-#ifndef GHOSTPAD_IOS
+#ifdef GHOSTPAD_CONSOLE
+    // Shutdown handled in main_ps4.cpp
+    // Not needed for PS4SW
+#elif !defined(GHOSTPAD_IOS)
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
 #endif
     ImGui::DestroyContext();
-#ifndef GHOSTPAD_IOS
+#if !defined(GHOSTPAD_IOS) && !defined(GHOSTPAD_CONSOLE)
     if (g_window) { glfwDestroyWindow(g_window); g_window = nullptr; }
     glfwTerminate();
 #endif

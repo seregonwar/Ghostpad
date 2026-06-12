@@ -1,5 +1,6 @@
+#include "ghostpad_platform.h"
 #include "input/gamepad_input.h"
-#ifndef GHOSTPAD_IOS
+#if !defined(GHOSTPAD_IOS) && !defined(GHOSTPAD_CONSOLE)
 #include <GLFW/glfw3.h>
 #else
 #import <GameController/GameController.h>
@@ -81,7 +82,7 @@ GamepadInput::~GamepadInput() {
 }
 
 void GamepadInput::update() {
-#ifndef GHOSTPAD_IOS
+#if !defined(GHOSTPAD_IOS) && !defined(GHOSTPAD_CONSOLE)
     // GLFW polls gamepad states automatically via glfwPollEvents()
 #else
     // Refresh controller list from system
@@ -99,7 +100,7 @@ void GamepadInput::update() {
 
 std::vector<GamepadDevice> GamepadInput::listGamepads() const {
     std::vector<GamepadDevice> devices;
-#ifndef GHOSTPAD_IOS
+#if !defined(GHOSTPAD_IOS) && !defined(GHOSTPAD_CONSOLE)
     for (int i = GLFW_JOYSTICK_1; i <= GLFW_JOYSTICK_16; i++) {
         if (glfwJoystickPresent(i) && glfwJoystickIsGamepad(i)) {
             GamepadDevice d;
@@ -123,7 +124,7 @@ std::vector<GamepadDevice> GamepadInput::listGamepads() const {
     return devices;
 }
 
-#ifndef GHOSTPAD_IOS
+#if !defined(GHOSTPAD_IOS) && !defined(GHOSTPAD_CONSOLE)
 static int mapGlfwButtonToPS5(int glfw_button) {
     switch (glfw_button) {
         case GLFW_GAMEPAD_BUTTON_A: return 0;
@@ -148,7 +149,7 @@ static int mapGlfwButtonToPS5(int glfw_button) {
 
 PadStateInput GamepadInput::getPadState(int device_index) const {
     PadStateInput pad = {};
-#ifndef GHOSTPAD_IOS
+#if !defined(GHOSTPAD_IOS) && !defined(GHOSTPAD_CONSOLE)
     int joy = GLFW_JOYSTICK_1 + device_index;
 
     if (!glfwJoystickPresent(joy) || !glfwJoystickIsGamepad(joy)) {
@@ -250,7 +251,7 @@ PadStateInput GamepadInput::getPadState(int device_index) const {
 }
 
 bool GamepadInput::isButtonPressed(int device_index, int button) const {
-#ifndef GHOSTPAD_IOS
+#if !defined(GHOSTPAD_IOS) && !defined(GHOSTPAD_CONSOLE)
     int joy = GLFW_JOYSTICK_1 + device_index;
     if (!glfwJoystickPresent(joy) || !glfwJoystickIsGamepad(joy)) return false;
 
@@ -283,7 +284,7 @@ bool GamepadInput::isButtonPressed(int device_index, int button) const {
 }
 
 float GamepadInput::getAxis(int device_index, int axis) const {
-#ifndef GHOSTPAD_IOS
+#if !defined(GHOSTPAD_IOS) && !defined(GHOSTPAD_CONSOLE)
     int joy = GLFW_JOYSTICK_1 + device_index;
     if (!glfwJoystickPresent(joy) || !glfwJoystickIsGamepad(joy)) return 0.0f;
 

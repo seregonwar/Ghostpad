@@ -6,6 +6,8 @@
 // Licensed under the GNU General Public License v3.0. See LICENSE file for details.
 
 #include <cstdint>
+#include <vector>
+#include <map>
 #include <string>
 #include <functional>
 #include <atomic>

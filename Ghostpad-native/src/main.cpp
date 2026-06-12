@@ -4,6 +4,10 @@
 // Licensed under the GNU General Public License v3.0. See LICENSE file for details.
 
 #include "ui/app.h"
+#include "ghostpad_platform.h"
+#ifdef GHOSTPAD_CONSOLE
+#include <sys/time.h>
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <string>

@@ -22,7 +22,9 @@ namespace ghostpad {
  */
 #include "dualsense_solid_black_png.h"
 
+#ifndef GHOSTPAD_CONSOLE
 extern ImTextureID createControllerTexture(const unsigned char* pixels, int width, int height);
+#endif
 
 static ImTextureID g_controller_texture = 0;
 static int g_tex_w = 0;
@@ -51,7 +53,11 @@ static void loadControllerTexture() {
         data[i * 4 + 3] = max_val;
     }
 
+    #ifndef GHOSTPAD_CONSOLE
     g_controller_texture = createControllerTexture(data, width, height);
+#else
+    g_controller_texture = 0;
+#endif
     
     stbi_image_free(data);
 }

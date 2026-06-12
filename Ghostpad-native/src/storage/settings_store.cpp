@@ -44,7 +44,11 @@ static std::string getAppRoot() {
         result = p.parent_path().string();
     }
     return result;
+#elif defined(__ORBIS__)
+    // PS4/PS5 console: fixed data directory
+    return "/data/ghostpad";
 #else
+    // Linux/Unix: read /proc/self/exe
     char path[4096];
     ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
     if (len == -1) return ".";

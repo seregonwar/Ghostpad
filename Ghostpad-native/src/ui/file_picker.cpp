@@ -11,6 +11,17 @@
 #include <commdlg.h>
 #else
 #include <cstdlib>
+
+#include "ghostpad_platform.h"
+
+#ifdef GHOSTPAD_CONSOLE
+// PS4/PS5 console: no native file picker available
+std::string pickFile(const std::vector<std::string>& extensions) {
+    (void)extensions;
+    return "";  // Return empty string on console
+}
+#else
+
 #endif
 
 namespace ghostpad::ui {
@@ -80,3 +91,5 @@ std::string pickFile(const std::string& title, const std::string& filter_desc, c
 }
 
 } // namespace ghostpad::ui
+
+#endif // !GHOSTPAD_CONSOLE

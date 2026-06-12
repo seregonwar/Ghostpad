@@ -1,3 +1,4 @@
+#include "ghostpad_platform.h"
 // Ghostpad Native - PS5 Remote Controller
 // Copyright (c) 2026  seregonwar
 // Based on original Ghostpad by stonedmodder  
@@ -7,7 +8,7 @@
 #include "storage/profile_store.h"
 #include <algorithm>
 #include <cmath>
-#ifndef GHOSTPAD_IOS
+#if !defined(GHOSTPAD_IOS) && !defined(GHOSTPAD_CONSOLE)
 #include <GLFW/glfw3.h>
 #else
 // Define GLFW key codes for iOS compatibility

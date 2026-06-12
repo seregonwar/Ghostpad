@@ -30,3 +30,5 @@ Ghostpad-app/react/src/.DS_Store
 /Ghostpad-native/build_ios
 *.zip
 *.pid
+*.ps4bak
+/Ghostpad-native/ps4/build 2

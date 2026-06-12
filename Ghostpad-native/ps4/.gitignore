@@ -1,0 +1,6 @@
+build/
+eboot.bin
+*.pkg
+pkg.gp4
+sce_sys/param.sfo
+__pycache__/
